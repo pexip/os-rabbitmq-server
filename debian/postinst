@@ -39,6 +39,21 @@ case "$1" in
            [ ! -f /etc/rabbitmq/rabbitmq-env.conf ]; then
             mv /etc/rabbitmq/rabbitmq.conf /etc/rabbitmq/rabbitmq-env.conf
         fi
+
+        # Handle upgrade from a system with a broken hosts file (#1321)
+        if [ -f /etc/hosts ]; then
+            FQDN=$(env hostname)
+            HOSTNAME=${FQDN%%.*}
+
+            if [ "$FQDN" != "$HOSTNAME" ] && grep -qv "$FQDN $HOSTNAME" /etc/hosts; then
+                # Ensure puppet is not running
+                if [ -x /etc/init.d/puppet ] && /etc/init.d/puppet status >/dev/null 2>&1; then
+                    /etc/init.d/puppet stop
+                fi
+
+                sed -e "s/^\(.* $FQDN\)\$/\1 $HOSTNAME/" -i /etc/hosts
+            fi
+        fi
     ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)

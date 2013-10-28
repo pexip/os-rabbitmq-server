@@ -1,3 +1,9 @@
+rabbitmq-server (3.2.0-1pexip2) precise; urgency=low
+
+  * Fix issue #1321: massage hosts file on postinit
+
+ -- John-Mark Bell <jmb@pexip.com>  Sat, 26 Oct 2013 23:36:58 +0100
+
 rabbitmq-server (3.2.0-1pexip1) precise; urgency=low
 
   * Prepare Pexip backport
