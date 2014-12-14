@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 %% In practice Erlang shouldn't be allowed to grow to more than a half
@@ -36,6 +36,9 @@
          get_check_interval/0, set_check_interval/1,
          get_vm_memory_high_watermark/0, set_vm_memory_high_watermark/1,
          get_memory_limit/0]).
+
+%% for tests
+-export([parse_line_linux/1]).
 
 
 -define(SERVER, ?MODULE).
@@ -77,7 +80,15 @@
 %% Public API
 %%----------------------------------------------------------------------------
 
-get_total_memory() -> get_total_memory(os:type()).
+get_total_memory() ->
+    try
+        get_total_memory(os:type())
+    catch _:Error ->
+            rabbit_log:warning(
+              "Failed to get total system memory: ~n~p~n~p~n",
+              [Error, erlang:get_stacktrace()]),
+            unknown
+    end.
 
 get_vm_limit() -> get_vm_limit(os:type()).
 
@@ -173,16 +184,19 @@ set_mem_limits(State, MemFraction) ->
                 ?MEMORY_SIZE_FOR_UNKNOWN_OS;
             M -> M
         end,
-    UsableMemory = case get_vm_limit() of
-                       Limit when Limit < TotalMemory ->
-                           error_logger:warning_msg(
-                             "Only ~pMB of ~pMB memory usable due to "
-                             "limited address space.~n",
-                             [trunc(V/?ONE_MB) || V <- [Limit, TotalMemory]]),
-                           Limit;
-                       _ ->
-                           TotalMemory
-                   end,
+    UsableMemory =
+        case get_vm_limit() of
+            Limit when Limit < TotalMemory ->
+                error_logger:warning_msg(
+                  "Only ~pMB of ~pMB memory usable due to "
+                  "limited address space.~n"
+                  "Crashes due to memory exhaustion are possible - see~n"
+                  "http://www.rabbitmq.com/memory.html#address-space~n",
+                  [trunc(V/?ONE_MB) || V <- [Limit, TotalMemory]]),
+                Limit;
+            _ ->
+                TotalMemory
+        end,
     MemLim = trunc(MemFraction * UsableMemory),
     error_logger:info_msg("Memory limit set to ~pMB of ~pMB total.~n",
                           [trunc(MemLim/?ONE_MB), trunc(TotalMemory/?ONE_MB)]),
@@ -221,11 +235,11 @@ get_vm_limit({win32,_OSname}) ->
         8 -> 8*1024*1024*1024*1024      %% 8 TB for 64 bits  2^42
     end;
 
-%% On a 32-bit machine, if you're using more than 4 gigs of RAM you're
+%% On a 32-bit machine, if you're using more than 2 gigs of RAM you're
 %% in big trouble anyway.
 get_vm_limit(_OsType) ->
     case erlang:system_info(wordsize) of
-        4 -> 4*1024*1024*1024;          %% 4 GB for 32 bits  2^32
+        4 -> 2*1024*1024*1024;          %% 2 GB for 32 bits  2^31
         8 -> 256*1024*1024*1024*1024    %% 256 TB for 64 bits 2^48
              %%http://en.wikipedia.org/wiki/X86-64#Virtual_address_space_details
     end.
@@ -303,14 +317,24 @@ parse_line_mach(Line) ->
             {list_to_atom(Name), list_to_integer(Value)}
     end.
 
-%% A line looks like "FooBar: 123456 kB"
+%% A line looks like "MemTotal:         502968 kB"
+%% or (with broken OS/modules) "Readahead      123456 kB"
 parse_line_linux(Line) ->
-    [Name, RHS | _Rest] = string:tokens(Line, ":"),
-    [Value | UnitsRest] = string:tokens(RHS, " "),
-    Value1 = case UnitsRest of
-                 [] -> list_to_integer(Value); %% no units
-                 ["kB"] -> list_to_integer(Value) * 1024
-             end,
+    {Name, Value, UnitRest} =
+        case string:tokens(Line, ":") of
+            %% no colon in the line
+            [S] ->
+                [K, RHS] = re:split(S, "\s", [{parts, 2}, {return, list}]),
+                [V | Unit] = string:tokens(RHS, " "),
+                {K, V, Unit};
+            [K, RHS | _Rest] ->
+                [V | Unit] = string:tokens(RHS, " "),
+                {K, V, Unit}
+        end,
+    Value1 = case UnitRest of
+        []     -> list_to_integer(Value); %% no units
+        ["kB"] -> list_to_integer(Value) * 1024
+    end,
     {list_to_atom(Name), Value1}.
 
 %% A line looks like "Memory size: 1024 Megabytes"

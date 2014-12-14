@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_node_monitor).
@@ -25,13 +25,14 @@
          update_cluster_status/0, reset_cluster_status/0]).
 -export([notify_node_up/0, notify_joined_cluster/0, notify_left_cluster/1]).
 -export([partitions/0, partitions/1, subscribe/1]).
+-export([pause_minority_guard/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
 
  %% Utils
--export([all_rabbit_nodes_up/0, run_outside_applications/1]).
+-export([all_rabbit_nodes_up/0, run_outside_applications/1, ping_all/0]).
 
 -define(SERVER, ?MODULE).
 -define(RABBIT_UP_RPC_TIMEOUT, 2000).
@@ -60,9 +61,11 @@
 -spec(partitions/0 :: () -> [node()]).
 -spec(partitions/1 :: ([node()]) -> [{node(), [node()]}]).
 -spec(subscribe/1 :: (pid()) -> 'ok').
+-spec(pause_minority_guard/0 :: () -> 'ok' | 'pausing').
 
 -spec(all_rabbit_nodes_up/0 :: () -> boolean()).
 -spec(run_outside_applications/1 :: (fun (() -> any())) -> pid()).
+-spec(ping_all/0 :: () -> 'ok').
 
 -endif.
 
@@ -192,6 +195,47 @@ subscribe(Pid) ->
     gen_server:cast(?SERVER, {subscribe, Pid}).
 
 %%----------------------------------------------------------------------------
+%% pause_minority safety
+%%----------------------------------------------------------------------------
+
+%% If we are in a minority and pause_minority mode then a) we are
+%% going to shut down imminently and b) we should not confirm anything
+%% until then, since anything we confirm is likely to be lost.
+%%
+%% We could confirm something by having an HA queue see the minority
+%% state (and fail over into it) before the node monitor stops us, or
+%% by using unmirrored queues and just having them vanish (and
+%% confiming messages as thrown away).
+%%
+%% So we have channels call in here before issuing confirms, to do a
+%% lightweight check that we have not entered a minority state.
+
+pause_minority_guard() ->
+    case get(pause_minority_guard) of
+        not_minority_mode ->
+            ok;
+        undefined ->
+            {ok, M} = application:get_env(rabbit, cluster_partition_handling),
+            case M of
+                pause_minority -> pause_minority_guard([]);
+                _              -> put(pause_minority_guard, not_minority_mode),
+                                  ok
+            end;
+        {minority_mode, Nodes} ->
+            pause_minority_guard(Nodes)
+    end.
+
+pause_minority_guard(LastNodes) ->
+    case nodes() of
+        LastNodes -> ok;
+        _         -> put(pause_minority_guard, {minority_mode, nodes()}),
+                     case majority() of
+                         false -> pausing;
+                         true  -> ok
+                     end
+    end.
+
+%%----------------------------------------------------------------------------
 %% gen_server callbacks
 %%----------------------------------------------------------------------------
 
@@ -201,7 +245,7 @@ init([]) ->
     %% writing out the cluster status files - bad things can then
     %% happen.
     process_flag(trap_exit, true),
-    net_kernel:monitor_nodes(true),
+    net_kernel:monitor_nodes(true, [nodedown_reason]),
     {ok, _} = mnesia:subscribe(system),
     {ok, #state{monitors    = pmon:new(),
                 subscribers = pmon:new(),
@@ -257,9 +301,8 @@ handle_info({'DOWN', _MRef, process, {rabbit, Node}, _Reason},
     rabbit_log:info("rabbit on node ~p down~n", [Node]),
     {AllNodes, DiscNodes, RunningNodes} = read_cluster_status(),
     write_cluster_status({AllNodes, DiscNodes, del_node(Node, RunningNodes)}),
-    ok = handle_dead_rabbit(Node),
     [P ! {node_down, Node} || P <- pmon:monitored(Subscribers)],
-    {noreply, handle_dead_rabbit_state(
+    {noreply, handle_dead_rabbit(
                 Node,
                 State#state{monitors = pmon:erase({rabbit, Node}, Monitors)})};
 
@@ -267,9 +310,10 @@ handle_info({'DOWN', _MRef, process, Pid, _Reason},
             State = #state{subscribers = Subscribers}) ->
     {noreply, State#state{subscribers = pmon:erase(Pid, Subscribers)}};
 
-handle_info({nodedown, Node}, State) ->
-    ok = handle_dead_node(Node),
-    {noreply, State};
+handle_info({nodedown, Node, Info}, State) ->
+    rabbit_log:info("node ~p down: ~p~n",
+                    [Node, proplists:get_value(nodedown_reason, Info)]),
+    {noreply, handle_dead_node(Node, State)};
 
 handle_info({mnesia_system_event,
              {inconsistent_database, running_partitioned_network, Node}},
@@ -301,12 +345,11 @@ handle_info(ping_nodes, State) ->
     %% to ping the nodes that are up, after all.
     State1 = State#state{down_ping_timer = undefined},
     Self = self(),
-    %% all_nodes_up() both pings all the nodes and tells us if we need to again.
-    %%
     %% We ping in a separate process since in a partition it might
     %% take some noticeable length of time and we don't want to block
     %% the node monitor for that long.
     spawn_link(fun () ->
+                       ping_all(),
                        case all_nodes_up() of
                            true  -> ok;
                            false -> Self ! ping_again
@@ -331,17 +374,7 @@ code_change(_OldVsn, State, _Extra) ->
 %% Functions that call the module specific hooks when nodes go up/down
 %%----------------------------------------------------------------------------
 
-%% TODO: This may turn out to be a performance hog when there are lots
-%% of nodes.  We really only need to execute some of these statements
-%% on *one* node, rather than all of them.
-handle_dead_rabbit(Node) ->
-    ok = rabbit_networking:on_node_down(Node),
-    ok = rabbit_amqqueue:on_node_down(Node),
-    ok = rabbit_alarm:on_node_down(Node),
-    ok = rabbit_mnesia:on_node_down(Node),
-    ok.
-
-handle_dead_node(_Node) ->
+handle_dead_node(Node, State = #state{autoheal = Autoheal}) ->
     %% In general in rabbit_node_monitor we care about whether the
     %% rabbit application is up rather than the node; we do this so
     %% that we can respond in the same way to "rabbitmqctl stop_app"
@@ -356,24 +389,24 @@ handle_dead_node(_Node) ->
             case majority() of
                 true  -> ok;
                 false -> await_cluster_recovery()
-            end;
+            end,
+            State;
         {ok, ignore} ->
-            ok;
+            State;
         {ok, autoheal} ->
-            ok;
+            State#state{autoheal = rabbit_autoheal:node_down(Node, Autoheal)};
         {ok, Term} ->
             rabbit_log:warning("cluster_partition_handling ~p unrecognised, "
                                "assuming 'ignore'~n", [Term]),
-            ok
+            State
     end.
 
 await_cluster_recovery() ->
     rabbit_log:warning("Cluster minority status detected - awaiting recovery~n",
                        []),
-    Nodes = rabbit_mnesia:cluster_nodes(all),
     run_outside_applications(fun () ->
                                      rabbit:stop(),
-                                     wait_for_cluster_recovery(Nodes)
+                                     wait_for_cluster_recovery()
                              end),
     ok.
 
@@ -390,15 +423,23 @@ run_outside_applications(Fun) ->
                   end
           end).
 
-wait_for_cluster_recovery(Nodes) ->
+wait_for_cluster_recovery() ->
+    ping_all(),
     case majority() of
         true  -> rabbit:start();
         false -> timer:sleep(?RABBIT_DOWN_PING_INTERVAL),
-                 wait_for_cluster_recovery(Nodes)
+                 wait_for_cluster_recovery()
     end.
 
-handle_dead_rabbit_state(Node, State = #state{partitions = Partitions,
-                                              autoheal   = Autoheal}) ->
+handle_dead_rabbit(Node, State = #state{partitions = Partitions,
+                                        autoheal   = Autoheal}) ->
+    %% TODO: This may turn out to be a performance hog when there are
+    %% lots of nodes.  We really only need to execute some of these
+    %% statements on *one* node, rather than all of them.
+    ok = rabbit_networking:on_node_down(Node),
+    ok = rabbit_amqqueue:on_node_down(Node),
+    ok = rabbit_alarm:on_node_down(Node),
+    ok = rabbit_mnesia:on_node_down(Node),
     %% If we have been partitioned, and we are now in the only remaining
     %% partition, we no longer care about partitions - forget them. Note
     %% that we do not attempt to deal with individual (other) partitions
@@ -410,7 +451,7 @@ handle_dead_rabbit_state(Node, State = #state{partitions = Partitions,
                   end,
     ensure_ping_timer(
       State#state{partitions = Partitions1,
-                  autoheal   = rabbit_autoheal:node_down(Node, Autoheal)}).
+                  autoheal   = rabbit_autoheal:rabbit_down(Node, Autoheal)}).
 
 ensure_ping_timer(State) ->
     rabbit_misc:ensure_timer(
@@ -455,6 +496,11 @@ del_node(Node, Nodes) -> Nodes -- [Node].
 %% functions here. "rabbit" in a function's name implies we test if
 %% the rabbit application is up, not just the node.
 
+%% As we use these functions to decide what to do in pause_minority
+%% state, they *must* be fast, even in the case where TCP connections
+%% are timing out. So that means we should be careful about whether we
+%% connect to nodes which are currently disconnected.
+
 majority() ->
     Nodes = rabbit_mnesia:cluster_nodes(all),
     length(alive_nodes(Nodes)) / length(Nodes) > 0.5.
@@ -467,9 +513,14 @@ all_rabbit_nodes_up() ->
     Nodes = rabbit_mnesia:cluster_nodes(all),
     length(alive_rabbit_nodes(Nodes)) =:= length(Nodes).
 
-alive_nodes(Nodes) -> [N || N <- Nodes, pong =:= net_adm:ping(N)].
+alive_nodes(Nodes) -> [N || N <- Nodes, lists:member(N, [node()|nodes()])].
 
 alive_rabbit_nodes() -> alive_rabbit_nodes(rabbit_mnesia:cluster_nodes(all)).
 
 alive_rabbit_nodes(Nodes) ->
     [N || N <- alive_nodes(Nodes), rabbit:is_running(N)].
+
+%% This one is allowed to connect!
+ping_all() ->
+    [net_adm:ping(N) || N <- rabbit_mnesia:cluster_nodes(all)],
+    ok.

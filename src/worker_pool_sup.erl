@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(worker_pool_sup).
@@ -49,5 +49,5 @@ init([WCount]) ->
     {ok, {{one_for_one, 10, 10},
           [{worker_pool, {worker_pool, start_link, []}, transient,
             16#ffffffff, worker, [worker_pool]} |
-           [{N, {worker_pool_worker, start_link, [N]}, transient, 16#ffffffff,
+           [{N, {worker_pool_worker, start_link, []}, transient, 16#ffffffff,
              worker, [worker_pool_worker]} || N <- lists:seq(1, WCount)]]}}.

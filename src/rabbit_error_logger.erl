@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_error_logger).
@@ -26,6 +26,8 @@
 
 -export([init/1, terminate/2, code_change/3, handle_call/2, handle_event/2,
          handle_info/2]).
+
+-import(rabbit_error_logger_file_h, [safe_handle_event/3]).
 
 %%----------------------------------------------------------------------------
 
@@ -51,7 +53,7 @@ stop() ->
 init([DefaultVHost]) ->
     #exchange{} = rabbit_exchange:declare(
                     rabbit_misc:r(DefaultVHost, exchange, ?LOG_EXCH_NAME),
-                    topic, true, false, false, []),
+                    topic, true, false, true, []),
     {ok, #resource{virtual_host = DefaultVHost,
                    kind = exchange,
                    name = ?LOG_EXCH_NAME}}.
@@ -65,10 +67,13 @@ code_change(_OldVsn, State, _Extra) ->
 handle_call(_Request, State) ->
     {ok, not_understood, State}.
 
-handle_event({Kind, _Gleader, {_Pid, Format, Data}}, State) ->
+handle_event(Event, State) ->
+    safe_handle_event(fun handle_event0/2, Event, State).
+
+handle_event0({Kind, _Gleader, {_Pid, Format, Data}}, State) ->
     ok = publish(Kind, Format, Data, State),
     {ok, State};
-handle_event(_Event, State) ->
+handle_event0(_Event, State) ->
     {ok, State}.
 
 handle_info(_Info, State) ->
@@ -87,9 +92,11 @@ publish1(RoutingKey, Format, Data, LogExch) ->
     %% 0-9-1 says the timestamp is a "64 bit POSIX timestamp". That's
     %% second resolution, not millisecond.
     Timestamp = rabbit_misc:now_ms() div 1000,
-    {ok, _RoutingRes, _DeliveredQPids} =
+
+    Args = [truncate:term(A, ?LOG_TRUNC) || A <- Data],
+    {ok, _DeliveredQPids} =
         rabbit_basic:publish(LogExch, RoutingKey,
                              #'P_basic'{content_type = <<"text/plain">>,
                                         timestamp    = Timestamp},
-                             list_to_binary(io_lib:format(Format, Data))),
+                             list_to_binary(io_lib:format(Format, Args))),
     ok.

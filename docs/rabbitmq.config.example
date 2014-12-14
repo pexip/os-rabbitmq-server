@@ -44,6 +44,14 @@
    %% ==============
    %%
 
+   %% The default "guest" user is only permitted to access the server
+   %% via a loopback interface (e.g. localhost).
+   %% {loopback_users, [<<"guest">>]},
+   %%
+   %% Uncomment the following line if you want to allow access to the
+   %% guest user from anywhere on the network.
+   %% {loopback_users, []},
+
    %% Configuring SSL.
    %% See http://www.rabbitmq.com/ssl.html for full documentation.
    %%
@@ -138,6 +146,11 @@
    %%
    %% {frame_max, 131072},
 
+   %% Set the max permissible number of channels per connection.
+   %% 0 means "no limit".
+   %%
+   %% {channel_max, 128},
+
    %% Customising Socket Options.
    %%
    %% See (http://www.erlang.org/doc/man/inet.html#setopts-2) for
@@ -218,15 +231,7 @@
  %% See http://www.rabbitmq.com/clustering.html for details
  %% ----------------------------------------------------------------------------
  {kernel,
-  [%% Provide an explicit port-range for inter-node communications.
-   %% See http://www.rabbitmq.com/clustering.html#firewall for further details.
-
-   %% Sets the minimum / maximum port numbers
-   %%
-   %% {inet_dist_listen_min, 10000},
-   %% {inet_dist_listen_max, 10005},
-
-   %% Sets the net_kernel tick time.
+  [%% Sets the net_kernel tick time.
    %% Please see http://erlang.org/doc/man/kernel_app.html and
    %% http://www.rabbitmq.com/nettick.html for further details.
    %%
@@ -336,7 +341,7 @@
      %% {reconnect_delay, 2.5}
 
      %% ]} %% End of my_first_shovel
-    ]},
+    ]}
    %% Rather than specifying some values per-shovel, you can specify
    %% them for all shovels here.
    %%
@@ -488,6 +493,10 @@
    %% Specify the LDAP port to connect to
    %%
    %% {port, 389},
+
+   %% LDAP connection timeout, in milliseconds or 'infinity'
+   %%
+   %% {timeout, infinity},
 
    %% Enable logging of LDAP queries.
    %% One of

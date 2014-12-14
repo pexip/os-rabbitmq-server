@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Plugin.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2010-2013 GoPivotal, Inc.  All rights reserved.
+%%   Copyright (c) 2010-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_overview).
@@ -40,6 +40,7 @@ to_json(ReqData, Context = #context{user = User = #user{tags = Tags}}) ->
                  {statistics_level,    StatsLevel},
                  {exchange_types,      ExchangeTypes},
                  {rabbitmq_version,    version(rabbit)},
+                 {cluster_name,        rabbit_nodes:cluster_name()},
                  {erlang_version,      erl_version(otp_release)},
                  {erlang_full_version, erl_version(system_version)}],
     Range = rabbit_mgmt_util:range(ReqData),
@@ -47,14 +48,16 @@ to_json(ReqData, Context = #context{user = User = #user{tags = Tags}}) ->
         case rabbit_mgmt_util:is_monitor(Tags) of
             true ->
                 Overview0 ++
-                    rabbit_mgmt_db:get_overview(Range) ++
+                    [{K, {struct, V}} ||
+                        {K, V} <- rabbit_mgmt_db:get_overview(Range)] ++
                     [{node,               node()},
                      {statistics_db_node, stats_db_node()},
                      {listeners,          listeners()},
                      {contexts,           rabbit_web_dispatch_contexts()}];
             _ ->
                 Overview0 ++
-                    rabbit_mgmt_db:get_overview(User, Range)
+                    [{K, {struct, V}} ||
+                        {K, V} <- rabbit_mgmt_db:get_overview(User, Range)]
         end,
     rabbit_mgmt_util:reply(Overview, ReqData, Context).
 

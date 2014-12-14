@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_binding).
@@ -169,7 +169,7 @@ add(Binding, InnerFun) ->
                           ok ->
                               case mnesia:read({rabbit_route, B}) of
                                   []  -> add(Src, Dst, B);
-                                  [_] -> fun rabbit_misc:const_ok/0
+                                  [_] -> fun () -> ok end
                               end;
                           {error, _} = Err ->
                               rabbit_misc:const(Err)
@@ -200,13 +200,15 @@ remove(Binding, InnerFun) ->
     binding_action(
       Binding,
       fun (Src, Dst, B) ->
-              case mnesia:read(rabbit_route, B, write) =:= [] andalso
-                  mnesia:read(rabbit_durable_route, B, write) =/= [] of
-                  true  -> rabbit_misc:const({error, binding_not_found});
-                  false -> case InnerFun(Src, Dst) of
-                               ok               -> remove(Src, Dst, B);
-                               {error, _} = Err -> rabbit_misc:const(Err)
-                           end
+              case mnesia:read(rabbit_route, B, write) of
+                  [] -> case mnesia:read(rabbit_durable_route, B, write) of
+                            [] -> rabbit_misc:const(ok);
+                            _  -> rabbit_misc:const({error, binding_not_found})
+                        end;
+                  _  -> case InnerFun(Src, Dst) of
+                            ok               -> remove(Src, Dst, B);
+                            {error, _} = Err -> rabbit_misc:const(Err)
+                        end
               end
       end, fun absent_errs_only/1).
 

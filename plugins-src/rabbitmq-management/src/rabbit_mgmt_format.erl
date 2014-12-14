@@ -11,14 +11,14 @@
 %%   The Original Code is RabbitMQ Management Plugin.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2010-2013 GoPivotal, Inc.  All rights reserved.
+%%   Copyright (c) 2010-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_format).
 
 -export([format/2, print/2, remove/1, ip/1, ipb/1, amqp_table/1, tuple/1]).
 -export([parameter/1, timestamp/1, timestamp_ms/1, strip_pids/1]).
--export([node_from_pid/1, protocol/1, resource/1, queue/1, queue_status/1]).
+-export([node_from_pid/1, protocol/1, resource/1, queue/1, queue_state/1]).
 -export([exchange/1, user/1, internal_user/1, binding/1, url/2]).
 -export([pack_binding_props/2, tokenise/1]).
 -export([to_amqp_table/1, listener/1, properties/1, basic_properties/1]).
@@ -239,9 +239,9 @@ queue(#amqqueue{name            = Name,
        {fun amqp_table/1, [arguments]},
        {fun policy/1,     [policy]}]).
 
-queue_status({syncing, Msgs}) -> [{status,        syncing},
-                                  {sync_messages, Msgs}];
-queue_status(Status)          -> [{status,        Status}].
+queue_state({syncing, Msgs}) -> [{state,         syncing},
+                                 {sync_messages, Msgs}];
+queue_state(Status)          -> [{state,         Status}].
 
 %% We get bindings using rabbit_binding:list_*/1 rather than :info_all/1 since
 %% there are no per-exchange / queue / etc variants for the latter. Therefore
@@ -277,8 +277,16 @@ to_basic_properties({struct, P}) ->
     to_basic_properties(P);
 
 to_basic_properties(Props) ->
-    Fmt = fun (headers, H) -> to_amqp_table(H);
-              (_K     , V) -> V
+    E = fun (A, B) -> throw({error, {A, B}}) end,
+    Fmt = fun (headers,       H)                    -> to_amqp_table(H);
+              (delivery_mode, V) when is_integer(V) -> V;
+              (delivery_mode, _V)                   -> E(not_int,delivery_mode);
+              (priority,      V) when is_integer(V) -> V;
+              (priority,      _V)                   -> E(not_int, priority);
+              (timestamp,     V) when is_integer(V) -> V;
+              (timestamp,     _V)                   -> E(not_int, timestamp);
+              (_,             V) when is_binary(V)  -> V;
+              (K,            _V)                    -> E(not_string, K)
           end,
     {Res, _Ix} = lists:foldl(
                    fun (K, {P, Ix}) ->

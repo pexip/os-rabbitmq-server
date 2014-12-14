@@ -9,6 +9,7 @@ RABBIT_BIN=$(DEB_DESTDIR)usr/lib/rabbitmq/bin/
 DOCDIR=$(DEB_DESTDIR)usr/share/doc/rabbitmq-server/
 DEB_MAKE_INSTALL_TARGET := install TARGET_DIR=$(RABBIT_LIB) SBIN_DIR=$(RABBIT_BIN) DOC_INSTALL_DIR=$(DOCDIR) MAN_DIR=$(DEB_DESTDIR)usr/share/man/
 DEB_MAKE_CLEAN_TARGET:= distclean
+DEB_INSTALL_DOCS_ALL=debian/README
 
 install/rabbitmq-server::
 	mkdir -p $(DOCDIR)
@@ -19,3 +20,6 @@ install/rabbitmq-server::
 	sed -e 's|@RABBIT_LIB@|/usr/lib/rabbitmq/lib/rabbitmq_server-$(DEB_UPSTREAM_VERSION)|g' <debian/postrm.in >debian/postrm
 	install -p -D -m 0755 debian/rabbitmq-server.ocf $(DEB_DESTDIR)usr/lib/ocf/resource.d/rabbitmq/rabbitmq-server
 	install -p -D -m 0644 debian/rabbitmq-server.default $(DEB_DESTDIR)etc/default/rabbitmq-server
+
+clean::
+	rm -f plugins-src/rabbitmq-server debian/postrm plugins/README

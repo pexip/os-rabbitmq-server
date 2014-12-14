@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_tests).
@@ -33,13 +33,13 @@
 
 all_tests() ->
     ok = setup_cluster(),
+    ok = truncate:test(),
     ok = supervisor2_tests:test_all(),
     passed = gm_tests:all_tests(),
     passed = mirrored_supervisor_tests:all_tests(),
     application:set_env(rabbit, file_handles_high_watermark, 10, infinity),
     ok = file_handle_cache:set_limit(10),
     passed = test_version_equivalance(),
-    passed = test_multi_call(),
     passed = test_file_handle_cache(),
     passed = test_backing_queue(),
     passed = test_rabbit_basic_header_handling(),
@@ -66,6 +66,7 @@ all_tests() ->
     passed = test_amqp_connection_refusal(),
     passed = test_confirms(),
     passed = test_with_state(),
+    passed = test_mcall(),
     passed =
         do_if_secondary_node(
           fun run_cluster_dependent_tests/1,
@@ -75,6 +76,7 @@ all_tests() ->
                   passed
           end),
     passed = test_configurable_server_properties(),
+    passed = vm_memory_monitor_tests:all_tests(),
     passed.
 
 
@@ -89,19 +91,9 @@ do_if_secondary_node(Up, Down) ->
 setup_cluster() ->
     do_if_secondary_node(
       fun (SecondaryNode) ->
-              cover:stop(SecondaryNode),
               ok = control_action(stop_app, []),
-              %% 'cover' does not cope at all well with nodes disconnecting,
-              %% which happens as part of reset. So we turn it off
-              %% temporarily. That is ok even if we're not in general using
-              %% cover, it just turns the engine on / off and doesn't log
-              %% anything.  Note that this way cover won't be on when joining
-              %% the cluster, but this is OK since we're testing the clustering
-              %% interface elsewere anyway.
-              cover:stop(nodes()),
               ok = control_action(join_cluster,
                                   [atom_to_list(SecondaryNode)]),
-              cover:start(nodes()),
               ok = control_action(start_app, []),
               ok = control_action(start_app, SecondaryNode, [], [])
       end,
@@ -154,26 +146,6 @@ test_version_equivalance() ->
     false = rabbit_misc:version_minor_equivalent("3.0.0", "3.0"),
     false = rabbit_misc:version_minor_equivalent("3.0.0", "3.0.0.1"),
     false = rabbit_misc:version_minor_equivalent("3.0.0", "3.0.foo"),
-    passed.
-
-test_multi_call() ->
-    Fun = fun() ->
-                  receive
-                      {'$gen_call', {From, Mref}, request} ->
-                          From ! {Mref, response}
-                  end,
-                  receive
-                      never -> ok
-                  end
-          end,
-    Pid1 = spawn(Fun),
-    Pid2 = spawn(Fun),
-    Pid3 = spawn(Fun),
-    exit(Pid2, bang),
-    {[{Pid1, response}, {Pid3, response}], [{Pid2, _Fail}]} =
-        rabbit_misc:multi_call([Pid1, Pid2, Pid3], request),
-    exit(Pid1, bang),
-    exit(Pid3, bang),
     passed.
 
 test_rabbit_basic_header_handling() ->
@@ -449,7 +421,7 @@ test_table_codec() ->
              {<<"table">>,     table,     [{<<"one">>, signedint, 54321},
                                            {<<"two">>, longstr,
                                             <<"A long string">>}]},
-             {<<"byte">>,      byte,      255},
+             {<<"byte">>,      byte,      -128},
              {<<"long">>,      long,      1234567890},
              {<<"short">>,     short,     655},
              {<<"bool">>,      bool,      true},
@@ -466,7 +438,7 @@ test_table_codec() ->
                5,"table",     "F", 31:32, % length of table
                3,"one",       "I", 54321:32,
                3,"two",       "S", 13:32, "A long string",
-               4,"byte",      "b", 255:8,
+               4,"byte",      "b", -128:8/signed,
                4,"long",      "l", 1234567890:64,
                5,"short",     "s", 655:16,
                4,"bool",      "t", 1,
@@ -578,33 +550,38 @@ test_topic_matching() ->
                          key = list_to_binary(Key),
                          destination = #resource{virtual_host = <<"/">>,
                                                  kind = queue,
-                                                 name = list_to_binary(Q)}} ||
-                   {Key, Q} <- [{"a.b.c",         "t1"},
-                                {"a.*.c",         "t2"},
-                                {"a.#.b",         "t3"},
-                                {"a.b.b.c",       "t4"},
-                                {"#",             "t5"},
-                                {"#.#",           "t6"},
-                                {"#.b",           "t7"},
-                                {"*.*",           "t8"},
-                                {"a.*",           "t9"},
-                                {"*.b.c",         "t10"},
-                                {"a.#",           "t11"},
-                                {"a.#.#",         "t12"},
-                                {"b.b.c",         "t13"},
-                                {"a.b.b",         "t14"},
-                                {"a.b",           "t15"},
-                                {"b.c",           "t16"},
-                                {"",              "t17"},
-                                {"*.*.*",         "t18"},
-                                {"vodka.martini", "t19"},
-                                {"a.b.c",         "t20"},
-                                {"*.#",           "t21"},
-                                {"#.*.#",         "t22"},
-                                {"*.#.#",         "t23"},
-                                {"#.#.#",         "t24"},
-                                {"*",             "t25"},
-                                {"#.b.#",         "t26"}]],
+                                                 name = list_to_binary(Q)},
+                         args = Args} ||
+                   {Key, Q, Args} <- [{"a.b.c",         "t1",  []},
+                                      {"a.*.c",         "t2",  []},
+                                      {"a.#.b",         "t3",  []},
+                                      {"a.b.b.c",       "t4",  []},
+                                      {"#",             "t5",  []},
+                                      {"#.#",           "t6",  []},
+                                      {"#.b",           "t7",  []},
+                                      {"*.*",           "t8",  []},
+                                      {"a.*",           "t9",  []},
+                                      {"*.b.c",         "t10", []},
+                                      {"a.#",           "t11", []},
+                                      {"a.#.#",         "t12", []},
+                                      {"b.b.c",         "t13", []},
+                                      {"a.b.b",         "t14", []},
+                                      {"a.b",           "t15", []},
+                                      {"b.c",           "t16", []},
+                                      {"",              "t17", []},
+                                      {"*.*.*",         "t18", []},
+                                      {"vodka.martini", "t19", []},
+                                      {"a.b.c",         "t20", []},
+                                      {"*.#",           "t21", []},
+                                      {"#.*.#",         "t22", []},
+                                      {"*.#.#",         "t23", []},
+                                      {"#.#.#",         "t24", []},
+                                      {"*",             "t25", []},
+                                      {"#.b.#",         "t26", []},
+                                      {"args-test",     "t27",
+                                       [{<<"foo">>, longstr, <<"bar">>}]},
+                                      {"args-test",     "t27", %% Note aliasing
+                                       [{<<"foo">>, longstr, <<"baz">>}]}]],
     lists:foreach(fun (B) -> exchange_op_callback(X, add_binding, [B]) end,
                   Bindings),
 
@@ -631,12 +608,13 @@ test_topic_matching() ->
                                    "t22", "t23", "t24", "t26"]},
           {"nothing.here.at.all", ["t5", "t6", "t21", "t22", "t23", "t24"]},
           {"oneword",             ["t5", "t6", "t21", "t22", "t23", "t24",
-                                   "t25"]}]),
-
+                                   "t25"]},
+          {"args-test",           ["t5", "t6", "t21", "t22", "t23", "t24",
+                                   "t25", "t27"]}]),
     %% remove some bindings
     RemovedBindings = [lists:nth(1, Bindings), lists:nth(5, Bindings),
                        lists:nth(11, Bindings), lists:nth(19, Bindings),
-                       lists:nth(21, Bindings)],
+                       lists:nth(21, Bindings), lists:nth(28, Bindings)],
     exchange_op_callback(X, remove_bindings, [RemovedBindings]),
     RemainingBindings = ordsets:to_list(
                           ordsets:subtract(ordsets:from_list(Bindings),
@@ -659,7 +637,8 @@ test_topic_matching() ->
        {"b.b.c",               ["t6", "t10", "t13", "t18", "t22", "t23",
                                 "t24", "t26"]},
        {"nothing.here.at.all", ["t6", "t22", "t23", "t24"]},
-       {"oneword",             ["t6", "t22", "t23", "t24", "t25"]}]),
+       {"oneword",             ["t6", "t22", "t23", "t24", "t25"]},
+       {"args-test",           ["t6", "t22", "t23", "t24", "t25", "t27"]}]),
 
     %% remove the entire exchange
     exchange_op_callback(X, delete, [RemainingBindings]),
@@ -808,6 +787,7 @@ test_log_management_during_startup() ->
     %% start application with logging to non-existing directory
     TmpLog = "/tmp/rabbit-tests/test.log",
     delete_file(TmpLog),
+    ok = control_action(stop_app, []),
     ok = application:set_env(rabbit, error_logger, {file, TmpLog}),
 
     ok = delete_log_handlers([rabbit_error_logger_file_h]),
@@ -816,6 +796,7 @@ test_log_management_during_startup() ->
 
     %% start application with logging to directory with no
     %% write permissions
+    ok = control_action(stop_app, []),
     TmpDir = "/tmp/rabbit-tests",
     ok = set_permissions(TmpDir, 8#00400),
     ok = delete_log_handlers([rabbit_error_logger_file_h]),
@@ -830,6 +811,7 @@ test_log_management_during_startup() ->
 
     %% start application with logging to a subdirectory which
     %% parent directory has no write permissions
+    ok = control_action(stop_app, []),
     TmpTestDir = "/tmp/rabbit-tests/no-permission/test/log",
     ok = application:set_env(rabbit, error_logger, {file, TmpTestDir}),
     ok = add_log_handlers([{error_logger_file_h, MainLog}]),
@@ -849,12 +831,13 @@ test_log_management_during_startup() ->
 
     %% start application with standard error_logger_file_h
     %% handler not installed
+    ok = control_action(stop_app, []),
     ok = application:set_env(rabbit, error_logger, {file, MainLog}),
     ok = control_action(start_app, []),
-    ok = control_action(stop_app, []),
 
     %% start application with standard sasl handler not installed
     %% and rabbit main log handler installed correctly
+    ok = control_action(stop_app, []),
     ok = delete_log_handlers([rabbit_sasl_report_file_h]),
     ok = control_action(start_app, []),
     passed.
@@ -1038,6 +1021,9 @@ test_user_management() ->
     ok = control_action(add_vhost, ["/testhost"]),
     ok = control_action(set_permissions, ["foo", ".*", ".*", ".*"],
                         [{"-p", "/testhost"}]),
+    {new, _} = rabbit_amqqueue:declare(
+                 rabbit_misc:r(<<"/testhost">>, queue, <<"test">>),
+                 true, false, [], none),
     ok = control_action(delete_vhost, ["/testhost"]),
 
     %% user deletion
@@ -1068,11 +1054,13 @@ test_runtime_parameters() ->
     %% Test actual validation hook
     Good(["test", "maybe", "\"good\""]),
     Bad(["test", "maybe", "\"bad\""]),
+    Good(["test", "admin", "\"ignore\""]), %% ctl means 'user' -> none
 
     ok = control_action(list_parameters, []),
 
     ok = control_action(clear_parameter, ["test", "good"]),
     ok = control_action(clear_parameter, ["test", "maybe"]),
+    ok = control_action(clear_parameter, ["test", "admin"]),
     {error_string, _} =
         control_action(clear_parameter, ["test", "neverexisted"]),
 
@@ -1168,7 +1156,7 @@ test_server_status() ->
                                rabbit_misc:r(<<"/">>, queue, Name),
                                false, false, [], none)]],
     ok = rabbit_amqqueue:basic_consume(
-           Q, true, Ch, Limiter, false, <<"ctag">>, true, none, [], undefined),
+           Q, true, Ch, Limiter, false, 0, <<"ctag">>, true, [], undefined),
 
     %% list queues
     ok = info_action(list_queues, rabbit_amqqueue:info_keys(), true),
@@ -1242,7 +1230,8 @@ test_amqp_connection_refusal(Header) ->
 
 find_listener() ->
     [#listener{host = H, port = P} | _] =
-        [L || L = #listener{node = N} <- rabbit_networking:active_listeners(),
+        [L || L = #listener{node = N, protocol = amqp}
+                  <- rabbit_networking:active_listeners(),
               N =:= node()],
     {H, P}.
 
@@ -1258,7 +1247,7 @@ test_writer(Pid) ->
 test_channel() ->
     Me = self(),
     Writer = spawn(fun () -> test_writer(Me) end),
-    {ok, Limiter} = rabbit_limiter:start_link(),
+    {ok, Limiter} = rabbit_limiter:start_link(no_id),
     {ok, Ch} = rabbit_channel:start_link(
                  1, Me, Writer, Me, "", rabbit_framing_amqp_0_9_1,
                  user(<<"guest">>), <<"/">>, [], Me, Limiter),
@@ -1364,6 +1353,82 @@ test_with_state() ->
                                        fun (S) -> element(1, S) end),
     passed.
 
+test_mcall() ->
+    P1 = spawn(fun gs2_test_listener/0),
+    register(foo, P1),
+    global:register_name(gfoo, P1),
+
+    P2 = spawn(fun() -> exit(bang) end),
+    %% ensure P2 is dead (ignore the race setting up the monitor)
+    await_exit(P2),
+
+    P3 = spawn(fun gs2_test_crasher/0),
+
+    %% since P2 crashes almost immediately and P3 after receiving its first
+    %% message, we have to spawn a few more processes to handle the additional
+    %% cases we're interested in here
+    register(baz, spawn(fun gs2_test_crasher/0)),
+    register(bog, spawn(fun gs2_test_crasher/0)),
+    global:register_name(gbaz, spawn(fun gs2_test_crasher/0)),
+
+    NoNode = rabbit_nodes:make("nonode"),
+
+    Targets =
+        %% pids
+        [P1, P2, P3]
+        ++
+        %% registered names
+        [foo, bar, baz]
+        ++
+        %% {Name, Node} pairs
+        [{foo, node()}, {bar, node()}, {bog, node()}, {foo, NoNode}]
+        ++
+        %% {global, Name}
+        [{global, gfoo}, {global, gbar}, {global, gbaz}],
+
+    GoodResults = [{D, goodbye} || D <- [P1, foo,
+                                         {foo, node()},
+                                         {global, gfoo}]],
+
+    BadResults  = [{P2,             noproc},   % died before use
+                   {P3,             boom},     % died on first use
+                   {bar,            noproc},   % never registered
+                   {baz,            boom},     % died on first use
+                   {{bar, node()},  noproc},   % never registered
+                   {{bog, node()},  boom},     % died on first use
+                   {{foo, NoNode},  nodedown}, % invalid node
+                   {{global, gbar}, noproc},   % never registered globally
+                   {{global, gbaz}, boom}],    % died on first use
+
+    {Replies, Errors} = gen_server2:mcall([{T, hello} || T <- Targets]),
+    true = lists:sort(Replies) == lists:sort(GoodResults),
+    true = lists:sort(Errors)  == lists:sort(BadResults),
+
+    %% cleanup (ignore the race setting up the monitor)
+    P1 ! stop,
+    await_exit(P1),
+    passed.
+
+await_exit(Pid) ->
+    MRef = erlang:monitor(process, Pid),
+    receive
+        {'DOWN', MRef, _, _, _} -> ok
+    end.
+
+gs2_test_crasher() ->
+    receive
+        {'$gen_call', _From, hello} -> exit(boom)
+    end.
+
+gs2_test_listener() ->
+    receive
+        {'$gen_call', From, hello} ->
+            gen_server2:reply(From, goodbye),
+            gs2_test_listener();
+        stop ->
+            ok
+    end.
+
 test_statistics_event_receiver(Pid) ->
     receive
         Foo -> Pid ! Foo, test_statistics_event_receiver(Pid)
@@ -1463,7 +1528,7 @@ test_refresh_events(SecondaryNode) ->
 
 expect_events(Tag, Key, Type) ->
     expect_event(Tag, Key, Type),
-    rabbit:force_event_refresh(),
+    rabbit:force_event_refresh(make_ref()),
     expect_event(Tag, Key, Type).
 
 expect_event(Tag, Key, Type) ->
@@ -2125,11 +2190,10 @@ test_queue() ->
 
 init_test_queue() ->
     TestQueue = test_queue(),
-    Terms = rabbit_queue_index:shutdown_terms(TestQueue),
-    PRef = proplists:get_value(persistent_ref, Terms, rabbit_guid:gen()),
+    PRef = rabbit_guid:gen(),
     PersistentClient = msg_store_client_init(?PERSISTENT_MSG_STORE, PRef),
     Res = rabbit_queue_index:recover(
-            TestQueue, Terms, false,
+            TestQueue, [], false,
             fun (MsgId) ->
                     rabbit_msg_store:contains(MsgId, PersistentClient)
             end,
@@ -2140,12 +2204,12 @@ init_test_queue() ->
 restart_test_queue(Qi) ->
     _ = rabbit_queue_index:terminate([], Qi),
     ok = rabbit_variable_queue:stop(),
-    ok = rabbit_variable_queue:start([test_queue()]),
+    {ok, _} = rabbit_variable_queue:start([test_queue()]),
     init_test_queue().
 
 empty_test_queue() ->
     ok = rabbit_variable_queue:stop(),
-    ok = rabbit_variable_queue:start([]),
+    {ok, _} = rabbit_variable_queue:start([]),
     {0, Qi} = init_test_queue(),
     _ = rabbit_queue_index:delete_and_terminate(Qi),
     ok.
@@ -2201,7 +2265,7 @@ test_queue_index_props() ->
       end),
 
     ok = rabbit_variable_queue:stop(),
-    ok = rabbit_variable_queue:start([]),
+    {ok, _} = rabbit_variable_queue:start([]),
 
     passed.
 
@@ -2325,13 +2389,16 @@ test_queue_index() ->
       end),
 
     ok = rabbit_variable_queue:stop(),
-    ok = rabbit_variable_queue:start([]),
+    {ok, _} = rabbit_variable_queue:start([]),
 
     passed.
 
 variable_queue_init(Q, Recover) ->
     rabbit_variable_queue:init(
-      Q, Recover, fun nop/2, fun nop/2, fun nop/1).
+      Q, case Recover of
+             true  -> non_clean_shutdown;
+             false -> new
+         end, fun nop/2, fun nop/2, fun nop/1).
 
 variable_queue_publish(IsPersistent, Count, VQ) ->
     variable_queue_publish(IsPersistent, Count, fun (_N, P) -> P end, VQ).
@@ -2341,18 +2408,19 @@ variable_queue_publish(IsPersistent, Count, PropFun, VQ) ->
                            fun (_N) -> <<>> end, VQ).
 
 variable_queue_publish(IsPersistent, Start, Count, PropFun, PayloadFun, VQ) ->
-    lists:foldl(
-      fun (N, VQN) ->
-              rabbit_variable_queue:publish(
-                rabbit_basic:message(
-                  rabbit_misc:r(<<>>, exchange, <<>>),
-                  <<>>, #'P_basic'{delivery_mode = case IsPersistent of
-                                                       true  -> 2;
-                                                       false -> 1
-                                                   end},
-                                   PayloadFun(N)),
-                PropFun(N, #message_properties{}), false, self(), VQN)
-      end, VQ, lists:seq(Start, Start + Count - 1)).
+    variable_queue_wait_for_shuffling_end(
+      lists:foldl(
+        fun (N, VQN) ->
+                rabbit_variable_queue:publish(
+                  rabbit_basic:message(
+                    rabbit_misc:r(<<>>, exchange, <<>>),
+                    <<>>, #'P_basic'{delivery_mode = case IsPersistent of
+                                                         true  -> 2;
+                                                         false -> 1
+                                                     end},
+                    PayloadFun(N)),
+                  PropFun(N, #message_properties{}), false, self(), VQN)
+        end, VQ, lists:seq(Start, Start + Count - 1))).
 
 variable_queue_fetch(Count, IsPersistent, IsDelivered, Len, VQ) ->
     lists:foldl(fun (N, {VQN, AckTagsAcc}) ->
@@ -2363,6 +2431,10 @@ variable_queue_fetch(Count, IsPersistent, IsDelivered, Len, VQ) ->
                         Rem = rabbit_variable_queue:len(VQM),
                         {VQM, [AckTagN | AckTagsAcc]}
                 end, {VQ, []}, lists:seq(1, Count)).
+
+variable_queue_set_ram_duration_target(Duration, VQ) ->
+    variable_queue_wait_for_shuffling_end(
+      rabbit_variable_queue:set_ram_duration_target(Duration, VQ)).
 
 assert_prop(List, Prop, Value) ->
     Value = proplists:get_value(Prop, List).
@@ -2404,8 +2476,8 @@ publish_and_confirm(Q, Payload, Count) ->
                                     <<>>, #'P_basic'{delivery_mode = 2},
                                     Payload),
          Delivery = #delivery{mandatory = false, sender = self(),
-                              message = Msg, msg_seq_no = Seq},
-         {routed, _} = rabbit_amqqueue:deliver([Q], Delivery)
+                              confirm = true, message = Msg, msg_seq_no = Seq},
+          _QPids = rabbit_amqqueue:deliver([Q], Delivery)
      end || Seq <- Seqs],
     wait_for_confirms(gb_sets:from_list(Seqs)).
 
@@ -2478,10 +2550,10 @@ requeue_one_by_one(Acks, VQ) ->
 %% Create a vq with messages in q1, delta, and q3, and holes (in the
 %% form of pending acks) in the latter two.
 variable_queue_with_holes(VQ0) ->
-    Interval = 64,
+    Interval = 2048, %% should match vq:IO_BATCH_SIZE
     Count = rabbit_queue_index:next_segment_boundary(0)*2 + 2 * Interval,
     Seq = lists:seq(1, Count),
-    VQ1 = rabbit_variable_queue:set_ram_duration_target(0, VQ0),
+    VQ1 = variable_queue_set_ram_duration_target(0, VQ0),
     VQ2 = variable_queue_publish(
             false, 1, Count,
             fun (_, P) -> P end, fun erlang:term_to_binary/1, VQ1),
@@ -2495,12 +2567,12 @@ variable_queue_with_holes(VQ0) ->
     {_MsgIds, VQ4} = rabbit_variable_queue:requeue(
                        Acks -- (Subset1 ++ Subset2 ++ Subset3), VQ3),
     VQ5 = requeue_one_by_one(Subset1, VQ4),
-    %% by now we have some messages (and holes) in delt
+    %% by now we have some messages (and holes) in delta
     VQ6 = requeue_one_by_one(Subset2, VQ5),
-    VQ7 = rabbit_variable_queue:set_ram_duration_target(infinity, VQ6),
+    VQ7 = variable_queue_set_ram_duration_target(infinity, VQ6),
     %% add the q1 tail
     VQ8 = variable_queue_publish(
-            true, Count + 1, 64,
+            true, Count + 1, Interval,
             fun (_, P) -> P end, fun erlang:term_to_binary/1, VQ7),
     %% assertions
     [false = case V of
@@ -2509,11 +2581,11 @@ variable_queue_with_holes(VQ0) ->
                  _                -> false
              end || {K, V} <- rabbit_variable_queue:status(VQ8),
                     lists:member(K, [q1, delta, q3])],
-    Depth = Count + 64,
+    Depth = Count + Interval,
     Depth = rabbit_variable_queue:depth(VQ8),
     Len = Depth - length(Subset3),
     Len = rabbit_variable_queue:len(VQ8),
-    {Seq3, Seq -- Seq3, lists:seq(Count + 1, Count + 64), VQ8}.
+    {Seq3, Seq -- Seq3, lists:seq(Count + 1, Count + Interval), VQ8}.
 
 test_variable_queue_requeue(VQ0) ->
     {_PendingMsgs, RequeuedMsgs, FreshMsgs, VQ1} =
@@ -2536,11 +2608,11 @@ test_variable_queue_requeue(VQ0) ->
 %% requeue from ram_pending_ack into q3, move to delta and then empty queue
 test_variable_queue_requeue_ram_beta(VQ0) ->
     Count = rabbit_queue_index:next_segment_boundary(0)*2 + 2,
-    VQ1 = rabbit_tests:variable_queue_publish(false, Count, VQ0),
+    VQ1 = variable_queue_publish(false, Count, VQ0),
     {VQ2, AcksR} = variable_queue_fetch(Count, false, false, Count, VQ1),
     {Back, Front} = lists:split(Count div 2, AcksR),
     {_, VQ3} = rabbit_variable_queue:requeue(erlang:tl(Back), VQ2),
-    VQ4 = rabbit_variable_queue:set_ram_duration_target(0, VQ3),
+    VQ4 = variable_queue_set_ram_duration_target(0, VQ3),
     {_, VQ5} = rabbit_variable_queue:requeue([erlang:hd(Back)], VQ4),
     VQ6 = requeue_one_by_one(Front, VQ5),
     {VQ7, AcksAll} = variable_queue_fetch(Count, false, true, Count, VQ6),
@@ -2583,7 +2655,7 @@ test_variable_queue_ack_limiting(VQ0) ->
 
     %% ensure all acks go to disk on 0 duration target
     VQ6 = check_variable_queue_status(
-            rabbit_variable_queue:set_ram_duration_target(0, VQ5),
+            variable_queue_set_ram_duration_target(0, VQ5),
             [{len, Len div 2},
              {target_ram_count, 0},
              {ram_msg_count, 0},
@@ -2666,9 +2738,9 @@ test_fetchwhile_varying_ram_duration(VQ0) ->
 
 test_dropfetchwhile_varying_ram_duration(Fun, VQ0) ->
     VQ1 = variable_queue_publish(false, 1, VQ0),
-    VQ2 = rabbit_variable_queue:set_ram_duration_target(0, VQ1),
+    VQ2 = variable_queue_set_ram_duration_target(0, VQ1),
     VQ3 = Fun(VQ2),
-    VQ4 = rabbit_variable_queue:set_ram_duration_target(infinity, VQ3),
+    VQ4 = variable_queue_set_ram_duration_target(infinity, VQ3),
     VQ5 = variable_queue_publish(false, 1, VQ4),
     VQ6 = Fun(VQ5),
     VQ6.
@@ -2689,7 +2761,7 @@ test_variable_queue_dynamic_duration_change(VQ0) ->
                     {_Duration, VQ5} = rabbit_variable_queue:ram_duration(VQ4),
                     io:format("~p:~n~p~n",
                               [Duration1, rabbit_variable_queue:status(VQ5)]),
-                    VQ6 = rabbit_variable_queue:set_ram_duration_target(
+                    VQ6 = variable_queue_set_ram_duration_target(
                             Duration1, VQ5),
                     publish_fetch_and_ack(Churn, Len, VQ6)
             end, VQ3, [Duration / 4, 0, Duration / 4, infinity]),
@@ -2717,12 +2789,12 @@ test_variable_queue_partial_segments_delta_thing(VQ0) ->
     VQ1 = variable_queue_publish(true, OneAndAHalfSegment, VQ0),
     {_Duration, VQ2} = rabbit_variable_queue:ram_duration(VQ1),
     VQ3 = check_variable_queue_status(
-            rabbit_variable_queue:set_ram_duration_target(0, VQ2),
+            variable_queue_set_ram_duration_target(0, VQ2),
             %% one segment in q3, and half a segment in delta
             [{delta, {delta, SegmentSize, HalfSegment, OneAndAHalfSegment}},
              {q3, SegmentSize},
              {len, SegmentSize + HalfSegment}]),
-    VQ4 = rabbit_variable_queue:set_ram_duration_target(infinity, VQ3),
+    VQ4 = variable_queue_set_ram_duration_target(infinity, VQ3),
     VQ5 = check_variable_queue_status(
             variable_queue_publish(true, 1, VQ4),
             %% one alpha, but it's in the same segment as the deltas
@@ -2754,17 +2826,21 @@ check_variable_queue_status(VQ0, Props) ->
     VQ1.
 
 variable_queue_wait_for_shuffling_end(VQ) ->
-    case rabbit_variable_queue:needs_timeout(VQ) of
+    case credit_flow:blocked() of
         false -> VQ;
-        _     -> variable_queue_wait_for_shuffling_end(
-                   rabbit_variable_queue:timeout(VQ))
+        true  -> receive
+                     {bump_credit, Msg} ->
+                         credit_flow:handle_bump_msg(Msg),
+                         variable_queue_wait_for_shuffling_end(
+                           rabbit_variable_queue:resume(VQ))
+                 end
     end.
 
 test_variable_queue_all_the_bits_not_covered_elsewhere1(VQ0) ->
     Count = 2 * rabbit_queue_index:next_segment_boundary(0),
     VQ1 = variable_queue_publish(true, Count, VQ0),
     VQ2 = variable_queue_publish(false, Count, VQ1),
-    VQ3 = rabbit_variable_queue:set_ram_duration_target(0, VQ2),
+    VQ3 = variable_queue_set_ram_duration_target(0, VQ2),
     {VQ4, _AckTags}  = variable_queue_fetch(Count, true, false,
                                             Count + Count, VQ3),
     {VQ5, _AckTags1} = variable_queue_fetch(Count, false, false,
@@ -2774,13 +2850,13 @@ test_variable_queue_all_the_bits_not_covered_elsewhere1(VQ0) ->
     {{_Msg1, true, _AckTag1}, VQ8} = rabbit_variable_queue:fetch(true, VQ7),
     Count1 = rabbit_variable_queue:len(VQ8),
     VQ9 = variable_queue_publish(false, 1, VQ8),
-    VQ10 = rabbit_variable_queue:set_ram_duration_target(0, VQ9),
+    VQ10 = variable_queue_set_ram_duration_target(0, VQ9),
     {VQ11, _AckTags2} = variable_queue_fetch(Count1, true, true, Count, VQ10),
     {VQ12, _AckTags3} = variable_queue_fetch(1, false, false, 1, VQ11),
     VQ12.
 
 test_variable_queue_all_the_bits_not_covered_elsewhere2(VQ0) ->
-    VQ1 = rabbit_variable_queue:set_ram_duration_target(0, VQ0),
+    VQ1 = variable_queue_set_ram_duration_target(0, VQ0),
     VQ2 = variable_queue_publish(false, 4, VQ1),
     {VQ3, AckTags} = variable_queue_fetch(2, false, false, 4, VQ2),
     {_Guids, VQ4} =
@@ -2811,7 +2887,7 @@ test_queue_recover() ->
     end,
     rabbit_amqqueue:stop(),
     rabbit_amqqueue:start(rabbit_amqqueue:recover()),
-    {ok, Limiter} = rabbit_limiter:start_link(),
+    {ok, Limiter} = rabbit_limiter:start_link(no_id),
     rabbit_amqqueue:with_or_die(
       QName,
       fun (Q1 = #amqqueue { pid = QPid1 }) ->
@@ -2838,7 +2914,7 @@ test_variable_queue_delete_msg_store_files_callback() ->
 
     rabbit_amqqueue:set_ram_duration_target(QPid, 0),
 
-    {ok, Limiter} = rabbit_limiter:start_link(),
+    {ok, Limiter} = rabbit_limiter:start_link(no_id),
 
     CountMinusOne = Count - 1,
     {ok, CountMinusOne, {QName, QPid, _AckTag, false, _Msg}} =

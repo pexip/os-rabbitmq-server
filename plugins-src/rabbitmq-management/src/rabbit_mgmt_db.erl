@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Plugin.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2010-2013 GoPivotal, Inc.  All rights reserved.
+%%   Copyright (c) 2010-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_db).
@@ -137,9 +137,10 @@
           %% {queue/channel/connection}
           old_stats,
           gc_timer,
-          gc_continuation,
+          gc_next_key,
           lookups,
-          interval}).
+          interval,
+          event_refresh_ref}).
 
 -define(FINE_STATS_TYPES, [channel_queue_stats, channel_exchange_stats,
                            channel_queue_exchange_stats]).
@@ -179,19 +180,15 @@ prioritise_cast(_Msg, _Len, _State) ->
 %%----------------------------------------------------------------------------
 
 start_link() ->
-    %% When failing over it is possible that the mirrored_supervisor
-    %% might hear of the death of the old DB, and start a new one,
-    %% before the global name server notices. Therefore rather than
-    %% telling gen_server:start_link/4 to register it for us, we
-    %% invoke global:re_register_name/2 ourselves, and just steal the
-    %% name if it existed before. We therefore rely on
-    %% mirrored_supervisor to maintain the uniqueness of this process.
-    case gen_server2:start_link(?MODULE, [], []) of
-        {ok, Pid} -> yes = global:re_register_name(?MODULE, Pid),
-                     rabbit:force_event_refresh(),
+    Ref = make_ref(),
+    case gen_server2:start_link({global, ?MODULE}, ?MODULE, [Ref], []) of
+        {ok, Pid} -> register(?MODULE, Pid), %% [1]
+                     rabbit:force_event_refresh(Ref),
                      {ok, Pid};
         Else      -> Else
     end.
+%% [1] For debugging it's helpful to locally register the name too
+%% since that shows up in places global names don't.
 
 %% R = Ranges, M = Mode
 augment_exchanges(Xs, R, M) -> safe_call({augment_exchanges, Xs, R, M}, Xs).
@@ -211,19 +208,26 @@ get_overview(R)             -> safe_call({get_overview, all, R}).
 override_lookups(Lookups)   -> safe_call({override_lookups, Lookups}).
 reset_lookups()             -> safe_call(reset_lookups).
 
-safe_call(Term) -> safe_call(Term, []).
+safe_call(Term)          -> safe_call(Term, []).
+safe_call(Term, Default) -> safe_call(Term, Default, 1).
 
-safe_call(Term, Item) ->
+%% See rabbit_mgmt_sup_sup for a discussion of the retry logic.
+safe_call(Term, Default, Retries) ->
     try
         gen_server2:call({global, ?MODULE}, Term, infinity)
-    catch exit:{noproc, _} -> Item
+    catch exit:{noproc, _} ->
+            case Retries of
+                0 -> Default;
+                _ -> rabbit_mgmt_sup_sup:start_child(),
+                     safe_call(Term, Default, Retries - 1)
+            end
     end.
 
 %%----------------------------------------------------------------------------
 %% Internal, gen_server2 callbacks
 %%----------------------------------------------------------------------------
 
-init([]) ->
+init([Ref]) ->
     %% When Rabbit is overloaded, it's usually especially important
     %% that the management plugin work.
     process_flag(priority, high),
@@ -238,7 +242,8 @@ init([]) ->
                     tables                 = Tables,
                     old_stats              = Table(),
                     aggregated_stats       = Table(),
-                    aggregated_stats_index = Table()})), hibernate,
+                    aggregated_stats_index = Table(),
+                    event_refresh_ref      = Ref})), hibernate,
      {backoff, ?HIBERNATE_AFTER_MIN, ?HIBERNATE_AFTER_MIN, ?DESIRED_HIBERNATE}}.
 
 handle_call({augment_exchanges, Xs, Ranges, basic}, _From, State) ->
@@ -328,7 +333,14 @@ handle_call(reset_lookups, _From, State) ->
 handle_call(_Request, _From, State) ->
     reply(not_understood, State).
 
-handle_cast({event, Event}, State) ->
+%% Only handle events that are real, or pertain to a force-refresh
+%% that we instigated.
+handle_cast({event, Event = #event{reference = none}}, State) ->
+    handle_event(Event, State),
+    noreply(State);
+
+handle_cast({event, Event = #event{reference = Ref}},
+            State = #state{event_refresh_ref = Ref}) ->
     handle_event(Event, State),
     noreply(State);
 
@@ -436,7 +448,7 @@ handle_event(#event{type = queue_stats, props = Stats, timestamp = Timestamp},
     handle_stats(queue_stats, Stats, Timestamp,
                  [{fun rabbit_mgmt_format:properties/1,[backing_queue_status]},
                   {fun rabbit_mgmt_format:timestamp/1, [idle_since]},
-                  {fun rabbit_mgmt_format:queue_status/1, [status]}],
+                  {fun rabbit_mgmt_format:queue_state/1, [state]}],
                  [messages, messages_ready, messages_unacknowledged], State);
 
 handle_event(Event = #event{type = queue_deleted,
@@ -912,7 +924,8 @@ format_detail_id(#resource{name = Name, virtual_host = Vhost, kind = Kind},
 
 format_samples(Ranges, ManyStats, #state{interval = Interval}) ->
     lists:append(
-      [case rabbit_mgmt_stats:is_blank(Stats) of
+      [case rabbit_mgmt_stats:is_blank(Stats) andalso
+           not lists:member(K, ?COARSE_QUEUE_STATS) of
            true  -> [];
            false -> {Details, Counter} = rabbit_mgmt_stats:format(
                                            pick_range(K, Ranges),
@@ -1029,25 +1042,29 @@ augment_connection_pid(Pid, #state{tables = Tables}) ->
 %% Internal, event-GCing
 %%----------------------------------------------------------------------------
 
-gc_batch(State = #state{aggregated_stats = ETS,
-                        gc_continuation = Continuation}) ->
-    Match = case Continuation of
-                undefined -> Size = ets:info(ETS, size),
-                             Rows = lists:max([?GC_MIN_ROWS,
-                                               round(?GC_MIN_RATIO * Size)]),
-                             ets:match(ETS, '$1', Rows);
-                _         -> ets:match(Continuation)
-            end,
-    case Match of
-        {Matches, Continuation1} ->
-            {ok, Policies} = application:get_env(
-                               rabbitmq_management, sample_retention_policies),
-            Now = floor(erlang:now(), State),
-            [gc(Key, Stats, Policies, Now, ETS) || [{Key, Stats}] <- Matches],
-            State#state{gc_continuation = Continuation1};
-        '$end_of_table' ->
-            State#state{gc_continuation = undefined}
-    end.
+gc_batch(State = #state{aggregated_stats = ETS}) ->
+    {ok, Policies} = application:get_env(
+                       rabbitmq_management, sample_retention_policies),
+    Rows = erlang:max(?GC_MIN_ROWS,
+                      round(?GC_MIN_RATIO * ets:info(ETS, size))),
+    gc_batch(Rows, Policies, State).
+
+gc_batch(0, _Policies, State) ->
+    State;
+gc_batch(Rows, Policies, State = #state{aggregated_stats = ETS,
+                         gc_next_key      = Key0}) ->
+    Key = case Key0 of
+              undefined -> ets:first(ETS);
+              _         -> ets:next(ETS, Key0)
+          end,
+    Key1 = case Key of
+               '$end_of_table' -> undefined;
+               _               -> Now = floor(erlang:now(), State),
+                                  Stats = ets:lookup_element(ETS, Key, 2),
+                                  gc(Key, Stats, Policies, Now, ETS),
+                                  Key
+           end,
+    gc_batch(Rows - 1, Policies, State#state{gc_next_key = Key1}).
 
 gc({{Type, Id}, Key}, Stats, Policies, Now, ETS) ->
     Policy = pget(retention_policy(Type), Policies),
