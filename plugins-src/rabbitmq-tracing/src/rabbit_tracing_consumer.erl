@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_tracing_consumer).
@@ -44,14 +44,8 @@ init(Args) ->
     process_flag(trap_exit, true),
     Name = pget(name, Args),
     VHost = pget(vhost, Args),
-    {ok, Username0} = application:get_env(rabbitmq_tracing, username),
-    Username = case is_binary(Username0) of
-                   true -> Username0;
-                   false -> list_to_binary(Username0)
-               end,
     {ok, Conn} = amqp_connection:start(
-                   #amqp_params_direct{username     = Username,
-                                       virtual_host = VHost}),
+                   #amqp_params_direct{virtual_host = VHost}),
     link(Conn),
     {ok, Ch} = amqp_connection:open_channel(Conn),
     link(Ch),

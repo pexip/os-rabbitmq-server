@@ -11,14 +11,16 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_runtime_parameters_test).
 -behaviour(rabbit_runtime_parameter).
 -behaviour(rabbit_policy_validator).
 
--export([validate/4, notify/4, notify_clear/3]).
+-include("rabbit.hrl").
+
+-export([validate/5, notify/4, notify_clear/3]).
 -export([register/0, unregister/0]).
 -export([validate_policy/1]).
 -export([register_policy_validator/0, unregister_policy_validator/0]).
@@ -31,9 +33,15 @@ register() ->
 unregister() ->
     rabbit_registry:unregister(runtime_parameter, <<"test">>).
 
-validate(_, <<"test">>, <<"good">>,  _Term)      -> ok;
-validate(_, <<"test">>, <<"maybe">>, <<"good">>) -> ok;
-validate(_, <<"test">>, _, _)                    -> {error, "meh", []}.
+validate(_, <<"test">>, <<"good">>,  _Term, _User)      -> ok;
+validate(_, <<"test">>, <<"maybe">>, <<"good">>, _User) -> ok;
+validate(_, <<"test">>, <<"admin">>, _Term, none)       -> ok;
+validate(_, <<"test">>, <<"admin">>, _Term, User) ->
+    case lists:member(administrator, User#user.tags) of
+        true  -> ok;
+        false -> {error, "meh", []}
+    end;
+validate(_, <<"test">>, _, _, _)                        -> {error, "meh", []}.
 
 notify(_, _, _, _) -> ok.
 notify_clear(_, _, _) -> ok.

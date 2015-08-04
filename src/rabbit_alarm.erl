@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_alarm).
@@ -62,7 +62,8 @@ start() ->
                           end,
                           fun clear_alarm/1]),
     {ok, DiskLimit} = application:get_env(disk_free_limit),
-    rabbit_sup:start_restartable_child(rabbit_disk_monitor, [DiskLimit]),
+    rabbit_sup:start_delayed_restartable_child(
+      rabbit_disk_monitor, [DiskLimit]),
     ok.
 
 stop() -> ok.

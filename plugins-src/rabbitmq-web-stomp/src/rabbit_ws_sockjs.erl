@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2012-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2012-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_ws_sockjs).
@@ -32,12 +32,23 @@ init() ->
                     <<"/stomp">>, fun service_stomp/3, {}, SockjsOpts),
     VhostRoutes = [{[<<"stomp">>, '...'], sockjs_cowboy_handler, SockjsState}],
     Routes = [{'_',  VhostRoutes}], % any vhost
-
-    rabbit_log:info("rabbit_web_stomp: started on ~s:~w~n",
-                    ["0.0.0.0", Port]),
     cowboy:start_listener(http, 100,
                           cowboy_tcp_transport, [{port,     Port}],
                           cowboy_http_protocol, [{dispatch, Routes}]),
+    rabbit_log:info("rabbit_web_stomp: listening for HTTP connections on ~s:~w~n",
+                    ["0.0.0.0", Port]),
+    case get_env(ssl_config, []) of
+        [] ->
+            ok;
+        Conf ->
+            rabbit_networking:ensure_ssl(),
+            TLSPort = proplists:get_value(port, Conf),
+            cowboy:start_listener(https, 100,
+                                  cowboy_ssl_transport, Conf,
+                                  cowboy_http_protocol, [{dispatch, Routes}]),
+            rabbit_log:info("rabbit_web_stomp: listening for HTTPS connections on ~s:~w~n",
+                            ["0.0.0.0", TLSPort])
+    end,
     ok.
 
 get_env(Key, Default) ->

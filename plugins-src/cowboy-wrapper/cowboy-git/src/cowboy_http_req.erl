@@ -282,6 +282,11 @@ parse_header(Name, Req, Default) when Name =:= 'Upgrade' ->
 		fun (Value) ->
 			cowboy_http:nonempty_list(Value, fun cowboy_http:token_ci/2)
 		end);
+parse_header(Name, Req, Default) when Name =:= <<"sec-websocket-protocol">> ->
+    parse_header(Name, Req, Default,
+        fun (Value) ->
+            cowboy_http:nonempty_list(Value, fun cowboy_http:token/2)
+        end);
 parse_header(Name, Req, Default) ->
 	{Value, Req2} = header(Name, Req, Default),
 	{undefined, Value, Req2}.

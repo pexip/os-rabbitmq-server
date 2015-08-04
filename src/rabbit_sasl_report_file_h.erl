@@ -11,15 +11,18 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_sasl_report_file_h).
+-include("rabbit.hrl").
 
 -behaviour(gen_event).
 
 -export([init/1, handle_event/2, handle_call/2, handle_info/2, terminate/2,
          code_change/3]).
+
+-import(rabbit_error_logger_file_h, [safe_handle_event/3]).
 
 %% rabbit_sasl_report_file_h is a wrapper around the sasl_report_file_h
 %% module because the original's init/1 does not match properly
@@ -66,13 +69,17 @@ init_file({File, Type}) ->
     end.
 
 handle_event(Event, State) ->
-    sasl_report_file_h:handle_event(Event, State).
+    safe_handle_event(fun handle_event0/2, Event, State).
 
-handle_info(Event, State) ->
-    sasl_report_file_h:handle_info(Event, State).
+handle_event0(Event, State) ->
+    sasl_report_file_h:handle_event(
+      truncate:log_event(Event, ?LOG_TRUNC), State).
 
-handle_call(Event, State) ->
-    sasl_report_file_h:handle_call(Event, State).
+handle_info(Info, State) ->
+    sasl_report_file_h:handle_info(Info, State).
+
+handle_call(Call, State) ->
+    sasl_report_file_h:handle_call(Call, State).
 
 terminate(Reason, State) ->
     sasl_report_file_h:terminate(Reason, State).

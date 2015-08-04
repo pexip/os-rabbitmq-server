@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit).
@@ -20,7 +20,7 @@
 
 -export([start/0, boot/0, stop/0,
          stop_and_halt/0, await_startup/0, status/0, is_running/0,
-         is_running/1, environment/0, rotate_logs/1, force_event_refresh/0,
+         is_running/1, environment/0, rotate_logs/1, force_event_refresh/1,
          start_fhc/0]).
 
 -export([start/2, stop/1]).
@@ -227,7 +227,7 @@
 -spec(is_running/1 :: (node()) -> boolean()).
 -spec(environment/0 :: () -> [{param(), term()}]).
 -spec(rotate_logs/1 :: (file_suffix()) -> rabbit_types:ok_or_error(any())).
--spec(force_event_refresh/0 :: () -> 'ok').
+-spec(force_event_refresh/1 :: (reference()) -> 'ok').
 
 -spec(log_location/1 :: ('sasl' | 'kernel') -> log_location()).
 
@@ -347,19 +347,25 @@ handle_app_error(App, Reason) ->
 
 start_it(StartFun) ->
     Marker = spawn_link(fun() -> receive stop -> ok end end),
-    register(rabbit_boot, Marker),
-    try
-        StartFun()
-    catch
-        throw:{could_not_start, _App, _Reason}=Err ->
-            boot_error(Err, not_available);
-         _:Reason ->
-            boot_error(Reason, erlang:get_stacktrace())
-    after
-        unlink(Marker),
-        Marker ! stop,
-        %% give the error loggers some time to catch up
-        timer:sleep(100)
+    case catch register(rabbit_boot, Marker) of
+        true -> try
+                    case is_running() of
+                        true  -> ok;
+                        false -> StartFun()
+                    end
+                catch
+                    throw:{could_not_start, _App, _Reason}=Err ->
+                        boot_error(Err, not_available);
+                    _:Reason ->
+                        boot_error(Reason, erlang:get_stacktrace())
+                after
+                    unlink(Marker),
+                    Marker ! stop,
+                    %% give the error loggers some time to catch up
+                    timer:sleep(100)
+                end;
+        _    -> unlink(Marker),
+                Marker ! stop
     end.
 
 stop() ->
@@ -387,7 +393,9 @@ status() ->
           {running_applications, rabbit_misc:which_applications()},
           {os,                   os:type()},
           {erlang_version,       erlang:system_info(system_version)},
-          {memory,               rabbit_vm:memory()}],
+          {memory,               rabbit_vm:memory()},
+          {alarms,               alarms()},
+          {listeners,            listeners()}],
     S2 = rabbit_misc:filter_exit_map(
            fun ({Key, {M, F, A}}) -> {Key, erlang:apply(M, F, A)} end,
            [{vm_memory_high_watermark, {vm_memory_monitor,
@@ -409,6 +417,25 @@ status() ->
                                  T div 1000
                              end}],
     S1 ++ S2 ++ S3 ++ S4.
+
+alarms() ->
+    Alarms = rabbit_misc:with_exit_handler(rabbit_misc:const([]),
+                                           fun rabbit_alarm:get_alarms/0),
+    N = node(),
+    %% [{{resource_limit,memory,rabbit@mercurio},[]}]
+    [Limit || {{resource_limit, Limit, Node}, _} <- Alarms, Node =:= N].
+
+listeners() ->
+    Listeners = try
+                    rabbit_networking:active_listeners()
+                catch
+                    exit:{aborted, _} -> []
+                end,
+    [{Protocol, Port, rabbit_misc:ntoa(IP)} ||
+        #listener{node       = Node,
+                  protocol   = Protocol,
+                  ip_address = IP,
+                  port       = Port} <- Listeners, Node =:= node()].
 
 is_running() -> is_running(node()).
 
@@ -690,11 +717,11 @@ log_rotation_result(ok, {error, SaslLogError}) ->
 log_rotation_result(ok, ok) ->
     ok.
 
-force_event_refresh() ->
-    rabbit_direct:force_event_refresh(),
-    rabbit_networking:force_connection_event_refresh(),
-    rabbit_channel:force_event_refresh(),
-    rabbit_amqqueue:force_event_refresh().
+force_event_refresh(Ref) ->
+    rabbit_direct:force_event_refresh(Ref),
+    rabbit_networking:force_connection_event_refresh(Ref),
+    rabbit_channel:force_event_refresh(Ref),
+    rabbit_amqqueue:force_event_refresh(Ref).
 
 %%---------------------------------------------------------------------------
 %% misc
@@ -762,11 +789,31 @@ home_dir() ->
     end.
 
 config_files() ->
+    Abs = fun (F) ->
+                  filename:absname(filename:rootname(F, ".config") ++ ".config")
+          end,
     case init:get_argument(config) of
-        {ok, Files} -> [filename:absname(
-                          filename:rootname(File, ".config") ++ ".config") ||
-                           [File] <- Files];
-        error       -> []
+        {ok, Files} -> [Abs(File) || [File] <- Files];
+        error       -> case config_setting() of
+                           none -> [];
+                           File -> [Abs(File) ++ " (not found)"]
+                       end
+    end.
+
+%% This is a pain. We want to know where the config file is. But we
+%% can't specify it on the command line if it is missing or the VM
+%% will fail to start, so we need to find it by some mechanism other
+%% than init:get_arguments/0. We can look at the environment variable
+%% which is responsible for setting it... but that doesn't work for a
+%% Windows service since the variable can change and the service not
+%% be reinstalled, so in that case we add a magic application env.
+config_setting() ->
+    case application:get_env(rabbit, windows_service_config) of
+        {ok, File1} -> File1;
+        undefined   -> case os:getenv("RABBITMQ_CONFIG_FILE") of
+                           false -> none;
+                           File2 -> File2
+                       end
     end.
 
 %% We don't want this in fhc since it references rabbit stuff. And we can't put

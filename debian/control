@@ -2,9 +2,8 @@ Source: rabbitmq-server
 Section: net
 Priority: extra
 Maintainer: Pexip AS <packaging@pexip.com>
-XBCS-Original-Maintainer: RabbitMQ Team <packaging@rabbitmq.com>
-XBCS-Original-Uploaders: Emile Joubert <emile@rabbitmq.com>
-DM-Upload-Allowed: yes
+XSBC-Pexip-Original-Maintainer: RabbitMQ Team <packaging@rabbitmq.com>
+XSBC-Pexip-Original-Uploaders: Blair Hester <bhester@gopivotal.com>
 Build-Depends: cdbs, debhelper (>= 5), erlang-dev, python-simplejson, xmlto, xsltproc, erlang-nox (>= 1:13.b.3), erlang-src (>= 1:13.b.3), unzip, zip
 Standards-Version: 3.9.2
 XS-Pexip-Upstream: http://ftp.debian.org/debian/ jessie

@@ -1,3 +1,87 @@
+rabbitmq-server (3.3.5-1.1pexip1) pexip; urgency=low
+
+  * New upstream release
+
+ -- John-Mark Bell <jmb@pexip.com>  Tue, 04 Aug 2015 17:50:12 +0100
+
+rabbitmq-server (3.3.5-1.1) testing-proposed-updates; urgency=medium
+
+  * Non-maintainer upload.
+  * Do not trust X-Forwarded-For (Closes: #773134).
+
+ -- Matt Kraai <kraai@debian.org>  Sun, 14 Dec 2014 14:51:41 -0800
+
+rabbitmq-server (3.3.5-1) unstable; urgency=low
+
+  * New upstream release:
+    - Provides unminimized versions of all bundled Javascript
+      libraries (Closes: #736781).
+  * d/control: Added Blair Hester to Uploaders, dropped Emile Joubert 
+    (thanks for all your work Emile!).
+
+ -- Blair Hester <bhester@gopivotal.com>  Tue, 12 Aug 2014 11:47:14 +0100
+
+rabbitmq-server (3.3.4-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Emile Joubert <emile@rabbitmq.com>  Tue, 24 Jun 2014 18:00:48 +0100
+
+rabbitmq-server (3.3.3-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Emile Joubert <emile@rabbitmq.com>  Tue, 17 Jun 2014 16:59:14 +0100
+
+rabbitmq-server (3.3.1-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Emile Joubert <emile@rabbitmq.com>  Tue, 29 Apr 2014 21:05:49 +0100
+
+rabbitmq-server (3.3.0-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Emile Joubert <emile@rabbitmq.com>  Wed, 02 Apr 2014 16:23:08 +0100
+
+rabbitmq-server (3.2.4-1.1) unstable; urgency=high
+
+  * Non-maintainer upload.
+  * Bind on 127.0.0.1 by default, to avoid listening on all ipv6 interface with
+    guest/guest as default configured user. Note that this only fixes *new*
+    installation, and that any already existing setup will have to edit the
+    /etc/rabbitmq/rabbitmq-env.conf manually if affected. (Closes: #727607)
+  * Removed useless and deprecated DM-Upload field.
+  * Cleans plugins-src/rabbitmq-server to be able to build twice. Also cleans
+    debian/postrm which is generated from debian/postrm.in and plugins/README.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 31 Mar 2014 06:11:46 +0000
+
+rabbitmq-server (3.2.4-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Emile Joubert <emile@rabbitmq.com>  Tue, 04 Mar 2014 13:21:45 +0000
+
+rabbitmq-server (3.2.3-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Emile Joubert <emile@rabbitmq.com>  Thu, 23 Jan 2014 16:49:45 +0000
+
+rabbitmq-server (3.2.2-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Emile Joubert <emile@rabbitmq.com>  Wed, 11 Dec 2013 17:31:14 +0000
+
+rabbitmq-server (3.2.1-1) unstable; urgency=low
+
+  * New upstream release
+
+ -- Emile Joubert <emile@rabbitmq.com>  Mon, 11 Nov 2013 09:49:42 +0000
+
 rabbitmq-server (3.2.0-1pexip2) precise; urgency=low
 
   * Fix issue #1321: massage hosts file on postinit

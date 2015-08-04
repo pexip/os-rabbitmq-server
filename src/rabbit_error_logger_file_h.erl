@@ -11,15 +11,18 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_error_logger_file_h).
+-include("rabbit.hrl").
 
 -behaviour(gen_event).
 
 -export([init/1, handle_event/2, handle_call/2, handle_info/2, terminate/2,
          code_change/3]).
+
+-export([safe_handle_event/3]).
 
 %% rabbit_error_logger_file_h is a wrapper around the error_logger_file_h
 %% module because the original's init/1 does not match properly
@@ -76,20 +79,56 @@ init_file(File, PrevHandler) ->
         Error   -> Error
     end.
 
-%% filter out "application: foo; exited: stopped; type: temporary"
-handle_event({info_report, _, {_, std_info, _}}, State) ->
-    {ok, State};
 handle_event(Event, State) ->
-    error_logger_file_h:handle_event(Event, State).
+    safe_handle_event(fun handle_event0/2, Event, State).
 
-handle_info(Event, State) ->
-    error_logger_file_h:handle_info(Event, State).
+safe_handle_event(HandleEvent, Event, State) ->
+    try
+        HandleEvent(Event, State)
+    catch
+        _:Error ->
+            io:format("Event crashed log handler:~n~P~n~P~n",
+                      [Event, 30, Error, 30]),
+            {ok, State}
+    end.
 
-handle_call(Event, State) ->
-    error_logger_file_h:handle_call(Event, State).
+%% filter out "application: foo; exited: stopped; type: temporary"
+handle_event0({info_report, _, {_, std_info, _}}, State) ->
+    {ok, State};
+%% When a node restarts quickly it is possible the rest of the cluster
+%% will not have had the chance to remove its queues from
+%% Mnesia. That's why rabbit_amqqueue:recover/0 invokes
+%% on_node_down(node()). But before we get there we can receive lots
+%% of messages intended for the old version of the node. The emulator
+%% logs an event for every one of those messages; in extremis this can
+%% bring the server to its knees just logging "Discarding..."
+%% again and again. So just log the first one, then go silent.
+handle_event0(Event = {error, _, {emulator, _, ["Discarding message" ++ _]}},
+             State) ->
+    case get(discarding_message_seen) of
+        true      -> {ok, State};
+        undefined -> put(discarding_message_seen, true),
+                     error_logger_file_h:handle_event(t(Event), State)
+    end;
+%% Clear this state if we log anything else (but not a progress report).
+handle_event0(Event = {info_msg, _, _}, State) ->
+    erase(discarding_message_seen),
+    error_logger_file_h:handle_event(t(Event), State);
+handle_event0(Event, State) ->
+    error_logger_file_h:handle_event(t(Event), State).
+
+handle_info(Info, State) ->
+    error_logger_file_h:handle_info(Info, State).
+
+handle_call(Call, State) ->
+    error_logger_file_h:handle_call(Call, State).
 
 terminate(Reason, State) ->
     error_logger_file_h:terminate(Reason, State).
 
 code_change(OldVsn, State, Extra) ->
     error_logger_file_h:code_change(OldVsn, State, Extra).
+
+%%----------------------------------------------------------------------
+
+t(Term) -> truncate:log_event(Term, ?LOG_TRUNC).

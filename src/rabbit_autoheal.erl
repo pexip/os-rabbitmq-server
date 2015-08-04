@@ -11,12 +11,12 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_autoheal).
 
--export([init/0, maybe_start/1, node_down/2, handle_msg/3]).
+-export([init/0, maybe_start/1, rabbit_down/2, node_down/2, handle_msg/3]).
 
 %% The named process we are running in.
 -define(SERVER, rabbit_node_monitor).
@@ -37,10 +37,13 @@
 %% selected as the first node in the cluster.
 %%
 %% To coordinate the restarting nodes we pick a special node from the
-%% winning partition - the "winner". Restarting nodes then stop, tell
-%% the winner they have done so, and wait for it to tell them it is
-%% safe to start again. The winner and the leader are not necessarily
-%% the same node.
+%% winning partition - the "winner". Restarting nodes then stop, and
+%% wait for it to tell them it is safe to start again. The winner
+%% determines that a node has stopped just by seeing if its rabbit app
+%% stops - if a node stops for any other reason it just gets a message
+%% it will ignore, and otherwise we carry on.
+%%
+%% The winner and the leader are not necessarily the same node.
 %%
 %% Possible states:
 %%
@@ -75,10 +78,37 @@ maybe_start(State) ->
 enabled() ->
     {ok, autoheal} =:= application:get_env(rabbit, cluster_partition_handling).
 
-node_down(_Node, {winner_waiting, _Nodes, _Notify} = Autoheal) ->
-    Autoheal;
+
+%% This is the winner receiving its last notification that a node has
+%% stopped - all nodes can now start again
+rabbit_down(Node, {winner_waiting, [Node], Notify}) ->
+    rabbit_log:info("Autoheal: final node has stopped, starting...~n",[]),
+    notify_safe(Notify),
+    not_healing;
+
+rabbit_down(Node, {winner_waiting, WaitFor, Notify}) ->
+    {winner_waiting, WaitFor -- [Node], Notify};
+
+rabbit_down(Node, {leader_waiting, [Node]}) ->
+    not_healing;
+
+rabbit_down(Node, {leader_waiting, WaitFor}) ->
+    {leader_waiting, WaitFor -- [Node]};
+
+rabbit_down(_Node, State) ->
+    %% ignore, we already cancelled the autoheal process
+    State.
+
 node_down(_Node, not_healing) ->
     not_healing;
+
+node_down(Node, {winner_waiting, _, Notify}) ->
+    rabbit_log:info("Autoheal: aborting - ~p went down~n", [Node]),
+    %% Make sure any nodes waiting for us start - it won't necessarily
+    %% heal the partition but at least they won't get stuck.
+    notify_safe(Notify),
+    not_healing;
+
 node_down(Node, _State) ->
     rabbit_log:info("Autoheal: aborting - ~p went down~n", [Node]),
     not_healing.
@@ -88,6 +118,7 @@ node_down(Node, _State) ->
 handle_msg({request_start, Node},
            not_healing, Partitions) ->
     rabbit_log:info("Autoheal request received from ~p~n", [Node]),
+    rabbit_node_monitor:ping_all(),
     case rabbit_node_monitor:all_rabbit_nodes_up() of
         false -> not_healing;
         true  -> AllPartitions = all_partitions(Partitions),
@@ -97,10 +128,21 @@ handle_msg({request_start, Node},
                                  "  * Winner:     ~p~n"
                                  "  * Losers:     ~p~n",
                                  [AllPartitions, Winner, Losers]),
-                 send(Winner, {become_winner, Losers}),
                  [send(L, {winner_is, Winner}) || L <- Losers],
-                 not_healing
+                 Continue = fun(Msg) ->
+                                    handle_msg(Msg, not_healing, Partitions)
+                            end,
+                 case node() =:= Winner of
+                     true  -> Continue({become_winner, Losers});
+                     false -> send(Winner, {become_winner, Losers}), %% [0]
+                              case lists:member(node(), Losers) of
+                                  true  -> Continue({winner_is, Winner});
+                                  false -> {leader_waiting, Losers}
+                              end
+                 end
     end;
+%% [0] If we are a loser we will never receive this message - but it
+%% won't stick in the mailbox as we are restarting anyway
 
 handle_msg({request_start, Node},
            State, _Partitions) ->
@@ -129,7 +171,6 @@ handle_msg({winner_is, Winner},
       fun () ->
               MRef = erlang:monitor(process, {?SERVER, Winner}),
               rabbit:stop(),
-              send(Winner, {node_stopped, node()}),
               receive
                   {'DOWN', MRef, process, {?SERVER, Winner}, _Reason} -> ok;
                   autoheal_safe_to_start                              -> ok
@@ -139,29 +180,16 @@ handle_msg({winner_is, Winner},
       end),
     restarting;
 
-%% This is the winner receiving its last notification that a node has
-%% stopped - all nodes can now start again
-handle_msg({node_stopped, Node},
-           {winner_waiting, [Node], Notify}, _Partitions) ->
-    rabbit_log:info("Autoheal: final node has stopped, starting...~n",[]),
-    [{rabbit_outside_app_process, N} ! autoheal_safe_to_start || N <- Notify],
-    not_healing;
-
-handle_msg({node_stopped, Node},
-           {winner_waiting, WaitFor, Notify}, _Partitions) ->
-    {winner_waiting, WaitFor -- [Node], Notify};
-
 handle_msg(_, restarting, _Partitions) ->
     %% ignore, we can contribute no further
-    restarting;
-
-handle_msg({node_stopped, _Node}, State, _Partitions) ->
-    %% ignore, we already cancelled the autoheal process
-    State.
+    restarting.
 
 %%----------------------------------------------------------------------------
 
 send(Node, Msg) -> {?SERVER, Node} ! {autoheal_msg, Msg}.
+
+notify_safe(Notify) ->
+    [{rabbit_outside_app_process, N} ! autoheal_safe_to_start || N <- Notify].
 
 make_decision(AllPartitions) ->
     Sorted = lists:sort([{partition_value(P), P} || P <- AllPartitions]),

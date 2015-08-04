@@ -62,7 +62,6 @@ var user_monitor;                // ...user cannot monitor
 var nodes_interesting;           // ...we are not in a cluster
 var vhosts_interesting;          // ...there is only one vhost
 var rabbit_versions_interesting; // ...all cluster nodes run the same version
-var uri_auth_used = false;       // ...it's impossible to log out
 
 // Extensions write to this, the dispatcher maker reads it
 var dispatcher_modules = [];
@@ -76,22 +75,26 @@ var app;
 // Used for the new exchange form, and to display broken exchange types
 var exchange_types;
 
-// Used for access control to the menu
+// Used for access control
 var user_tags;
+var user;
 
 // Set up the above vars
-function setup_global_vars(user) {
+function setup_global_vars() {
     var overview = JSON.parse(sync_get('/overview'));
     statistics_level = overview.statistics_level;
+    user_tags = expand_user_tags(user.tags.split(","));
+    user_administrator = jQuery.inArray("administrator", user_tags) != -1;
+    user_monitor = jQuery.inArray("monitoring", user_tags) != -1;
     replace_content('login-details',
                     '<p>User: <b>' + user.name + '</b></p>' +
+                    '<p>Cluster: <b>' + overview.cluster_name + '</b> ' +
+                    (user_administrator ?
+                     '(<a href="#/cluster-name">change</a>)' : '') + '</p>' +
                     '<p>RabbitMQ ' + overview.rabbitmq_version +
                     ', <acronym class="normal" title="' +
                     overview.erlang_full_version + '">Erlang ' +
                     overview.erlang_version + '</acronym></p>');
-    user_tags = expand_user_tags(user.tags.split(","));
-    user_administrator = jQuery.inArray("administrator", user_tags) != -1;
-    user_monitor = jQuery.inArray("monitoring", user_tags) != -1;
     nodes_interesting = false;
     rabbit_versions_interesting = false;
     if (user_monitor) {
@@ -153,6 +156,8 @@ var current_sort;
 var current_sort_reverse = false;
 
 var current_filter = '';
+var current_filter_regex_on = false;
+var current_filter_regex;
 var current_truncate;
 
 // The timer object for auto-updates, and how often it goes off

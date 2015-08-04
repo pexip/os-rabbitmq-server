@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_policy).
@@ -27,7 +27,7 @@
 -export([register/0]).
 -export([invalidate/0, recover/0]).
 -export([name/1, get/2, get_arg/3, set/1]).
--export([validate/4, notify/4, notify_clear/3]).
+-export([validate/5, notify/4, notify_clear/3]).
 -export([parse_set/6, set/6, delete/2, lookup/2, list/0, list/1,
          list_formatted/1, info_keys/0]).
 
@@ -150,7 +150,7 @@ set(VHost, Name, Pattern, Definition, Priority, ApplyTo) ->
     set0(VHost, Name, PolicyProps).
 
 set0(VHost, Name, Term) ->
-    rabbit_runtime_parameters:set_any(VHost, <<"policy">>, Name, Term).
+    rabbit_runtime_parameters:set_any(VHost, <<"policy">>, Name, Term, none).
 
 delete(VHost, Name) ->
     rabbit_runtime_parameters:clear_any(VHost, <<"policy">>, Name).
@@ -196,26 +196,40 @@ info_keys() -> [vhost, name, 'apply-to', pattern, definition, priority].
 
 %%----------------------------------------------------------------------------
 
-validate(_VHost, <<"policy">>, Name, Term) ->
+validate(_VHost, <<"policy">>, Name, Term, _User) ->
     rabbit_parameter_validation:proplist(
       Name, policy_validation(), Term).
 
-notify(VHost, <<"policy">>, _Name, _Term) ->
+notify(VHost, <<"policy">>, Name, Term) ->
+    rabbit_event:notify(policy_set, [{name, Name} | Term]),
     update_policies(VHost).
 
-notify_clear(VHost, <<"policy">>, _Name) ->
+notify_clear(VHost, <<"policy">>, Name) ->
+    rabbit_event:notify(policy_cleared, [{name, Name}]),
     update_policies(VHost).
 
 %%----------------------------------------------------------------------------
 
+%% [1] We need to prevent this from becoming O(n^2) in a similar
+%% manner to rabbit_binding:remove_for_{source,destination}. So see
+%% the comment in rabbit_binding:lock_route_tables/0 for more rationale.
+%% [2] We could be here in a post-tx fun after the vhost has been
+%% deleted; in which case it's fine to do nothing.
 update_policies(VHost) ->
-    Policies = list(VHost),
+    Tabs = [rabbit_queue,    rabbit_durable_queue,
+            rabbit_exchange, rabbit_durable_exchange],
     {Xs, Qs} = rabbit_misc:execute_mnesia_transaction(
                  fun() ->
-                         {[update_exchange(X, Policies) ||
-                              X <- rabbit_exchange:list(VHost)],
-                          [update_queue(Q, Policies) ||
-                              Q <- rabbit_amqqueue:list(VHost)]}
+                         [mnesia:lock({table, T}, write) || T <- Tabs], %% [1]
+                         case catch list(VHost) of
+                             {error, {no_such_vhost, _}} ->
+                                 ok; %% [2]
+                             Policies ->
+                                 {[update_exchange(X, Policies) ||
+                                      X <- rabbit_exchange:list(VHost)],
+                                  [update_queue(Q, Policies) ||
+                                      Q <- rabbit_amqqueue:list(VHost)]}
+                         end
                  end),
     [catch notify(X) || X <- Xs],
     [catch notify(Q) || Q <- Qs],

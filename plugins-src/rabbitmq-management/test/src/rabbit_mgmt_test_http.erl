@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Console.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2010-2013 GoPivotal, Inc.  All rights reserved.
+%%   Copyright (c) 2010-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_test_http).
@@ -33,6 +33,15 @@ overview_test() ->
     http_delete("/users/myuser", ?NO_CONTENT),
     %% TODO uncomment when priv works in test
     %%http_get(""),
+    ok.
+
+cluster_name_test() ->
+    http_put("/users/myuser", [{password, <<"myuser">>},
+                               {tags,     <<"management">>}], ?NO_CONTENT),
+    http_put("/cluster-name", [{name, "foo"}], "myuser", "myuser", ?NOT_AUTHORISED),
+    http_put("/cluster-name", [{name, "foo"}], ?NO_CONTENT),
+    [{name, "foo"}] = http_get("/cluster-name", "myuser", "myuser", ?OK),
+    http_delete("/users/myuser", ?NO_CONTENT),
     ok.
 
 nodes_test() ->
@@ -566,13 +575,6 @@ permissions_connection_channel_test() ->
     http_get("/channels/foo", ?NOT_FOUND),
     ok.
 
-unicode_test() ->
-    QArgs = [],
-    http_put("/queues/%2f/♫♪♫♪", QArgs, ?NO_CONTENT),
-    http_get("/queues/%2f/♫♪♫♪", ?OK),
-    http_delete("/queues/%2f/♫♪♫♪", ?NO_CONTENT),
-    ok.
-
 defs(Key, URI, CreateMethod, Args) ->
     defs(Key, URI, CreateMethod, Args,
          fun(URI2) -> http_delete(URI2, ?NO_CONTENT) end).
@@ -950,6 +952,15 @@ publish_fail_test() ->
             {payload,          [<<"not a string">>]},
             {payload_encoding, <<"string">>}],
     http_post("/exchanges/%2f/amq.default/publish", Msg3, ?BAD_REQUEST),
+    MsgTemplate = [{exchange,         <<"">>},
+                   {routing_key,      <<"myqueue">>},
+                   {payload,          <<"Hello world">>},
+                   {payload_encoding, <<"string">>}],
+    [http_post("/exchanges/%2f/amq.default/publish",
+               [{properties, [BadProp]} | MsgTemplate], ?BAD_REQUEST)
+     || BadProp <- [{priority,   <<"really high">>},
+                    {timestamp,  <<"recently">>},
+                    {expiration, 1234}]],
     http_delete("/users/myuser", ?NO_CONTENT),
     ok.
 
@@ -1087,6 +1098,8 @@ policy_permissions_test() ->
                   http_put("/policies/v/HA",    Policy, U, U, ?NOT_AUTHORISED),
                   http_put(
                     "/parameters/test/v/good",   Param, U, U, ?NOT_AUTHORISED),
+                  http_put(
+                    "/parameters/test/v/admin",  Param, U, U, ?NOT_AUTHORISED),
                   http_get("/policies",                 U, U, ?NOT_AUTHORISED),
                   http_get("/policies/v",               U, U, ?NOT_AUTHORISED),
                   http_get("/parameters",               U, U, ?NOT_AUTHORISED),
@@ -1107,6 +1120,11 @@ policy_permissions_test() ->
     [Neg(U) || U <- ["mon", "mgmt"]],
     [Pos(U) || U <- ["admin", "policy"]],
     [AlwaysNeg(U) || U <- ["mon", "mgmt", "admin", "policy"]],
+
+    %% This one is deliberately different between admin and policymaker.
+    http_put("/parameters/test/v/admin", Param, "admin", "admin", ?NO_CONTENT),
+    http_put("/parameters/test/v/admin", Param, "policy", "policy",
+             ?BAD_REQUEST),
 
     http_delete("/vhosts/v", ?NO_CONTENT),
     http_delete("/users/admin", ?NO_CONTENT),
