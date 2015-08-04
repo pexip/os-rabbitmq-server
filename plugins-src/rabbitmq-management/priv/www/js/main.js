@@ -1,6 +1,5 @@
 $(document).ready(function() {
     replace_content('outer', format('login', {}));
-    try_uri_login();
     start_app_login();
 });
 
@@ -17,22 +16,21 @@ function dispatcher() {
     }
 }
 
-function try_uri_login() {
-    var location = this.location.href;
-    location = location.substr(3 + location.indexOf("://"));
-    var authority = location.substr(0, location.indexOf("/"));
-    if (authority.indexOf("@") !== -1) {
-        var userinfo = authority.substr(0, authority.indexOf("@"));
-        if (userinfo.split(":").length === 2) {
-            uri_auth_used = true;
-            set_auth_cookie(decodeURIComponent(userinfo));
-        }
-    }
+function set_auth_cookie(userinfo) {
+    var b64 = b64_encode_utf8(userinfo);
+    document.cookie = 'auth=' + encodeURIComponent(b64);
 }
 
-function set_auth_cookie(userinfo) {
-    var b64 = b64_encode_utf8(decodeURIComponent(userinfo));
-    document.cookie = 'auth=' + encodeURIComponent(b64);
+function login_route () {
+    var userpass = '' + this.params['username'] + ':' + this.params['password'],
+        location = window.location.href,
+        hash = window.location.hash;
+    set_auth_cookie(decodeURIComponent(userpass));
+    location = location.substr(0, location.length - hash.length);
+    window.location.replace(location);
+    // because we change url, we don't need to hit check_login as
+    // we'll end up doing that at the bottom of start_app_login after
+    // we've changed url.
 }
 
 function start_app_login() {
@@ -43,6 +41,7 @@ function start_app_login() {
             set_auth_cookie(username + ':' + password);
             check_login();
         });
+        this.get('#/login/:username/:password', login_route)
     });
     app.run();
     if (get_cookie('auth') != '') {
@@ -51,15 +50,14 @@ function start_app_login() {
 }
 
 function check_login() {
-    var user = JSON.parse(sync_get('/whoami'));
+    user = JSON.parse(sync_get('/whoami'));
     if (user == false) {
         document.cookie = 'auth=; expires=Thu, 01 Jan 1970 00:00:00 GMT';
         replace_content('login-status', '<p>Login failed</p>');
     }
     else {
-        replace_content('outer',
-                        format('layout', {uri_auth_used: uri_auth_used}));
-        setup_global_vars(user);
+        replace_content('outer', format('layout', {}));
+        setup_global_vars();
         setup_constant_events();
         update_vhosts();
         update_interval();
@@ -491,13 +489,16 @@ function postprocess() {
             update_multifields();
         });
     $('.controls-appearance').change(function() {
-        var controls = $(this).attr('controls-divs');
-        if ($(this).val() == 'true') {
-            $('#' + controls + '-yes').slideDown(100);
-            $('#' + controls + '-no').slideUp(100);
-        } else {
-            $('#' + controls + '-yes').slideUp(100);
-            $('#' + controls + '-no').slideDown(100);
+        var params = $(this).get(0).options;
+        var selected = $(this).val();
+
+        for (i = 0; i < params.length; i++) {
+            var param = params[i].value;
+            if (param == selected) {
+                $('#' + param + '-div').slideDown(100);
+            } else {
+                $('#' + param + '-div').slideUp(100);
+            }
         }
     });
     setup_visibility();
@@ -529,6 +530,7 @@ function postprocess() {
         $(this).parents('form').submit();
     });
     $('#filter').die().live('keyup', debounce(update_filter, 500));
+    $('#filter-regex-mode').change(update_filter_regex_mode);
     $('#truncate').die().live('keyup', debounce(update_truncate, 500));
     if (! user_administrator) {
         $('.administrator-only').remove();
@@ -639,6 +641,25 @@ function multifield_input(prefix, suffix, type) {
     }
 }
 
+function update_filter_regex(jElem) {
+    current_filter_regex = null;
+    jElem.parents('.filter').children('.status-error').remove();
+    if (current_filter_regex_on && $.trim(current_filter).length > 0) {
+        try {
+            current_filter_regex = new RegExp(current_filter,'i');
+        } catch (e) {
+            jElem.parents('.filter').append('<p class="status-error">' +
+                                            e.message + '</p>');
+        }
+    }
+}
+
+function update_filter_regex_mode() {
+    current_filter_regex_on = $(this).is(':checked');
+    update_filter_regex($(this));
+    partial_update();
+}
+
 function update_filter() {
     current_filter = $(this).val();
     var table = $(this).parents('table').first();
@@ -646,6 +667,7 @@ function update_filter() {
     if ($(this).val() != '') {
         table.addClass('filter-active');
     }
+    update_filter_regex($(this));
     partial_update();
 }
 
@@ -712,11 +734,26 @@ function publish_msg(params0) {
     params['properties']['delivery_mode'] = parseInt(params['delivery_mode']);
     if (params['headers'] != '')
         params['properties']['headers'] = params['headers'];
-    var props = ['content_type', 'content_encoding', 'priority', 'correlation_id', 'reply_to', 'expiration', 'message_id', 'timestamp', 'type', 'user_id', 'app_id', 'cluster_id'];
+    var props = [['content_type',     'str'],
+                 ['content_encoding', 'str'],
+                 ['correlation_id',   'str'],
+                 ['reply_to',         'str'],
+                 ['expiration',       'str'],
+                 ['message_id',       'str'],
+                 ['type',             'str'],
+                 ['user_id',          'str'],
+                 ['app_id',           'str'],
+                 ['cluster_id',       'str'],
+                 ['priority',         'int'],
+                 ['timestamp',        'int']];
     for (var i in props) {
-        var p = props[i];
-        if (params['props'][p] != '')
-            params['properties'][p] = params['props'][p];
+        var name = props[i][0];
+        var type = props[i][1];
+        if (params['props'][name] != undefined && params['props'][name] != '') {
+            var value = params['props'][name];
+            if (type == 'int') value = parseInt(value);
+            params['properties'][name] = value;
+        }
     }
     with_req('POST', path, JSON.stringify(params), function(resp) {
             var result = jQuery.parseJSON(resp.responseText);
@@ -972,11 +1009,12 @@ function collapse_multifields(params0) {
         var v = params0[name + '_' + id + '_mfvalue'];
         var t = params0[name + '_' + id + '_mftype'];
         var val = null;
+        var top_level = id_parts.length == 1;
         if (t == 'list') {
             val = [];
             id_map[name][id] = val;
         }
-        else if (set(k) || set(v)) {
+        else if ((set(k) && top_level) || set(v)) {
             if (t == 'boolean') {
                 if (v != 'true' && v != 'false')
                     throw(k + ' must be "true" or "false"; got ' + v);
@@ -993,7 +1031,7 @@ function collapse_multifields(params0) {
             }
         }
         if (val != null) {
-            if (id_parts.length == 1) {
+            if (top_level) {
                 params[name][k] = val;
             }
             else {
@@ -1040,10 +1078,16 @@ function check_password(params) {
 
 function maybe_remove_fields(params) {
     $('.controls-appearance').each(function(index) {
-        if ($(this).val() == 'false') {
-            delete params[$(this).attr('param-name')];
-            delete params[$(this).attr('name')];
+        var options = $(this).get(0).options;
+        var selected = $(this).val();
+
+        for (i = 0; i < options.length; i++) {
+            var option = options[i].value;
+            if (option != selected) {
+                delete params[option];
+            }
         }
+        delete params[$(this).attr('name')];
     });
     return params;
 }

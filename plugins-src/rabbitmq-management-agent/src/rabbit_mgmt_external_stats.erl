@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Console.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2010-2013 GoPivotal, Inc.  All rights reserved.
+%%   Copyright (c) 2010-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_external_stats).
@@ -57,12 +57,23 @@ get_used_fd({unix, linux}) ->
 get_used_fd({unix, BSD})
   when BSD == openbsd; BSD == freebsd; BSD == netbsd ->
     Digit = fun (D) -> lists:member(D, "0123456789*") end,
-    length(
-      lists:filter(
-        fun (Line) ->
-            lists:all(Digit, (lists:nth(4, string:tokens(Line, " "))))
-        end,
-        string:tokens(os:cmd("fstat -p " ++ os:getpid()), "\n")));
+    Output = os:cmd("fstat -p " ++ os:getpid()),
+    try
+        length(
+          lists:filter(
+            fun (Line) ->
+                    lists:all(Digit, (lists:nth(4, string:tokens(Line, " "))))
+            end, string:tokens(Output, "\n")))
+    catch _:Error ->
+            case get(logged_used_fd_error) of
+                undefined -> rabbit_log:warning(
+                               "Could not parse fstat output:~n~s~n~p~n",
+                               [Output, {Error, erlang:get_stacktrace()}]),
+                             put(logged_used_fd_error, true);
+                _         -> ok
+            end,
+            unknown
+    end;
 
 get_used_fd({unix, _}) ->
     Cmd = rabbit_misc:format(
@@ -233,6 +244,8 @@ format_mochiweb_option_list(C) ->
 
 format_mochiweb_option(ssl_opts, V) ->
     format_mochiweb_option_list(V);
+format_mochiweb_option(ciphers, V) ->
+    list_to_binary(rabbit_misc:format("~w", [V]));
 format_mochiweb_option(_K, V) when is_list(V) ->
     list_to_binary(V);
 format_mochiweb_option(_K, V) ->

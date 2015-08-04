@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(amqp_client_SUITE).
@@ -49,6 +49,7 @@ consume_notification_test_()            -> ?RUN([]).
 basic_nack_test_()                      -> ?RUN([]).
 large_content_test_()                   -> ?RUN([]).
 lifecycle_test_()                       -> ?RUN([]).
+direct_no_user_test_()                  -> ?RUN([]).
 direct_no_password_test_()              -> ?RUN([]).
 nowait_exchange_declare_test_()         -> ?RUN([]).
 channel_repeat_open_close_test_()       -> ?RUN([]).

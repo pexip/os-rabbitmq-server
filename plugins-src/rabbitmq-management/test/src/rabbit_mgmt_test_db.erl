@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Console.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2010-2013 GoPivotal, Inc.  All rights reserved.
+%%   Copyright (c) 2010-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_test_db).
@@ -207,6 +207,7 @@ event(Type, Stats, Timestamp) ->
     gen_server:cast({global, rabbit_mgmt_db},
                     {event, #event{type      = Type,
                                    props     = Stats,
+                                   reference = none,
                                    timestamp = sec_to_triple(Timestamp)}}).
 
 sec_to_triple(Sec) -> {Sec div 1000000, Sec rem 1000000, 0}.

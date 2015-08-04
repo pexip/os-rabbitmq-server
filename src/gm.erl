@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(gm).
@@ -382,7 +382,7 @@
 
 -behaviour(gen_server2).
 
--export([create_tables/0, start_link/4, leave/1, broadcast/2,
+-export([create_tables/0, start_link/4, leave/1, broadcast/2, broadcast/3,
          confirmed_broadcast/2, info/1, validate_members/2, forget_group/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
@@ -395,6 +395,7 @@
 -export([table_definitions/0]).
 
 -define(GROUP_TABLE, gm_group).
+-define(MAX_BUFFER_SIZE, 100000000). %% 100MB
 -define(HIBERNATE_AFTER_MIN, 1000).
 -define(DESIRED_HIBERNATE, 10000).
 -define(BROADCAST_TIMER, 25).
@@ -414,6 +415,7 @@
           callback_args,
           confirms,
           broadcast_buffer,
+          broadcast_buffer_sz,
           broadcast_timer,
           txn_executor
         }).
@@ -474,8 +476,8 @@
 %% joined/2 before receiving any messages from it; and (2) we will not
 %% see members die that we have not seen born (or supplied in the
 %% members to joined/2).
--callback members_changed(Args :: term(), Births :: [pid()],
-                          Deaths :: [pid()], Live :: [pid()]) ->
+-callback members_changed(Args :: term(),
+                          Births :: [pid()], Deaths :: [pid()]) ->
     ok | {stop, Reason :: term()} | {become, Module :: atom(), Args :: any()}.
 
 %% Supplied with Args provided in start_link, the sender, and the
@@ -494,7 +496,7 @@
 -else.
 
 behaviour_info(callbacks) ->
-    [{joined, 2}, {members_changed, 4}, {handle_msg, 3}, {terminate, 2}];
+    [{joined, 2}, {members_changed, 3}, {handle_msg, 3}, {terminate, 2}];
 behaviour_info(_Other) ->
     undefined.
 
@@ -507,9 +509,9 @@ create_tables([]) ->
     ok;
 create_tables([{Table, Attributes} | Tables]) ->
     case mnesia:create_table(Table, Attributes) of
-        {atomic, ok}                          -> create_tables(Tables);
-        {aborted, {already_exists, gm_group}} -> create_tables(Tables);
-        Err                                   -> Err
+        {atomic, ok}                       -> create_tables(Tables);
+        {aborted, {already_exists, Table}} -> create_tables(Tables);
+        Err                                -> Err
     end.
 
 table_definitions() ->
@@ -522,8 +524,10 @@ start_link(GroupName, Module, Args, TxnFun) ->
 leave(Server) ->
     gen_server2:cast(Server, leave).
 
-broadcast(Server, Msg) ->
-    gen_server2:cast(Server, {broadcast, Msg}).
+broadcast(Server, Msg) -> broadcast(Server, Msg, 0).
+
+broadcast(Server, Msg, SizeHint) ->
+    gen_server2:cast(Server, {broadcast, Msg, SizeHint}).
 
 confirmed_broadcast(Server, Msg) ->
     gen_server2:call(Server, {confirmed_broadcast, Msg}, infinity).
@@ -542,23 +546,25 @@ forget_group(GroupName) ->
     ok.
 
 init([GroupName, Module, Args, TxnFun]) ->
+    put(process_name, {?MODULE, GroupName}),
     {MegaSecs, Secs, MicroSecs} = now(),
     random:seed(MegaSecs, Secs, MicroSecs),
     Self = make_member(GroupName),
     gen_server2:cast(self(), join),
-    {ok, #state { self             = Self,
-                  left             = {Self, undefined},
-                  right            = {Self, undefined},
-                  group_name       = GroupName,
-                  module           = Module,
-                  view             = undefined,
-                  pub_count        = -1,
-                  members_state    = undefined,
-                  callback_args    = Args,
-                  confirms         = queue:new(),
-                  broadcast_buffer = [],
-                  broadcast_timer  = undefined,
-                  txn_executor     = TxnFun }, hibernate,
+    {ok, #state { self                = Self,
+                  left                = {Self, undefined},
+                  right               = {Self, undefined},
+                  group_name          = GroupName,
+                  module              = Module,
+                  view                = undefined,
+                  pub_count           = -1,
+                  members_state       = undefined,
+                  callback_args       = Args,
+                  confirms            = queue:new(),
+                  broadcast_buffer    = [],
+                  broadcast_buffer_sz = 0,
+                  broadcast_timer     = undefined,
+                  txn_executor        = TxnFun }, hibernate,
      {backoff, ?HIBERNATE_AFTER_MIN, ?HIBERNATE_AFTER_MIN, ?DESIRED_HIBERNATE}}.
 
 
@@ -575,7 +581,11 @@ handle_call({confirmed_broadcast, Msg}, _From,
                            ok, State});
 
 handle_call({confirmed_broadcast, Msg}, From, State) ->
-    internal_broadcast(Msg, From, State);
+    {Result, State1 = #state { pub_count = PubCount, confirms = Confirms }} =
+        internal_broadcast(Msg, 0, State),
+    Confirms1 = queue:in({PubCount, From}, Confirms),
+    handle_callback_result({Result, flush_broadcast_buffer(
+                                      State1 #state { confirms = Confirms1 })});
 
 handle_call(info, _From,
             State = #state { members_state = undefined }) ->
@@ -595,53 +605,38 @@ handle_call({add_on_right, _NewMember}, _From,
 handle_call({add_on_right, NewMember}, _From,
             State = #state { self          = Self,
                              group_name    = GroupName,
-                             view          = View,
                              members_state = MembersState,
-                             module        = Module,
-                             callback_args = Args,
                              txn_executor  = TxnFun }) ->
-    {MembersState1, Group} =
-      record_new_member_in_group(
-        GroupName, Self, NewMember,
-        fun (Group1) ->
-                View1 = group_to_view(Group1),
-                MembersState1 = remove_erased_members(MembersState, View1),
-                ok = send_right(NewMember, View1,
-                                {catchup, Self,
-                                 prepare_members_state(MembersState1)}),
-                MembersState1
-        end, TxnFun),
-    View2 = group_to_view(Group),
-    State1 = check_neighbours(State #state { view          = View2,
-                                             members_state = MembersState1 }),
-    Result = callback_view_changed(Args, Module, View, View2),
+    Group = record_new_member_in_group(NewMember, Self, GroupName, TxnFun),
+    View1 = group_to_view(Group),
+    MembersState1 = remove_erased_members(MembersState, View1),
+    ok = send_right(NewMember, View1,
+                    {catchup, Self, prepare_members_state(MembersState1)}),
+    {Result, State1} = change_view(View1, State #state {
+                                            members_state = MembersState1 }),
     handle_callback_result({Result, {ok, Group}, State1}).
-
 
 handle_cast({?TAG, ReqVer, Msg},
             State = #state { view          = View,
                              members_state = MembersState,
-                             group_name    = GroupName,
-                             module        = Module,
-                             callback_args = Args }) ->
+                             group_name    = GroupName }) ->
     {Result, State1} =
         case needs_view_update(ReqVer, View) of
-            true  -> View1 = group_to_view(read_group(GroupName)),
+            true  -> View1 = group_to_view(dirty_read_group(GroupName)),
                      MemberState1 = remove_erased_members(MembersState, View1),
-                     {callback_view_changed(Args, Module, View, View1),
-                      check_neighbours(
-                        State #state { view          = View1,
-                                       members_state = MemberState1 })};
+                     change_view(View1, State #state {
+                                          members_state = MemberState1 });
             false -> {ok, State}
         end,
     handle_callback_result(
       if_callback_success(
         Result, fun handle_msg_true/3, fun handle_msg_false/3, Msg, State1));
 
-handle_cast({broadcast, _Msg}, State = #state { members_state = undefined }) ->
+handle_cast({broadcast, _Msg, _SizeHint},
+            State = #state { members_state = undefined }) ->
     noreply(State);
 
-handle_cast({broadcast, Msg},
+handle_cast({broadcast, Msg, _SizeHint},
             State = #state { self          = Self,
                              right         = {Self, undefined},
                              module        = Module,
@@ -649,8 +644,9 @@ handle_cast({broadcast, Msg},
     handle_callback_result({Module:handle_msg(Args, get_pid(Self), Msg),
                             State});
 
-handle_cast({broadcast, Msg}, State) ->
-    internal_broadcast(Msg, none, State);
+handle_cast({broadcast, Msg, SizeHint}, State) ->
+    {Result, State1} = internal_broadcast(Msg, SizeHint, State),
+    handle_callback_result({Result, maybe_flush_broadcast_buffer(State1)});
 
 handle_cast(join, State = #state { self          = Self,
                                    group_name    = GroupName,
@@ -678,8 +674,7 @@ handle_cast({validate_members, OldMembers},
     Deaths = OldMembers -- NewMembers,
     case {Births, Deaths} of
         {[], []}  -> noreply(State);
-        _         -> Result = Module:members_changed(
-                                Args, Births, Deaths, NewMembers),
+        _         -> Result = Module:members_changed(Args, Births, Deaths),
                      handle_callback_result({Result, State})
     end;
 
@@ -699,9 +694,6 @@ handle_info({'DOWN', MRef, process, _Pid, Reason},
                              left          = Left,
                              right         = Right,
                              group_name    = GroupName,
-                             view          = View,
-                             module        = Module,
-                             callback_args = Args,
                              confirms      = Confirms,
                              txn_executor  = TxnFun }) ->
     Member = case {Left, Right} of
@@ -715,24 +707,17 @@ handle_info({'DOWN', MRef, process, _Pid, Reason},
         {_, {shutdown, ring_shutdown}} ->
             noreply(State);
         _ ->
-            View1 =
-                group_to_view(record_dead_member_in_group(Member,
-                                                          GroupName, TxnFun)),
-            {Result, State2} =
-                case alive_view_members(View1) of
-                    [Self] ->
-                        {Result1, State1} = maybe_erase_aliases(State, View1),
-                        {Result1, State1 #state {
-                            members_state = blank_member_state(),
-                            confirms      = purge_confirms(Confirms) }};
-                    _ ->
-                        %% here we won't be pointing out any deaths:
-                        %% the concern is that there maybe births
-                        %% which we'd otherwise miss.
-                        {callback_view_changed(Args, Module, View, View1),
-                         check_neighbours(State #state { view = View1 })}
-                end,
-            handle_callback_result({Result, State2})
+            View1 = group_to_view(record_dead_member_in_group(
+                                    Member, GroupName, TxnFun)),
+            handle_callback_result(
+              case alive_view_members(View1) of
+                  [Self] -> maybe_erase_aliases(
+                              State #state {
+                                members_state = blank_member_state(),
+                                confirms      = purge_confirms(Confirms) },
+                              View1);
+                  _      -> change_view(View1, State)
+              end)
     end.
 
 
@@ -747,8 +732,21 @@ code_change(_OldVsn, State, _Extra) ->
 
 prioritise_info(flush, _Len, _State) ->
     1;
+%% DOWN messages should not overtake initial catchups; if they do we
+%% will receive a DOWN we do not know what to do with.
 prioritise_info({'DOWN', _MRef, process, _Pid, _Reason}, _Len,
-                #state { members_state = MS }) when MS /= undefined ->
+                #state { members_state = undefined }) ->
+    0;
+%% We should not prioritise DOWN messages from our left since
+%% otherwise the DOWN can overtake any last activity from the left,
+%% causing that activity to be lost.
+prioritise_info({'DOWN', _MRef, process, LeftPid, _Reason}, _Len,
+                #state { left = {{_LeftVer, LeftPid}, _MRef2} }) ->
+    0;
+%% But prioritise all other DOWNs - we want to make sure we are not
+%% sending activity into the void for too long because our right is
+%% down but we don't know it.
+prioritise_info({'DOWN', _MRef, process, _Pid, _Reason}, _Len, _State) ->
     1;
 prioritise_info(_, _Len, _State) ->
     0.
@@ -882,28 +880,40 @@ ensure_broadcast_timer(State = #state { broadcast_timer = undefined }) ->
 ensure_broadcast_timer(State) ->
     State.
 
-internal_broadcast(Msg, From, State = #state { self             = Self,
-                                               pub_count        = PubCount,
-                                               module           = Module,
-                                               confirms         = Confirms,
-                                               callback_args    = Args,
-                                               broadcast_buffer = Buffer }) ->
+internal_broadcast(Msg, SizeHint,
+                   State = #state { self                = Self,
+                                    pub_count           = PubCount,
+                                    module              = Module,
+                                    callback_args       = Args,
+                                    broadcast_buffer    = Buffer,
+                                    broadcast_buffer_sz = BufferSize }) ->
     PubCount1 = PubCount + 1,
-    Result = Module:handle_msg(Args, get_pid(Self), Msg),
-    Buffer1 = [{PubCount1, Msg} | Buffer],
-    Confirms1 = case From of
-                    none -> Confirms;
-                    _    -> queue:in({PubCount1, From}, Confirms)
-                end,
-    State1 = State #state { pub_count        = PubCount1,
-                            confirms         = Confirms1,
-                            broadcast_buffer = Buffer1 },
-    case From =/= none of
-        true ->
-            handle_callback_result({Result, flush_broadcast_buffer(State1)});
-        false ->
-            handle_callback_result(
-              {Result, State1 #state { broadcast_buffer = Buffer1 }})
+    {Module:handle_msg(Args, get_pid(Self), Msg),
+     State #state { pub_count           = PubCount1,
+                    broadcast_buffer    = [{PubCount1, Msg} | Buffer],
+                    broadcast_buffer_sz = BufferSize + SizeHint}}.
+
+%% The Erlang distribution mechanism has an interesting quirk - it
+%% will kill the VM cold with "Absurdly large distribution output data
+%% buffer" if you attempt to send a message which serialises out to
+%% more than 2^31 bytes in size. It's therefore a very good idea to
+%% make sure that we don't exceed that size!
+%%
+%% Now, we could figure out the size of messages as they come in using
+%% size(term_to_binary(Msg)) or similar. The trouble is, that requires
+%% us to serialise the message only to throw the serialised form
+%% away. Hard to believe that's a sensible thing to do. So instead we
+%% accept a size hint from the application, via broadcast/3. This size
+%% hint can be the size of anything in the message which we expect
+%% could be large, and we just ignore the size of any small bits of
+%% the message term. Therefore MAX_BUFFER_SIZE is set somewhat
+%% conservatively at 100MB - but the buffer is only to allow us to
+%% buffer tiny messages anyway, so 100MB is plenty.
+
+maybe_flush_broadcast_buffer(State = #state{broadcast_buffer_sz = Size}) ->
+    case Size > ?MAX_BUFFER_SIZE of
+        true  -> flush_broadcast_buffer(State);
+        false -> State
     end.
 
 flush_broadcast_buffer(State = #state { broadcast_buffer = [] }) ->
@@ -922,8 +932,9 @@ flush_broadcast_buffer(State = #state { self             = Self,
                               Member #member { pending_ack = PA1,
                                                last_pub = PubCount }
                       end, Self, MembersState),
-    State #state { members_state    = MembersState1,
-                   broadcast_buffer = [] }.
+    State #state { members_state       = MembersState1,
+                   broadcast_buffer    = [],
+                   broadcast_buffer_sz = 0}.
 
 
 %% ---------------------------------------------------------------------------
@@ -1023,7 +1034,7 @@ ensure_alive_suffix1(MembersQ) ->
 %% ---------------------------------------------------------------------------
 
 join_group(Self, GroupName, TxnFun) ->
-    join_group(Self, GroupName, read_group(GroupName), TxnFun).
+    join_group(Self, GroupName, dirty_read_group(GroupName), TxnFun).
 
 join_group(Self, GroupName, {error, not_found}, TxnFun) ->
     join_group(Self, GroupName,
@@ -1038,7 +1049,8 @@ join_group(Self, GroupName, #gm_group { members = Members } = Group, TxnFun) ->
             case lists:filter(fun is_member_alive/1, Members) of
                 [] ->
                     join_group(Self, GroupName,
-                               prune_or_create_group(Self, GroupName, TxnFun));
+                               prune_or_create_group(Self, GroupName, TxnFun),
+                               TxnFun);
                 Alive ->
                     Left = lists:nth(random:uniform(length(Alive)), Alive),
                     Handler =
@@ -1050,8 +1062,7 @@ join_group(Self, GroupName, #gm_group { members = Members } = Group, TxnFun) ->
                                   TxnFun)
                         end,
                     try
-                        case gen_server2:call(
-                               get_pid(Left), {add_on_right, Self}, infinity) of
+                        case neighbour_call(Left, {add_on_right, Self}) of
                             {ok, Group1} -> group_to_view(Group1);
                             not_ready    -> join_group(Self, GroupName, TxnFun)
                         end
@@ -1066,93 +1077,82 @@ join_group(Self, GroupName, #gm_group { members = Members } = Group, TxnFun) ->
             end
     end.
 
-read_group(GroupName) ->
+dirty_read_group(GroupName) ->
     case mnesia:dirty_read(?GROUP_TABLE, GroupName) of
         []      -> {error, not_found};
         [Group] -> Group
     end.
 
+read_group(GroupName) ->
+    case mnesia:read({?GROUP_TABLE, GroupName}) of
+        []      -> {error, not_found};
+        [Group] -> Group
+    end.
+
+write_group(Group) -> mnesia:write(?GROUP_TABLE, Group, write), Group.
+
 prune_or_create_group(Self, GroupName, TxnFun) ->
-    Group = TxnFun(
-              fun () ->
-                      GroupNew = #gm_group { name    = GroupName,
-                                             members = [Self],
-                                             version = get_version(Self) },
-                      case mnesia:read({?GROUP_TABLE, GroupName}) of
-                          [] ->
-                              mnesia:write(GroupNew),
-                              GroupNew;
-                          [Group1 = #gm_group { members = Members }] ->
-                              case lists:any(fun is_member_alive/1, Members) of
-                                  true  -> Group1;
-                                  false -> mnesia:write(GroupNew),
-                                           GroupNew
-                              end
+    TxnFun(
+      fun () ->
+              GroupNew = #gm_group { name    = GroupName,
+                                     members = [Self],
+                                     version = get_version(Self) },
+              case read_group(GroupName) of
+                  {error, not_found} ->
+                      write_group(GroupNew);
+                  Group = #gm_group { members = Members } ->
+                      case lists:any(fun is_member_alive/1, Members) of
+                          true  -> Group;
+                          false -> write_group(GroupNew)
                       end
-              end),
-    Group.
+              end
+      end).
 
 record_dead_member_in_group(Member, GroupName, TxnFun) ->
-    Group =
-        TxnFun(
-          fun () -> [Group1 = #gm_group { members = Members, version = Ver }] =
-                        mnesia:read({?GROUP_TABLE, GroupName}),
-                    case lists:splitwith(
-                           fun (Member1) -> Member1 =/= Member end, Members) of
-                        {_Members1, []} -> %% not found - already recorded dead
-                            Group1;
-                        {Members1, [Member | Members2]} ->
-                            Members3 = Members1 ++ [{dead, Member} | Members2],
-                            Group2 = Group1 #gm_group { members = Members3,
-                                                        version = Ver + 1 },
-                            mnesia:write(Group2),
-                            Group2
-                    end
-          end),
-    Group.
+    TxnFun(
+      fun () ->
+              Group = #gm_group { members = Members, version = Ver } =
+                  read_group(GroupName),
+              case lists:splitwith(
+                     fun (Member1) -> Member1 =/= Member end, Members) of
+                  {_Members1, []} -> %% not found - already recorded dead
+                      Group;
+                  {Members1, [Member | Members2]} ->
+                      Members3 = Members1 ++ [{dead, Member} | Members2],
+                      write_group(Group #gm_group { members = Members3,
+                                                    version = Ver + 1 })
+              end
+      end).
 
-record_new_member_in_group(GroupName, Left, NewMember, Fun, TxnFun) ->
-    {Result, Group} =
-        TxnFun(
-          fun () ->
-                  [#gm_group { members = Members, version = Ver } = Group1] =
-                      mnesia:read({?GROUP_TABLE, GroupName}),
-                  {Prefix, [Left | Suffix]} =
-                      lists:splitwith(fun (M) -> M =/= Left end, Members),
-                  Members1 = Prefix ++ [Left, NewMember | Suffix],
-                  Group2 = Group1 #gm_group { members = Members1,
-                                              version = Ver + 1 },
-                  Result = Fun(Group2),
-                  mnesia:write(Group2),
-                  {Result, Group2}
-          end),
-    {Result, Group}.
+record_new_member_in_group(NewMember, Left, GroupName, TxnFun) ->
+    TxnFun(
+      fun () ->
+              Group = #gm_group { members = Members, version = Ver } =
+                  read_group(GroupName),
+              {Prefix, [Left | Suffix]} =
+                  lists:splitwith(fun (M) -> M =/= Left end, Members),
+              write_group(Group #gm_group {
+                            members = Prefix ++ [Left, NewMember | Suffix],
+                            version = Ver + 1 })
+      end).
 
 erase_members_in_group(Members, GroupName, TxnFun) ->
     DeadMembers = [{dead, Id} || Id <- Members],
-    Group =
-        TxnFun(
-          fun () ->
-                  [Group1 = #gm_group { members = [_|_] = Members1,
-                                        version = Ver }] =
-                      mnesia:read({?GROUP_TABLE, GroupName}),
-                  case Members1 -- DeadMembers of
-                      Members1 -> Group1;
-                      Members2 -> Group2 =
-                                      Group1 #gm_group { members = Members2,
-                                                         version = Ver + 1 },
-                                  mnesia:write(Group2),
-                                  Group2
-                  end
-          end),
-    Group.
+    TxnFun(
+      fun () ->
+              Group = #gm_group { members = [_|_] = Members1, version = Ver } =
+                  read_group(GroupName),
+              case Members1 -- DeadMembers of
+                  Members1 -> Group;
+                  Members2 -> write_group(
+                                Group #gm_group { members = Members2,
+                                                  version = Ver + 1 })
+              end
+      end).
 
 maybe_erase_aliases(State = #state { self          = Self,
                                      group_name    = GroupName,
-                                     view          = View0,
                                      members_state = MembersState,
-                                     module        = Module,
-                                     callback_args = Args,
                                      txn_executor  = TxnFun }, View) ->
     #view_member { aliases = Aliases } = fetch_view_member(Self, View),
     {Erasable, MembersState1}
@@ -1166,19 +1166,19 @@ maybe_erase_aliases(State = #state { self          = Self,
                          false -> Acc
                      end
              end, {[], MembersState}, Aliases),
-    State1 = State #state { members_state = MembersState1 },
-    case Erasable of
-        [] -> {ok, State1 #state { view = View }};
-        _  -> View1 = group_to_view(
-                        erase_members_in_group(Erasable, GroupName, TxnFun)),
-              {callback_view_changed(Args, Module, View0, View1),
-               check_neighbours(State1 #state { view = View1 })}
-    end.
+    View1 = case Erasable of
+                [] -> View;
+                _  -> group_to_view(
+                        erase_members_in_group(Erasable, GroupName, TxnFun))
+            end,
+    change_view(View1, State #state { members_state = MembersState1 }).
 
 can_erase_view_member(Self, Self, _LA, _LP) -> false;
 can_erase_view_member(_Self, _Id,   N,   N) -> true;
 can_erase_view_member(_Self, _Id, _LA, _LP) -> false.
 
+neighbour_cast(N, Msg) -> gen_server2:cast(get_pid(N), Msg).
+neighbour_call(N, Msg) -> gen_server2:call(get_pid(N), Msg, infinity).
 
 %% ---------------------------------------------------------------------------
 %% View monitoring and maintanence
@@ -1187,18 +1187,17 @@ can_erase_view_member(_Self, _Id, _LA, _LP) -> false.
 ensure_neighbour(_Ver, Self, {Self, undefined}, Self) ->
     {Self, undefined};
 ensure_neighbour(Ver, Self, {Self, undefined}, RealNeighbour) ->
-    ok = gen_server2:cast(get_pid(RealNeighbour),
-                          {?TAG, Ver, check_neighbours}),
+    ok = neighbour_cast(RealNeighbour, {?TAG, Ver, check_neighbours}),
     {RealNeighbour, maybe_monitor(RealNeighbour, Self)};
 ensure_neighbour(_Ver, _Self, {RealNeighbour, MRef}, RealNeighbour) ->
     {RealNeighbour, MRef};
 ensure_neighbour(Ver, Self, {RealNeighbour, MRef}, Neighbour) ->
     true = erlang:demonitor(MRef),
     Msg = {?TAG, Ver, check_neighbours},
-    ok = gen_server2:cast(get_pid(RealNeighbour), Msg),
+    ok = neighbour_cast(RealNeighbour, Msg),
     ok = case Neighbour of
              Self -> ok;
-             _    -> gen_server2:cast(get_pid(Neighbour), Msg)
+             _    -> neighbour_cast(Neighbour, Msg)
          end,
     {Neighbour, maybe_monitor(Neighbour, Self)}.
 
@@ -1307,7 +1306,7 @@ prepare_members_state(MembersState) -> ?DICT:to_list(MembersState).
 build_members_state(MembersStateList) -> ?DICT:from_list(MembersStateList).
 
 make_member(GroupName) ->
-   {case read_group(GroupName) of
+   {case dirty_read_group(GroupName) of
         #gm_group { version = Version } -> Version;
         {error, not_found}              -> ?VERSION_START
     end, self()}.
@@ -1343,7 +1342,7 @@ maybe_send_activity(Activity, #state { self  = Self,
     send_right(Right, View, {activity, Self, Activity}).
 
 send_right(Right, View, Msg) ->
-    ok = gen_server2:cast(get_pid(Right), {?TAG, view_version(View), Msg}).
+    ok = neighbour_cast(Right, {?TAG, view_version(View), Msg}).
 
 callback(Args, Module, Activity) ->
     Result =
@@ -1371,17 +1370,19 @@ callback(Args, Module, Activity) ->
         {stop, _Reason} = Error -> Error
     end.
 
-callback_view_changed(Args, Module, OldView, NewView) ->
-    OldMembers = all_known_members(OldView),
-    NewMembers = all_known_members(NewView),
+change_view(View, State = #state { view          = View0,
+                                   module        = Module,
+                                   callback_args = Args }) ->
+    OldMembers = all_known_members(View0),
+    NewMembers = all_known_members(View),
     Births = NewMembers -- OldMembers,
     Deaths = OldMembers -- NewMembers,
-    case {Births, Deaths} of
-        {[], []} -> ok;
-        _        -> Module:members_changed(
-                      Args, get_pids(Births), get_pids(Deaths),
-                      get_pids(NewMembers))
-    end.
+    Result = case {Births, Deaths} of
+                 {[], []} -> ok;
+                 _        -> Module:members_changed(
+                               Args, get_pids(Births), get_pids(Deaths))
+             end,
+    {Result, check_neighbours(State #state { view = View })}.
 
 handle_callback_result({Result, State}) ->
     if_callback_success(

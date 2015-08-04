@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_disk_monitor).
@@ -103,12 +103,12 @@ init([Limit]) ->
             {ok, start_timer(set_disk_limits(State, Limit))};
         Err ->
             rabbit_log:info("Disabling disk free space monitoring "
-                            "on unsupported platform: ~p~n", [Err]),
+                            "on unsupported platform:~n~p~n", [Err]),
             {stop, unsupported_platform}
     end.
 
-handle_call(get_disk_free_limit, _From, State) ->
-    {reply, interpret_limit(State#state.limit), State};
+handle_call(get_disk_free_limit, _From, State = #state{limit = Limit}) ->
+    {reply, Limit, State};
 
 handle_call({set_disk_free_limit, Limit}, _From, State) ->
     {reply, ok, set_disk_limits(State, Limit)};
@@ -153,29 +153,29 @@ code_change(_OldVsn, State, _Extra) ->
 % the partition / drive containing this directory will be monitored
 dir() -> rabbit_mnesia:dir().
 
-set_disk_limits(State, Limit) ->
+set_disk_limits(State, Limit0) ->
+    Limit = interpret_limit(Limit0),
     State1 = State#state { limit = Limit },
     rabbit_log:info("Disk free limit set to ~pMB~n",
-                    [trunc(interpret_limit(Limit) / 1000000)]),
+                    [trunc(Limit / 1000000)]),
     internal_update(State1).
 
 internal_update(State = #state { limit   = Limit,
                                  dir     = Dir,
                                  alarmed = Alarmed}) ->
-    CurrentFreeBytes = get_disk_free(Dir),
-    LimitBytes = interpret_limit(Limit),
-    NewAlarmed = CurrentFreeBytes < LimitBytes,
+    CurrentFree = get_disk_free(Dir),
+    NewAlarmed = CurrentFree < Limit,
     case {Alarmed, NewAlarmed} of
         {false, true} ->
-            emit_update_info("insufficient", CurrentFreeBytes, LimitBytes),
+            emit_update_info("insufficient", CurrentFree, Limit),
             rabbit_alarm:set_alarm({{resource_limit, disk, node()}, []});
         {true, false} ->
-            emit_update_info("sufficient", CurrentFreeBytes, LimitBytes),
+            emit_update_info("sufficient", CurrentFree, Limit),
             rabbit_alarm:clear_alarm({resource_limit, disk, node()});
         _ ->
             ok
     end,
-    State #state {alarmed = NewAlarmed, actual = CurrentFreeBytes}.
+    State #state {alarmed = NewAlarmed, actual = CurrentFree}.
 
 get_disk_free(Dir) ->
     get_disk_free(Dir, os:type()).
@@ -186,14 +186,16 @@ get_disk_free(Dir, {unix, Sun})
 get_disk_free(Dir, {unix, _}) ->
     parse_free_unix(rabbit_misc:os_cmd("/bin/df -kP " ++ Dir));
 get_disk_free(Dir, {win32, _}) ->
-    parse_free_win32(rabbit_misc:os_cmd("dir /-C /W \"" ++ Dir ++ [$"]));
-get_disk_free(_, Platform) ->
-    {unknown, Platform}.
+    parse_free_win32(rabbit_misc:os_cmd("dir /-C /W \"" ++ Dir ++ "\"")).
 
-parse_free_unix(CommandResult) ->
-    [_, Stats | _] = string:tokens(CommandResult, "\n"),
-    [_FS, _Total, _Used, Free | _] = string:tokens(Stats, " \t"),
-    list_to_integer(Free) * 1024.
+parse_free_unix(Str) ->
+    case string:tokens(Str, "\n") of
+        [_, S | _] -> case string:tokens(S, " \t") of
+                          [_, _, _, Free | _] -> list_to_integer(Free) * 1024;
+                          _                   -> exit({unparseable, Str})
+                      end;
+        _          -> exit({unparseable, Str})
+    end.
 
 parse_free_win32(CommandResult) ->
     LastLine = lists:last(string:tokens(CommandResult, "\r\n")),

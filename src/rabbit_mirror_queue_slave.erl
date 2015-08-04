@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2010-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2010-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mirror_queue_slave).
@@ -24,13 +24,13 @@
 %% All instructions from the GM group must be processed in the order
 %% in which they're received.
 
--export([start_link/1, set_maximum_since_use/2, info/1]).
+-export([start_link/1, set_maximum_since_use/2, info/1, go/2]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3, handle_pre_hibernate/1, prioritise_call/4,
          prioritise_cast/3, prioritise_info/3, format_message_queue/2]).
 
--export([joined/2, members_changed/4, handle_msg/3]).
+-export([joined/2, members_changed/3, handle_msg/3]).
 
 -behaviour(gen_server2).
 -behaviour(gm).
@@ -78,7 +78,16 @@ set_maximum_since_use(QPid, Age) ->
 
 info(QPid) -> gen_server2:call(QPid, info, infinity).
 
-init(Q = #amqqueue { name = QName }) ->
+init(Q) ->
+    ?store_proc_name(Q#amqqueue.name),
+    {ok, {not_started, Q}, hibernate,
+     {backoff, ?HIBERNATE_AFTER_MIN, ?HIBERNATE_AFTER_MIN,
+      ?DESIRED_HIBERNATE}}.
+
+go(SPid, sync)  -> gen_server2:call(SPid, go, infinity);
+go(SPid, async) -> gen_server2:cast(SPid, go).
+
+handle_go(Q = #amqqueue{name = QName}) ->
     %% We join the GM group before we add ourselves to the amqqueue
     %% record. As a result:
     %% 1. We can receive msgs from GM that correspond to messages we will
@@ -93,20 +102,27 @@ init(Q = #amqqueue { name = QName }) ->
     process_flag(trap_exit, true), %% amqqueue_process traps exits too.
     {ok, GM} = gm:start_link(QName, ?MODULE, [self()],
                              fun rabbit_misc:execute_mnesia_transaction/1),
-    receive {joined, GM} -> ok end,
+    MRef = erlang:monitor(process, GM),
+    %% We ignore the DOWN message because we are also linked and
+    %% trapping exits, we just want to not get stuck and we will exit
+    %% later.
+    receive
+        {joined, GM}            -> erlang:demonitor(MRef, [flush]),
+                                   ok;
+        {'DOWN', MRef, _, _, _} -> ok
+    end,
     Self = self(),
     Node = node(),
     case rabbit_misc:execute_mnesia_transaction(
            fun() -> init_it(Self, GM, Node, QName) end) of
         {new, QPid, GMPids} ->
-            erlang:monitor(process, QPid),
             ok = file_handle_cache:register_callback(
                    rabbit_amqqueue, set_maximum_since_use, [Self]),
             ok = rabbit_memory_monitor:register(
                    Self, {rabbit_amqqueue, set_ram_duration_target, [Self]}),
             {ok, BQ} = application:get_env(backing_queue_module),
             Q1 = Q #amqqueue { pid = QPid },
-            BQS = bq_init(BQ, Q1, false),
+            BQS = bq_init(BQ, Q1, new),
             State = #state { q                   = Q1,
                              gm                  = GM,
                              backing_queue       = BQ,
@@ -124,22 +140,26 @@ init(Q = #amqqueue { name = QName }) ->
                    },
             ok = gm:broadcast(GM, request_depth),
             ok = gm:validate_members(GM, [GM | [G || {G, _} <- GMPids]]),
-            {ok, State, hibernate,
-             {backoff, ?HIBERNATE_AFTER_MIN, ?HIBERNATE_AFTER_MIN,
-              ?DESIRED_HIBERNATE}};
+            rabbit_mirror_queue_misc:maybe_auto_sync(Q1),
+            {ok, State};
         {stale, StalePid} ->
-            {stop, {stale_master_pid, StalePid}};
+            rabbit_mirror_queue_misc:log_warning(
+              QName, "Detected stale HA master: ~p~n", [StalePid]),
+            gm:leave(GM),
+            {error, {stale_master_pid, StalePid}};
         duplicate_live_master ->
-            {stop, {duplicate_live_master, Node}};
+            gm:leave(GM),
+            {error, {duplicate_live_master, Node}};
         existing ->
             gm:leave(GM),
-            ignore;
+            {error, normal};
         master_in_recovery ->
+            gm:leave(GM),
             %% The queue record vanished - we must have a master starting
             %% concurrently with us. In that case we can safely decide to do
             %% nothing here, and the master will start us in
             %% master:init_with_existing_bq/3
-            ignore
+            {error, normal}
     end.
 
 init_it(Self, GM, Node, QName) ->
@@ -154,13 +174,13 @@ init_it(Self, GM, Node, QName) ->
                           end;
                 [SPid] -> case rabbit_misc:is_process_alive(SPid) of
                               true  -> existing;
-                              false -> GMPids = [T || T = {_, S} <- GMPids,
-                                                      S =/= SPid],
+                              false -> GMPids1 = [T || T = {_, S} <- GMPids,
+                                                       S =/= SPid],
                                        Q1 = Q#amqqueue{
                                               slave_pids = SPids -- [SPid],
-                                              gm_pids    = GMPids},
+                                              gm_pids    = GMPids1},
                                        add_slave(Q1, Self, GM),
-                                       {new, QPid, GMPids}
+                                       {new, QPid, GMPids1}
                           end
             end;
         [] ->
@@ -173,15 +193,17 @@ add_slave(Q = #amqqueue { slave_pids = SPids, gm_pids = GMPids }, New, GM) ->
     rabbit_mirror_queue_misc:store_updated_slaves(
       Q#amqqueue{slave_pids = SPids ++ [New], gm_pids = [{GM, New} | GMPids]}).
 
-handle_call({deliver, Delivery, true}, From, State) ->
-    %% Synchronous, "mandatory" deliver mode.
-    gen_server2:reply(From, ok),
-    noreply(maybe_enqueue_message(Delivery, State));
+handle_call(go, _From, {not_started, Q} = NotStarted) ->
+    case handle_go(Q) of
+        {ok, State}    -> {reply, ok, State};
+        {error, Error} -> {stop, Error, NotStarted}
+    end;
 
-handle_call({gm_deaths, LiveGMPids}, From,
-            State = #state { q = Q = #amqqueue { name = QName, pid = MPid }}) ->
+handle_call({gm_deaths, DeadGMPids}, From,
+            State = #state { gm = GM, q = Q = #amqqueue {
+                                                 name = QName, pid = MPid }}) ->
     Self = self(),
-    case rabbit_mirror_queue_misc:remove_from_queue(QName, Self, LiveGMPids) of
+    case rabbit_mirror_queue_misc:remove_from_queue(QName, Self, DeadGMPids) of
         {error, not_found} ->
             gen_server2:reply(From, ok),
             {stop, normal, State};
@@ -200,13 +222,24 @@ handle_call({gm_deaths, LiveGMPids}, From,
                 _ ->
                     %% master has changed to not us
                     gen_server2:reply(From, ok),
-                    erlang:monitor(process, Pid),
+                    %% Since GM is by nature lazy we need to make sure
+                    %% there is some traffic when a master dies, to
+                    %% make sure all slaves get informed of the
+                    %% death. That is all process_death does, create
+                    %% some traffic.
+                    ok = gm:broadcast(GM, process_death),
                     noreply(State #state { q = Q #amqqueue { pid = Pid } })
             end
     end;
 
 handle_call(info, _From, State) ->
     reply(infos(?INFO_KEYS, State), State).
+
+handle_cast(go, {not_started, Q} = NotStarted) ->
+    case handle_go(Q) of
+        {ok, State}    -> {noreply, State};
+        {error, Error} -> {stop, Error, NotStarted}
+    end;
 
 handle_cast({run_backing_queue, Mod, Fun}, State) ->
     noreply(run_backing_queue(Mod, Fun, State));
@@ -274,11 +307,6 @@ handle_info(sync_timeout, State) ->
 handle_info(timeout, State) ->
     noreply(backing_queue_timeout(State));
 
-handle_info({'DOWN', _MonitorRef, process, MPid, _Reason},
-            State = #state { gm = GM, q = #amqqueue { pid = MPid } }) ->
-    ok = gm:broadcast(GM, process_death),
-    noreply(State);
-
 handle_info({'DOWN', _MonitorRef, process, ChPid, _Reason}, State) ->
     local_sender_death(ChPid, State),
     noreply(maybe_forget_sender(ChPid, down_from_ch, State));
@@ -293,34 +321,48 @@ handle_info({bump_credit, Msg}, State) ->
 handle_info(Msg, State) ->
     {stop, {unexpected_info, Msg}, State}.
 
+terminate(_Reason, {not_started, _Q}) ->
+    ok;
+terminate(_Reason, #state { backing_queue_state = undefined }) ->
+    %% We've received a delete_and_terminate from gm, thus nothing to
+    %% do here.
+    ok;
+terminate({shutdown, dropped} = R, State = #state{backing_queue       = BQ,
+                                                  backing_queue_state = BQS}) ->
+    %% See rabbit_mirror_queue_master:terminate/2
+    terminate_common(State),
+    BQ:delete_and_terminate(R, BQS);
+terminate(shutdown, State) ->
+    terminate_shutdown(shutdown, State);
+terminate({shutdown, _} = R, State) ->
+    terminate_shutdown(R, State);
+terminate(Reason, State = #state{backing_queue       = BQ,
+                                 backing_queue_state = BQS}) ->
+    terminate_common(State),
+    BQ:delete_and_terminate(Reason, BQS);
+terminate([_SPid], _Reason) ->
+    %% gm case
+    ok.
+
 %% If the Reason is shutdown, or {shutdown, _}, it is not the queue
 %% being deleted: it's just the node going down. Even though we're a
 %% slave, we have no idea whether or not we'll be the only copy coming
 %% back up. Thus we must assume we will be, and preserve anything we
 %% have on disk.
-terminate(_Reason, #state { backing_queue_state = undefined }) ->
-    %% We've received a delete_and_terminate from gm, thus nothing to
-    %% do here.
-    ok;
-terminate({shutdown, dropped} = R, #state { backing_queue       = BQ,
-                                            backing_queue_state = BQS }) ->
-    %% See rabbit_mirror_queue_master:terminate/2
-    BQ:delete_and_terminate(R, BQS);
-terminate(Reason, #state { q                   = Q,
-                           gm                  = GM,
-                           backing_queue       = BQ,
-                           backing_queue_state = BQS,
-                           rate_timer_ref      = RateTRef }) ->
-    ok = gm:leave(GM),
-    QueueState = rabbit_amqqueue_process:init_with_backing_queue_state(
-                   Q, BQ, BQS, RateTRef, [], pmon:new(), dict:new()),
-    rabbit_amqqueue_process:terminate(Reason, QueueState);
-terminate([_SPid], _Reason) ->
-    %% gm case
-    ok.
+terminate_shutdown(Reason, State = #state{backing_queue       = BQ,
+                                          backing_queue_state = BQS}) ->
+    terminate_common(State),
+    BQ:terminate(Reason, BQS).
+
+terminate_common(State) ->
+    ok = rabbit_memory_monitor:deregister(self()),
+    stop_rate_timer(stop_sync_timer(State)).
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+handle_pre_hibernate({not_started, _Q} = State) ->
+    {hibernate, State};
 
 handle_pre_hibernate(State = #state { backing_queue       = BQ,
                                       backing_queue_state = BQS }) ->
@@ -334,7 +376,7 @@ handle_pre_hibernate(State = #state { backing_queue       = BQ,
 prioritise_call(Msg, _From, _Len, _State) ->
     case Msg of
         info                                 -> 9;
-        {gm_deaths, _Live}                   -> 5;
+        {gm_deaths, _Dead}                   -> 5;
         _                                    -> 0
     end.
 
@@ -362,10 +404,17 @@ format_message_queue(Opt, MQ) -> rabbit_misc:format_message_queue(Opt, MQ).
 
 joined([SPid], _Members) -> SPid ! {joined, self()}, ok.
 
-members_changed([_SPid], _Births, [], _Live) ->
+members_changed([_SPid], _Births, []) ->
     ok;
-members_changed([ SPid], _Births, _Deaths, Live) ->
-    inform_deaths(SPid, Live).
+members_changed([ SPid], _Births, Deaths) ->
+    case rabbit_misc:with_exit_handler(
+           rabbit_misc:const(ok),
+           fun() ->
+                   gen_server2:call(SPid, {gm_deaths, Deaths}, infinity)
+           end) of
+        ok              -> ok;
+        {promote, CPid} -> {become, rabbit_mirror_queue_coordinator, [CPid]}
+    end.
 
 handle_msg([_SPid], _From, request_depth) ->
     %% This is only of value to the master
@@ -374,10 +423,7 @@ handle_msg([_SPid], _From, {ensure_monitoring, _Pid}) ->
     %% This is only of value to the master
     ok;
 handle_msg([_SPid], _From, process_death) ->
-    %% Since GM is by nature lazy we need to make sure there is some
-    %% traffic when a master dies, to make sure we get informed of the
-    %% death. That's all process_death does, create some traffic. We
-    %% must not take any notice of the master death here since it
+    %% We must not take any notice of the master death here since it
     %% comes without ordering guarantees - there could still be
     %% messages from the master we have yet to receive. When we get
     %% members_changed, then there will be no more messages.
@@ -392,12 +438,6 @@ handle_msg([SPid], _From, {sync_start, Ref, Syncer, SPids}) ->
     end;
 handle_msg([SPid], _From, Msg) ->
     ok = gen_server2:cast(SPid, {gm, Msg}).
-
-inform_deaths(SPid, Live) ->
-    case gen_server2:call(SPid, {gm_deaths, Live}, infinity) of
-        ok              -> ok;
-        {promote, CPid} -> {become, rabbit_mirror_queue_coordinator, [CPid]}
-    end.
 
 %% ---------------------------------------------------------------------------
 %% Others
@@ -426,9 +466,17 @@ run_backing_queue(Mod, Fun, State = #state { backing_queue       = BQ,
                                              backing_queue_state = BQS }) ->
     State #state { backing_queue_state = BQ:invoke(Mod, Fun, BQS) }.
 
-send_or_record_confirm(_, #delivery{ msg_seq_no = undefined }, MS, _State) ->
+send_mandatory(#delivery{mandatory  = false}) ->
+    ok;
+send_mandatory(#delivery{mandatory  = true,
+                         sender     = SenderPid,
+                         msg_seq_no = MsgSeqNo}) ->
+    gen_server2:cast(SenderPid, {mandatory_received, MsgSeqNo}).
+
+send_or_record_confirm(_, #delivery{ confirm = false }, MS, _State) ->
     MS;
 send_or_record_confirm(published, #delivery { sender     = ChPid,
+                                              confirm    = true,
                                               msg_seq_no = MsgSeqNo,
                                               message    = #basic_message {
                                                 id            = MsgId,
@@ -436,6 +484,7 @@ send_or_record_confirm(published, #delivery { sender     = ChPid,
                        MS, #state { q = #amqqueue { durable = true } }) ->
     dict:store(MsgId, {published, ChPid, MsgSeqNo} , MS);
 send_or_record_confirm(_Status, #delivery { sender     = ChPid,
+                                            confirm    = true,
                                             msg_seq_no = MsgSeqNo },
                        MS, _State) ->
     ok = rabbit_misc:confirm_to_sender(ChPid, [MsgSeqNo]),
@@ -487,8 +536,8 @@ promote_me(From, #state { q                   = Q = #amqqueue { name = QName },
                           msg_id_ack          = MA,
                           msg_id_status       = MS,
                           known_senders       = KS }) ->
-    rabbit_log:info("Mirrored-queue (~s): Promoting slave ~s to master~n",
-                    [rabbit_misc:rs(QName), rabbit_misc:pid_to_string(self())]),
+    rabbit_mirror_queue_misc:log_info(QName, "Promoting slave ~s to master~n",
+                                      [rabbit_misc:pid_to_string(self())]),
     Q1 = Q #amqqueue { pid = self() },
     {ok, CPid} = rabbit_mirror_queue_coordinator:start_link(
                    Q1, GM, rabbit_mirror_queue_master:sender_death_fun(),
@@ -571,16 +620,20 @@ promote_me(From, #state { q                   = Q = #amqqueue { name = QName },
                         (_Msgid, _Status, MTC0) ->
                             MTC0
                     end, gb_trees:empty(), MS),
-    Deliveries = [Delivery ||
+    Deliveries = [Delivery#delivery{mandatory = false} || %% [0]
                    {_ChPid, {PubQ, _PendCh, _ChState}} <- dict:to_list(SQ),
                    Delivery <- queue:to_list(PubQ)],
     AwaitGmDown = [ChPid || {ChPid, {_, _, down_from_ch}} <- dict:to_list(SQ)],
     KS1 = lists:foldl(fun (ChPid0, KS0) ->
                               pmon:demonitor(ChPid0, KS0)
                       end, KS, AwaitGmDown),
+    rabbit_misc:store_proc_name(rabbit_amqqueue_process, QName),
     rabbit_amqqueue_process:init_with_backing_queue_state(
       Q1, rabbit_mirror_queue_master, MasterState, RateTRef, Deliveries, KS1,
       MTC).
+
+%% [0] We reset mandatory to false here because we will have sent the
+%% mandatory_received already as soon as we got the message
 
 noreply(State) ->
     {NewState, Timeout} = next_state(State),
@@ -663,7 +716,12 @@ confirm_sender_death(Pid) ->
     ok.
 
 forget_sender(_, running)                        -> false;
+forget_sender(down_from_gm, down_from_gm)        -> false; %% [1]
 forget_sender(Down1, Down2) when Down1 =/= Down2 -> true.
+
+%% [1] If another slave goes through confirm_sender_death/1 before we
+%% do we can get two GM sender_death messages in a row for the same
+%% channel - don't treat that as anything special.
 
 %% Record and process lifetime events from channels. Forget all about a channel
 %% only when down notifications are received from both the channel and from gm.
@@ -692,6 +750,7 @@ maybe_enqueue_message(
   Delivery = #delivery { message = #basic_message { id = MsgId },
                          sender  = ChPid },
   State = #state { sender_queues = SQ, msg_id_status = MS }) ->
+    send_mandatory(Delivery), %% must do this before confirms
     State1 = ensure_monitoring(ChPid, State),
     %% We will never see {published, ChPid, MsgSeqNo} here.
     case dict:find(MsgId, MS) of
@@ -871,8 +930,6 @@ update_ram_duration(BQ, BQS) ->
         rabbit_memory_monitor:report_ram_duration(self(), RamDuration),
     BQ:set_ram_duration_target(DesiredDuration, BQS1).
 
-%% [1] - the arrival of this newly synced slave may cause the master to die if
-%% the admin has requested a migration-type change to policy.
 record_synchronised(#amqqueue { name = QName }) ->
     Self = self(),
     case rabbit_misc:execute_mnesia_transaction(
@@ -883,9 +940,9 @@ record_synchronised(#amqqueue { name = QName }) ->
                        [Q1 = #amqqueue { sync_slave_pids = SSPids }] ->
                            Q2 = Q1#amqqueue{sync_slave_pids = [Self | SSPids]},
                            rabbit_mirror_queue_misc:store_updated_slaves(Q2),
-                           {ok, Q1, Q2}
+                           {ok, Q2}
                    end
            end) of
-        ok           -> ok;
-        {ok, Q1, Q2} -> rabbit_mirror_queue_misc:update_mirrors(Q1, Q2) %% [1]
+        ok      -> ok;
+        {ok, Q} -> rabbit_mirror_queue_misc:maybe_drop_master_after_sync(Q)
     end.

@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Plugin.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2010-2013 GoPivotal, Inc.  All rights reserved.
+%%   Copyright (c) 2010-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_dispatcher).
@@ -37,6 +37,7 @@ web_ui()     -> [{javascript, <<"dispatcher.js">>}].
 
 dispatcher() ->
     [{["overview"],                                                rabbit_mgmt_wm_overview, []},
+     {["cluster-name"],                                            rabbit_mgmt_wm_cluster_name, []},
      {["nodes"],                                                   rabbit_mgmt_wm_nodes, []},
      {["nodes", node],                                             rabbit_mgmt_wm_node, []},
      {["extensions"],                                              rabbit_mgmt_wm_extensions, []},

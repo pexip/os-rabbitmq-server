@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Console.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2012-2013 GoPivotal, Inc.  All rights reserved.
+%%   Copyright (c) 2012-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_ws_test_raw_websocket).
@@ -30,7 +30,7 @@ raw_send(WS, Command, Headers) ->
 raw_send(WS, Command, Headers, Body) ->
     Frame = stomp:marshal(Command, Headers, Body),
     rfc6455_client:send(WS, Frame).
-    
+
 raw_recv(WS) ->
     {ok, P} = rfc6455_client:recv(WS),
     stomp:unmarshal(P).
@@ -67,5 +67,5 @@ disconnect_test() ->
 
     ok = raw_send(WS, "DISCONNECT", []),
     {close, {1005, _}} = rfc6455_client:recv(WS),
-    
+
     ok.

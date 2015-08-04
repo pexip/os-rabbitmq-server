@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2010-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2010-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mirror_queue_master).
@@ -21,8 +21,8 @@
          discard/3, fetch/2, drop/2, ack/2, requeue/2, ackfold/4, fold/3,
          len/1, is_empty/1, depth/1, drain_confirmed/1,
          dropwhile/2, fetchwhile/4, set_ram_duration_target/2, ram_duration/1,
-         needs_timeout/1, timeout/1, handle_pre_hibernate/1,
-         status/1, invoke/3, is_duplicate/2]).
+         needs_timeout/1, timeout/1, handle_pre_hibernate/1, resume/1,
+         msg_rates/1, status/1, invoke/3, is_duplicate/2]).
 
 -export([start/1, stop/0]).
 
@@ -110,7 +110,13 @@ init_with_existing_bq(Q = #amqqueue{name = QName}, BQ, BQS) ->
                           Q1#amqqueue{gm_pids = [{GM, Self} | GMPids]})
            end),
     {_MNode, SNodes} = rabbit_mirror_queue_misc:suggested_queue_nodes(Q),
-    rabbit_mirror_queue_misc:add_mirrors(QName, SNodes),
+    %% We need synchronous add here (i.e. do not return until the
+    %% slave is running) so that when queue declaration is finished
+    %% all slaves are up; we don't want to end up with unsynced slaves
+    %% just by declaring a new queue. But add can't be synchronous all
+    %% the time as it can be called by slaves and that's
+    %% deadlock-prone.
+    rabbit_mirror_queue_misc:add_mirrors(QName, SNodes, sync),
     #state { name                = QName,
              gm                  = GM,
              coordinator         = CPid,
@@ -133,13 +139,13 @@ sync_mirrors(HandleInfo, EmitStats,
                               backing_queue       = BQ,
                               backing_queue_state = BQS }) ->
     Log = fun (Fmt, Params) ->
-                  rabbit_log:info("Synchronising ~s: " ++ Fmt ++ "~n",
-                                  [rabbit_misc:rs(QName) | Params])
+                  rabbit_mirror_queue_misc:log_info(
+                    QName, "Synchronising: " ++ Fmt ++ "~n", Params)
           end,
     Log("~p messages to synchronise", [BQ:len(BQS)]),
     {ok, #amqqueue{slave_pids = SPids}} = rabbit_amqqueue:lookup(QName),
     Ref = make_ref(),
-    Syncer = rabbit_mirror_queue_sync:master_prepare(Ref, Log, SPids),
+    Syncer = rabbit_mirror_queue_sync:master_prepare(Ref, QName, Log, SPids),
     gm:broadcast(GM, {sync_start, Ref, Syncer, SPids}),
     S = fun(BQSN) -> State#state{backing_queue_state = BQSN} end,
     case rabbit_mirror_queue_sync:master_go(
@@ -177,7 +183,7 @@ delete_and_terminate(Reason, State = #state { backing_queue       = BQ,
 
 stop_all_slaves(Reason, #state{name = QName, gm   = GM}) ->
     {ok, #amqqueue{slave_pids = SPids}} = rabbit_amqqueue:lookup(QName),
-    MRefs = [erlang:monitor(process, SPid) || SPid <- SPids],
+    MRefs = [erlang:monitor(process, Pid) || Pid <- [GM | SPids]],
     ok = gm:broadcast(GM, {delete_and_terminate, Reason}),
     [receive {'DOWN', MRef, process, _Pid, _Info} -> ok end || MRef <- MRefs],
     %% Normally when we remove a slave another slave or master will
@@ -206,7 +212,8 @@ publish(Msg = #basic_message { id = MsgId }, MsgProps, IsDelivered, ChPid,
                          backing_queue       = BQ,
                          backing_queue_state = BQS }) ->
     false = dict:is_key(MsgId, SS), %% ASSERTION
-    ok = gm:broadcast(GM, {publish, ChPid, MsgProps, Msg}),
+    ok = gm:broadcast(GM, {publish, ChPid, MsgProps, Msg},
+                      rabbit_basic:msg_size(Msg)),
     BQS1 = BQ:publish(Msg, MsgProps, IsDelivered, ChPid, BQS),
     ensure_monitoring(ChPid, State #state { backing_queue_state = BQS1 }).
 
@@ -216,7 +223,8 @@ publish_delivered(Msg = #basic_message { id = MsgId }, MsgProps,
                                           backing_queue       = BQ,
                                           backing_queue_state = BQS }) ->
     false = dict:is_key(MsgId, SS), %% ASSERTION
-    ok = gm:broadcast(GM, {publish_delivered, ChPid, MsgProps, Msg}),
+    ok = gm:broadcast(GM, {publish_delivered, ChPid, MsgProps, Msg},
+                      rabbit_basic:msg_size(Msg)),
     {AckTag, BQS1} = BQ:publish_delivered(Msg, MsgProps, ChPid, BQS),
     State1 = State #state { backing_queue_state = BQS1 },
     {AckTag, ensure_monitoring(ChPid, State1)}.
@@ -344,6 +352,13 @@ timeout(State = #state { backing_queue = BQ, backing_queue_state = BQS }) ->
 handle_pre_hibernate(State = #state { backing_queue       = BQ,
                                       backing_queue_state = BQS }) ->
     State #state { backing_queue_state = BQ:handle_pre_hibernate(BQS) }.
+
+resume(State = #state { backing_queue       = BQ,
+                        backing_queue_state = BQS }) ->
+    State #state { backing_queue_state = BQ:resume(BQS) }.
+
+msg_rates(#state { backing_queue = BQ, backing_queue_state = BQS }) ->
+    BQ:msg_rates(BQS).
 
 status(State = #state { backing_queue = BQ, backing_queue_state = BQS }) ->
     BQ:status(BQS) ++

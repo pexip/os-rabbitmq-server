@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_vm).
@@ -36,20 +36,19 @@ memory() ->
     ConnProcs     = [rabbit_tcp_client_sup, ssl_connection_sup, amqp_sup],
     QProcs        = [rabbit_amqqueue_sup, rabbit_mirror_queue_slave_sup],
     MsgIndexProcs = [msg_store_transient, msg_store_persistent],
-    MgmtDbProcs   = [rabbit_mgmt_sup],
+    MgmtDbProcs   = [rabbit_mgmt_sup_sup],
     PluginProcs   = plugin_sups(),
 
     All = [ConnProcs, QProcs, MsgIndexProcs, MgmtDbProcs, PluginProcs],
 
     {Sums, _Other} = sum_processes(lists:append(All), [memory]),
 
-    [Conns, Qs, MsgIndexProc, MgmtDbProc, AllPlugins] =
+    [Conns, Qs, MsgIndexProc, MgmtDbProc, Plugins] =
         [aggregate_memory(Names, Sums) || Names <- All],
 
     Mnesia       = mnesia_memory(),
     MsgIndexETS  = ets_memory(rabbit_msg_store_ets_index),
     MgmtDbETS    = ets_memory(rabbit_mgmt_db),
-    Plugins      = AllPlugins - MgmtDbProc,
 
     [{total,     Total},
      {processes, Processes},
@@ -60,7 +59,7 @@ memory() ->
      {system,    System}] =
         erlang:memory([total, processes, ets, atom, binary, code, system]),
 
-    OtherProc = Processes - Conns - Qs - MsgIndexProc - AllPlugins,
+    OtherProc = Processes - Conns - Qs - MsgIndexProc - Plugins - MgmtDbProc,
 
     [{total,            Total},
      {connection_procs, Conns},
@@ -87,7 +86,7 @@ mnesia_memory() ->
     case mnesia:system_info(is_running) of
         yes -> lists:sum([bytes(mnesia:table_info(Tab, memory)) ||
                              Tab <- mnesia:system_info(tables)]);
-        no  -> 0
+        _   -> 0
     end.
 
 ets_memory(Name) ->

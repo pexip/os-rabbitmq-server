@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Console.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2011-2013 GoPivotal, Inc.  All rights reserved.
+%%   Copyright (c) 2011-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_sup).
@@ -29,4 +29,6 @@ init([]) ->
     {ok, {{one_for_one, 10, 10}, [DB]}}.
 
 start_link() ->
-     mirrored_supervisor:start_link({local, ?MODULE}, ?MODULE, ?MODULE, []).
+     mirrored_supervisor:start_link(
+       {local, ?MODULE}, ?MODULE, fun rabbit_misc:execute_mnesia_transaction/1,
+       ?MODULE, []).

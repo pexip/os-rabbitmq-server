@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_stomp_processor).
@@ -30,9 +30,9 @@
 -record(state, {session_id, channel, connection, subscriptions,
                 version, start_heartbeat_fun, pending_receipts,
                 config, route_state, reply_queues, frame_transformer,
-                adapter_info, send_fun, ssl_login_name}).
+                adapter_info, send_fun, ssl_login_name, peer_addr}).
 
--record(subscription, {dest_hdr, channel, ack_mode, multi_ack, description}).
+-record(subscription, {dest_hdr, ack_mode, multi_ack, description}).
 
 -define(FLUSH_TIMEOUT, 60000).
 
@@ -79,12 +79,14 @@ init(Configuration) ->
 terminate(_Reason, State) ->
     close_connection(State).
 
-handle_cast({init, [SendFun, AdapterInfo, StartHeartbeatFun, SSLLoginName]},
+handle_cast({init, [SendFun, AdapterInfo, StartHeartbeatFun, SSLLoginName,
+                    PeerAddr]},
             State) ->
     {noreply, State #state { send_fun            = SendFun,
                              adapter_info        = AdapterInfo,
                              start_heartbeat_fun = StartHeartbeatFun,
-                             ssl_login_name      = SSLLoginName }};
+                             ssl_login_name      = SSLLoginName,
+                             peer_addr           = PeerAddr}};
 
 handle_cast(flush_and_die, State) ->
     {stop, normal, close_connection(State)};
@@ -131,8 +133,11 @@ handle_cast({Command, Frame, FlowPid},
       fun(StateM) -> ensure_receipt(Frame1, StateM) end,
       State);
 
-handle_cast(client_timeout, State) ->
-    {stop, client_timeout, State}.
+handle_cast(client_timeout,
+            State = #state{adapter_info = #amqp_adapter_info{name = S}}) ->
+    rabbit_log:warning("STOMP detected missed client heartbeat(s) "
+                       "on connection ~s, closing it~n", [S]),
+    {stop, {shutdown, client_heartbeat_timeout}, close_connection(State)}.
 
 handle_info(#'basic.consume_ok'{}, State) ->
     {noreply, State, hibernate};
@@ -315,6 +320,7 @@ handle_frame(Command, _Frame, State) ->
 
 ack_action(Command, Frame,
            State = #state{subscriptions = Subs,
+                          channel       = Channel,
                           version       = Version}, MethodFun) ->
     AckHeader = rabbit_stomp_util:ack_header_name(Version),
     case rabbit_stomp_frame:header(Frame, AckHeader) of
@@ -322,15 +328,14 @@ ack_action(Command, Frame,
             case rabbit_stomp_util:parse_message_id(AckValue) of
                 {ok, {ConsumerTag, _SessionId, DeliveryTag}} ->
                     case dict:find(ConsumerTag, Subs) of
-                        {ok, Sub = #subscription{channel = SubChannel}} ->
+                        {ok, Sub} ->
                             Method = MethodFun(DeliveryTag, Sub),
                             case transactional(Frame) of
                                 {yes, Transaction} ->
-                                    extend_transaction(Transaction,
-                                                       {SubChannel, Method},
-                                                       State);
+                                    extend_transaction(
+                                      Transaction, {Method}, State);
                                 no ->
-                                    amqp_channel:call(SubChannel, Method),
+                                    amqp_channel:call(Channel, Method),
                                     ok(State)
                             end;
                         error ->
@@ -389,7 +394,8 @@ cancel_subscription({error, _}, _Frame, State) ->
           State);
 
 cancel_subscription({ok, ConsumerTag, Description}, Frame,
-                    State = #state{subscriptions = Subs}) ->
+                    State = #state{subscriptions = Subs,
+                                   channel       = Channel}) ->
     case dict:find(ConsumerTag, Subs) of
         error ->
             error("No subscription found",
@@ -397,9 +403,8 @@ cancel_subscription({ok, ConsumerTag, Description}, Frame,
                   "Subscription to ~p not found.~n",
                   [Description],
                   State);
-        {ok, Subscription = #subscription{channel = SubChannel,
-                                          description = Descr}} ->
-            case amqp_channel:call(SubChannel,
+        {ok, Subscription = #subscription{description = Descr}} ->
+            case amqp_channel:call(Channel,
                                    #'basic.cancel'{
                                      consumer_tag = ConsumerTag}) of
                 #'basic.cancel_ok'{consumer_tag = ConsumerTag} ->
@@ -413,11 +418,8 @@ cancel_subscription({ok, ConsumerTag, Description}, Frame,
             end
     end.
 
-tidy_canceled_subscription(ConsumerTag, #subscription{dest_hdr = DestHdr,
-                                                      channel = SubChannel},
-                           Frame, State = #state{channel = MainChannel,
-                                                 subscriptions = Subs}) ->
-    ok = ensure_subchannel_closed(SubChannel, MainChannel),
+tidy_canceled_subscription(ConsumerTag, #subscription{dest_hdr = DestHdr},
+                           Frame, State = #state{subscriptions = Subs}) ->
     Subs1 = dict:erase(ConsumerTag, Subs),
     {ok, Dest} = rabbit_routing_util:parse_endpoint(DestHdr),
     maybe_delete_durable_sub(Dest, Frame, State#state{subscriptions = Subs1}).
@@ -439,14 +441,6 @@ maybe_delete_durable_sub({topic, Name}, Frame,
 maybe_delete_durable_sub(_Destination, _Frame, State) ->
     ok(State).
 
-ensure_subchannel_closed(SubChannel, MainChannel)
-  when SubChannel == MainChannel ->
-    ok;
-
-ensure_subchannel_closed(SubChannel, _MainChannel) ->
-    amqp_channel:close(SubChannel),
-    ok.
-
 with_destination(Command, Frame, State, Fun) ->
     case rabbit_stomp_frame:header(Frame, ?HEADER_DESTINATION) of
         {ok, DestHdr} ->
@@ -457,6 +451,11 @@ with_destination(Command, Frame, State, Fun) ->
                             error("Invalid destination",
                                   "'~s' is not a valid destination for '~s'~n",
                                   [DestHdr, Command],
+                                  State);
+                        {error, {invalid_destination, Msg}} ->
+                            error("Invalid destination",
+                                  "~s",
+                                  [Msg],
                                   State);
                         {error, Reason} ->
                             throw(Reason);
@@ -499,12 +498,12 @@ without_headers([], Command, Frame, State, Fun) ->
 do_login(undefined, _, _, _, _, _, State) ->
     error("Bad CONNECT", "Missing login or passcode header(s)", State);
 do_login(Username, Passwd, VirtualHost, Heartbeat, AdapterInfo, Version,
-         State) ->
-    case amqp_connection:start(
+         State = #state{peer_addr = Addr}) ->
+    case start_connection(
            #amqp_params_direct{username     = Username,
                                password     = Passwd,
                                virtual_host = VirtualHost,
-                               adapter_info = AdapterInfo}) of
+                               adapter_info = AdapterInfo}, Username, Addr) of
         {ok, Connection} ->
             link(Connection),
             {ok, Channel} = amqp_connection:open_channel(Connection),
@@ -532,7 +531,22 @@ do_login(Username, Passwd, VirtualHost, Heartbeat, AdapterInfo, Version,
                                "(vhost access not allowed)~n"),
             error("Bad CONNECT", "Virtual host '" ++
                                  binary_to_list(VirtualHost) ++
-                                 "' access denied", State)
+                                 "' access denied", State);
+        {error, not_loopback} ->
+            rabbit_log:warning("STOMP login failed - access_refused "
+                               "(user must access over loopback)~n"),
+            error("Bad CONNECT", "non-loopback access denied", State)
+    end.
+
+start_connection(Params, Username, Addr) ->
+    case amqp_connection:start(Params) of
+        {ok, Conn} -> case rabbit_access_control:check_user_loopback(
+                             Username, Addr) of
+                          ok          -> {ok, Conn};
+                          not_allowed -> amqp_connection:close(Conn),
+                                         {error, not_loopback}
+                      end;
+        {error, E} -> {error, E}
     end.
 
 server_header() ->
@@ -543,43 +557,50 @@ server_header() ->
 do_subscribe(Destination, DestHdr, Frame,
              State = #state{subscriptions = Subs,
                             route_state   = RouteState,
-                            connection    = Connection,
-                            channel       = MainChannel}) ->
+                            channel       = Channel}) ->
     Prefetch =
         rabbit_stomp_frame:integer_header(Frame, ?HEADER_PREFETCH_COUNT,
                                           undefined),
-    Channel = case Prefetch of
-                  undefined ->
-                      MainChannel;
-                  _ ->
-                      {ok, Channel1} = amqp_connection:open_channel(Connection),
-                      amqp_channel:call(Channel1,
-                                        #'basic.qos'{prefetch_size  = 0,
-                                                     prefetch_count = Prefetch,
-                                                     global         = false}),
-                      Channel1
-              end,
     {AckMode, IsMulti} = rabbit_stomp_util:ack_mode(Frame),
     case ensure_endpoint(source, Destination, Frame, Channel, RouteState) of
         {ok, Queue, RouteState1} ->
             {ok, ConsumerTag, Description} =
                 rabbit_stomp_util:consumer_tag(Frame),
-            amqp_channel:subscribe(Channel,
-                                   #'basic.consume'{
-                                     queue        = Queue,
-                                     consumer_tag = ConsumerTag,
-                                     no_local     = false,
-                                     no_ack       = (AckMode == auto),
-                                     exclusive    = false},
-                                   self()),
+            case Prefetch of
+                undefined -> ok;
+                _         -> amqp_channel:call(
+                               Channel, #'basic.qos'{prefetch_count = Prefetch})
+            end,
             ExchangeAndKey = rabbit_routing_util:parse_routing(Destination),
-            ok = rabbit_routing_util:ensure_binding(
-                   Queue, ExchangeAndKey, Channel),
+            try
+                amqp_channel:subscribe(Channel,
+                                       #'basic.consume'{
+                                          queue        = Queue,
+                                          consumer_tag = ConsumerTag,
+                                          no_local     = false,
+                                          no_ack       = (AckMode == auto),
+                                          exclusive    = false,
+                                          arguments    = []},
+                                       self()),
+                ok = rabbit_routing_util:ensure_binding(
+                       Queue, ExchangeAndKey, Channel)
+            catch exit:Err ->
+                    %% it's safe to delete this queue, it was server-named
+                    %% and declared by us
+                    case Destination of
+                        {exchange, _} ->
+                            ok = maybe_clean_up_queue(Queue, State);
+                        {topic, _} ->
+                            ok = maybe_clean_up_queue(Queue, State);
+                        _ ->
+                            ok
+                    end,
+                    exit(Err)
+            end,
             ok(State#state{subscriptions =
                                dict:store(
                                  ConsumerTag,
                                  #subscription{dest_hdr    = DestHdr,
-                                               channel     = Channel,
                                                ack_mode    = AckMode,
                                                multi_ack   = IsMulti,
                                                description = Description},
@@ -589,10 +610,15 @@ do_subscribe(Destination, DestHdr, Frame,
             Err
     end.
 
+maybe_clean_up_queue(Queue, #state{connection = Connection}) ->
+    {ok, Channel} = amqp_connection:open_channel(Connection),
+    catch amqp_channel:call(Channel, #'queue.delete'{queue = Queue}),
+    catch amqp_channel:close(Channel),
+    ok.
+
 do_send(Destination, _DestHdr,
         Frame = #stomp_frame{body_iolist = BodyFragments},
         State = #state{channel = Channel, route_state = RouteState}) ->
-
     case ensure_endpoint(dest, Destination, Frame, Channel, RouteState) of
 
         {ok, _Q, RouteState1} ->
@@ -741,9 +767,8 @@ ensure_reply_queue(TempQueueId, State = #state{channel       = Channel,
 
             %% synthesise a subscription to the reply queue destination
             Subs1 = dict:store(ConsumerTag,
-                               #subscription{dest_hdr    = Destination,
-                                             channel     = Channel,
-                                             multi_ack   = false},
+                               #subscription{dest_hdr  = Destination,
+                                             multi_ack = false},
                                Subs),
 
             {Destination, State#state{
@@ -890,8 +915,6 @@ perform_transaction_action({callback, Callback, Action}, State) ->
     perform_transaction_action(Action, Callback(State));
 perform_transaction_action({Method}, State) ->
     send_method(Method, State);
-perform_transaction_action({Channel, Method}, State) ->
-    send_method(Method, Channel, State);
 perform_transaction_action({Method, Props, BodyFragments}, State) ->
     send_method(Method, Props, BodyFragments, State).
 
@@ -924,19 +947,22 @@ millis_to_seconds(M)               -> M div 1000.
 %% Queue Setup
 %%----------------------------------------------------------------------------
 
+ensure_endpoint(_Direction, {queue, []}, _Frame, _Channel, _State) ->
+    {error, {invalid_destination, "Destination cannot be blank"}};
+
 ensure_endpoint(source, EndPoint, Frame, Channel, State) ->
     Params =
         case rabbit_stomp_frame:boolean_header(
                Frame, ?HEADER_PERSISTENT, false) of
             true ->
                 [{subscription_queue_name_gen,
-                    fun () ->
-                        {ok, Id} = rabbit_stomp_frame:header(Frame, ?HEADER_ID),
-                        {_, Name} = rabbit_routing_util:parse_routing(EndPoint),
-                        list_to_binary(
-                          rabbit_stomp_util:durable_subscription_queue(Name,
-                                                                       Id))
-                    end},
+                  fun () ->
+                          {ok, Id} = rabbit_stomp_frame:header(Frame, ?HEADER_ID),
+                          {_, Name} = rabbit_routing_util:parse_routing(EndPoint),
+                          list_to_binary(
+                            rabbit_stomp_util:durable_subscription_queue(Name,
+                                                                         Id))
+                  end},
                  {durable, true}];
             false ->
                 [{durable, false}]
@@ -962,7 +988,7 @@ amqp_death(ReplyCode, Explanation, State) ->
     ErrorName = amqp_connection:error_atom(ReplyCode),
     ErrorDesc = rabbit_misc:format("~s~n", [Explanation]),
     log_error(ErrorName, ErrorDesc, none),
-    {stop, normal, send_error(atom_to_list(ErrorName), ErrorDesc, State)}.
+    {stop, normal, close_connection(send_error(atom_to_list(ErrorName), ErrorDesc, State))}.
 
 error(Message, Detail, State) ->
     priv_error(Message, Detail, none, State).

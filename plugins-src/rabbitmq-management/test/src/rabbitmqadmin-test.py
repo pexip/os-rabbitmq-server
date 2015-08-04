@@ -23,14 +23,11 @@ class TestRabbitMQAdmin(unittest.TestCase):
     def test_host(self):
         self.run_success(['show', 'overview'])
         self.run_success(['--host', 'localhost', 'show', 'overview'])
-        self.run_success(['--host', socket.gethostname(), 'show', 'overview'])
         self.run_fail(['--host', 'some-host-that-does-not-exist', 'show', 'overview'])
 
     def test_port(self):
         # Test port selection
         self.run_success(['--port', '15672', 'show', 'overview'])
-        # Test redirect
-        self.run_success(['--port', '55672', 'show', 'overview'])
         # Test port not open
         self.run_fail(['--port', '15673', 'show', 'overview'])
         # Test port open but not talking HTTP

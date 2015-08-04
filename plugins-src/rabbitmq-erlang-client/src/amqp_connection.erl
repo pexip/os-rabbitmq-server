@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 %% @type close_reason(Type) = {shutdown, amqp_reason(Type)}.
@@ -168,15 +168,16 @@ start(AmqpParams) ->
 %% application controller is in the process of shutting down the very
 %% application which is making this call.
 ensure_started() ->
-    case application_controller:get_master(amqp_client) of
-        undefined ->
-            case amqp_client:start() of
-                ok                                      -> ok;
-                {error, {already_started, amqp_client}} -> ok;
-                {error, _} = E                          -> throw(E)
-            end;
-        _ ->
-            ok
+    [ensure_started(App) || App <- [xmerl, amqp_client]].
+
+ensure_started(App) ->
+    case application_controller:get_master(App) of
+        undefined -> case application:start(App) of
+                         ok                              -> ok;
+                         {error, {already_started, App}} -> ok;
+                         {error, _} = E                  -> throw(E)
+                     end;
+        _         -> ok
     end.
 
 %%---------------------------------------------------------------------------

@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Plugin.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2010-2013 GoPivotal, Inc.  All rights reserved.
+%%   Copyright (c) 2010-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_load_definitions).
@@ -45,4 +45,4 @@ maybe_load_definitions() ->
 
 load_definitions(Body) ->
     rabbit_mgmt_wm_definitions:apply_defs(
-      Body, fun rabbit_misc:const_ok/0, fun (E) -> {error, E} end).
+      Body, fun () -> ok end, fun (E) -> {error, E} end).

@@ -11,7 +11,7 @@
 %%  The Original Code is RabbitMQ.
 %%
 %%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2013 GoPivotal, Inc.  All rights reserved.
+%%  Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
 %%
 
 -module(rabbit_shovel_config).
@@ -21,6 +21,8 @@
 
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include("rabbit_shovel.hrl").
+
+-define(IGNORE_FIELDS, [delete_after]).
 
 parse(ShovelName, Config) ->
     {ok, Defaults} = application:get_env(defaults),
@@ -54,7 +56,7 @@ enrich_shovel_config({Config, Defaults}) ->
 
 parse_shovel_config_proplist(Config) ->
     Dict = dict:from_list(Config),
-    Fields = record_info(fields, shovel),
+    Fields = record_info(fields, shovel) -- ?IGNORE_FIELDS,
     Keys = dict:fetch_keys(Dict),
     case {Keys -- Fields, Fields -- Keys} of
         {[], []}      -> {_Pos, Dict1} =
@@ -113,7 +115,7 @@ parse_endpoint({Endpoint, Pos}) when is_list(Endpoint) ->
               end,
     {[], Brokers1} = run_state_monad(
                        lists:duplicate(length(Brokers),
-                                       fun parse_uri/1),
+                                       fun check_uri/1),
                        {Brokers, []}),
 
     ResourceDecls =
@@ -128,16 +130,20 @@ parse_endpoint({Endpoint, Pos}) when is_list(Endpoint) ->
           lists:duplicate(length(ResourceDecls), fun parse_declaration/1),
           {ResourceDecls, []}),
 
-    return({#endpoint{amqp_params = Brokers1,
-                      resource_declarations = lists:reverse(ResourceDecls1)},
+    DeclareFun =
+        fun (_Conn, Ch) ->
+                [amqp_channel:call(Ch, M) || M <- lists:reverse(ResourceDecls1)]
+        end,
+    return({#endpoint{uris = Brokers1,
+                      resource_declaration = DeclareFun},
             Pos});
 parse_endpoint({Endpoint, _Pos}) ->
     fail({require_list, Endpoint}).
 
-parse_uri({[Uri | Uris], Acc}) ->
+check_uri({[Uri | Uris], Acc}) ->
     case amqp_uri:parse(Uri) of
-        {ok, Params} ->
-            return({Uris, [Params | Acc]});
+        {ok, _Params} ->
+            return({Uris, [Uri | Acc]});
         {error, _} = Err ->
             throw(Err)
     end.
@@ -204,9 +210,8 @@ make_publish_fun(Fields, Pos, ValidFields) ->
     SuppliedFields = proplists:get_keys(Fields),
     case SuppliedFields -- ValidFields of
         [] ->
-            FieldIndices =
-                make_field_indices(ValidFields, SuppliedFields, Fields),
-            Fun = fun (Publish) ->
+            FieldIndices = make_field_indices(ValidFields, Fields),
+            Fun = fun (_SrcUri, _DestUri, Publish) ->
                           lists:foldl(fun ({Pos1, Value}, Pub) ->
                                               setelement(Pos1, Pub, Value)
                                       end, Publish, FieldIndices)
@@ -216,16 +221,20 @@ make_publish_fun(Fields, Pos, ValidFields) ->
             fail({unexpected_fields, Unexpected, ValidFields})
     end.
 
-make_field_indices(Valid, Supplied, Fields) ->
-    make_field_indices(Valid, Supplied, Fields, 2, []).
+make_field_indices(Valid, Fields) ->
+    make_field_indices(Fields, field_map(Valid, 2), []).
 
-make_field_indices(_Valid, [], _Fields, _Idx, Acc) ->
+make_field_indices([], _Idxs , Acc) ->
     lists:reverse(Acc);
-make_field_indices([F|Valid], [F|Supplied], Fields, Idx, Acc) ->
-    Value = proplists:get_value(F, Fields),
-    make_field_indices(Valid, Supplied, Fields, Idx+1, [{Idx, Value}|Acc]);
-make_field_indices([_V|Valid], Supplied, Fields, Idx, Acc) ->
-    make_field_indices(Valid, Supplied, Fields, Idx+1, Acc).
+make_field_indices([{Key, Value} | Rest], Idxs, Acc) ->
+    make_field_indices(Rest, Idxs, [{dict:fetch(Key, Idxs), Value} | Acc]).
+
+field_map(Fields, Idx0) ->
+    {Dict, _IdxMax} =
+        lists:foldl(fun (Field, {Dict1, Idx1}) ->
+                            {dict:store(Field, Idx1, Dict1), Idx1 + 1}
+                    end, {dict:new(), Idx0}, Fields),
+    Dict.
 
 duplicate_keys(PropList) ->
     proplists:get_keys(
