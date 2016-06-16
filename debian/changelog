@@ -1,3 +1,9 @@
+rabbitmq-server (3.3.5-1.1pexip2) pexip; urgency=low
+
+  * Require newer Erlang.
+
+ -- John-Mark Bell <jmb@pexip.com>  Thu, 16 Jun 2016 08:26:38 +0100
+
 rabbitmq-server (3.3.5-1.1pexip1) pexip; urgency=low
 
   * New upstream release
