@@ -143,7 +143,8 @@ start() ->
     Inform = case Quiet of
                  true  -> fun (_Format, _Args1) -> ok end;
                  false -> fun (Format, Args1) ->
-                                  io:format(Format ++ " ...~n", Args1)
+                                  DateTime = format_datetime(),
+                                  io:format(DateTime ++ " " ++ Format ++ "~n", Args1)
                           end
              end,
     PrintInvalidCommandError =
@@ -252,12 +253,14 @@ parse_arguments(CmdLine, NodeStr) ->
 action(stop, Node, Args, _Opts, Inform) ->
     Inform("Stopping and halting node ~p", [Node]),
     Res = call(Node, {rabbit, stop_and_halt, []}),
+    Inform("Completed stop and halt of rabbit application. Result: ~s", [Res]),
     case {Res, Args} of
         {ok, [PidFile]} -> wait_for_process_death(
-                             read_pid_file(PidFile, false));
+                             read_pid_file(PidFile, false), Inform);
         {ok, [_, _| _]} -> exit({badarg, Args});
         _               -> ok
     end,
+    Inform("Stopping and halting node ~p complete", [Node]),
     Res;
 
 action(stop_app, Node, [], _Opts, Inform) ->
@@ -591,11 +594,13 @@ while_process_is_alive(Node, Pid, Activity) ->
         false -> {error, process_not_running}
     end.
 
-wait_for_process_death(Pid) ->
+wait_for_process_death(Pid, Inform) ->
+    Inform("Waiting for process death. Pid: ~s", [Pid]),
     case process_up(Pid) of
         true  -> timer:sleep(?EXTERNAL_CHECK_INTERVAL),
-                 wait_for_process_death(Pid);
-        false -> ok
+                 wait_for_process_death(Pid, Inform);
+        false -> Inform("Process has died. Pid: ~s", [Pid]),
+                 ok
     end.
 
 read_pid_file(PidFile, Wait) ->
@@ -754,3 +759,11 @@ prettify_typed_amqp_value(table,   Value) -> prettify_amqp_table(Value);
 prettify_typed_amqp_value(array,   Value) -> [prettify_typed_amqp_value(T, V) ||
                                                  {T, V} <- Value];
 prettify_typed_amqp_value(_Type,   Value) -> Value.
+
+format_datetime() ->
+    {{Year, Month, Day}, {Hour, Minute, Second}} =
+        calendar:now_to_datetime(erlang:now()),
+    lists:flatten(
+        io_lib:format(
+            "~4..0w-~2..0w-~2..0wT~2..0w:~2..0w:~2..0w",
+            [Year,Month,Day,Hour,Minute,Second])).

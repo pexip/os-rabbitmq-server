@@ -374,14 +374,16 @@ stop() ->
         _         -> await_startup()
     end,
     rabbit_log:info("Stopping RabbitMQ~n"),
-    ok = app_utils:stop_applications(app_shutdown_order()).
+    ok = app_utils:stop_applications(app_shutdown_order()),
+    rabbit_misc:local_info_msg("Stopping RabbitMQ complete~n", []).
 
 stop_and_halt() ->
     try
         stop()
     after
         rabbit_misc:local_info_msg("Halting Erlang VM~n", []),
-        init:stop()
+        init:stop(),
+        rabbit_misc:local_info_msg("Halting Erlang VM complete~n", [])
     end,
     ok.
 
