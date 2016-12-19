@@ -58,7 +58,9 @@ start_rabbitmq () {
         RETVAL=0
         ensure_pid_dir
         set +e
-        RABBITMQ_PID_FILE=$PID_FILE start-stop-daemon --quiet \
+        RABBITMQ_SERVER_START_ARGS="-shutdown_time 10000" \
+            RABBITMQ_PID_FILE=$PID_FILE \
+            start-stop-daemon --quiet \
             --chuid rabbitmq --start --exec $DAEMON \
             --pidfile "$RABBITMQ_PID_FILE" --background
         $CONTROL wait $PID_FILE >/dev/null 2>&1
