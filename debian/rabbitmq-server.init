@@ -52,6 +52,43 @@ remove_pid () {
     rmdir `dirname ${PID_FILE}` || :
 }
 
+wait_for_process_to_stop() {
+    pid=$1
+    # Wait up to 15 seconds for process to exit
+    i=0
+    while kill -0 $pid 2>/dev/null && [ $i -lt 15 ]
+    do
+        sleep 1
+        i=$((i+1))
+    done
+}
+
+kill_process() {
+    pid=$1
+    if kill -0 $pid 2>/dev/null; then
+        # Still around: send it SIGKILL
+        kill -KILL $pid
+    fi
+}
+
+force_stop_process() {
+    pid=$1
+    if kill -0 $pid 2>/dev/null; then
+        # Process is still around; send it SIGABRT
+        kill -ABRT $pid
+
+        # Give it 30 seconds to act on the abort
+        i=0
+        while kill -0 $pid 2>/dev/null && [ $i -lt 30 ]
+        do
+            sleep 1
+            i=$((i+1))
+        done
+
+        kill_process $pid
+    fi
+}
+
 start_rabbitmq () {
     status_rabbitmq quiet
     if [ $RETVAL != 0 ] ; then
@@ -78,10 +115,21 @@ stop_rabbitmq () {
     status_rabbitmq quiet
     if [ $RETVAL = 0 ] ; then
         set +e
-        $CONTROL stop ${PID_FILE} > ${INIT_LOG_DIR}/shutdown_log 2> ${INIT_LOG_DIR}/shutdown_err
-        RETVAL=$?
+        if [ -f ${PID_FILE} ] ; then
+            read PID <${PID_FILE} 2>/dev/null
+        fi
+        $CONTROL status > ${INIT_LOG_DIR}/shutdown_log 2> ${INIT_LOG_DIR}/shutdown_err
+        $CONTROL list_queues >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+        $CONTROL list_exchanges >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+        $CONTROL list_bindings >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+        $CONTROL list_connections >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+        $CONTROL list_channels >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+        $CONTROL list_consumers >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+        $CONTROL stop ${PID_FILE} >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err &
         set -e
-        if [ $RETVAL = 0 ] ; then
+        if [ -z "$PID" ] ; then
+            wait_for_process_to_stop ${PID}
+            force_stop_process ${PID}
             remove_pid
         fi
     else

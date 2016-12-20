@@ -1,3 +1,10 @@
+rabbitmq-server (3.3.5-1.1pexip5) pexip; urgency=low
+
+  * Dump RabbitMQ diagnostics before stopping.
+  * Abort RabbitMQ stop if stop hangs.
+
+ -- Colin Bradbury <colin@pexip.com>  Tue, 20 Dec 2016 16:05:09 +0000
+
 rabbitmq-server (3.3.5-1.1pexip4) pexip; urgency=low
 
   * Add Erlang shutdown timeout flag.
