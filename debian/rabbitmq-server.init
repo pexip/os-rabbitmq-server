@@ -127,7 +127,7 @@ stop_rabbitmq () {
         $CONTROL list_consumers >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
         $CONTROL stop ${PID_FILE} >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err &
         set -e
-        if [ -z "$PID" ] ; then
+        if [ ! -z "$PID" ] ; then
             wait_for_process_to_stop ${PID}
             force_stop_process ${PID}
             remove_pid

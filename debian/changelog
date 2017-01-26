@@ -1,3 +1,9 @@
+rabbitmq-server (3.3.5-1.1pexip6) pexip; urgency=low
+
+  * Abort RabbitMQ in prerm.
+
+ -- Colin Bradbury <colin@pexip.com>  Wed, 25 Jan 2017 16:21:16 +0000
+
 rabbitmq-server (3.3.5-1.1pexip5) pexip; urgency=low
 
   * Dump RabbitMQ diagnostics before stopping.
