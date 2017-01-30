@@ -114,22 +114,23 @@ start_rabbitmq () {
 stop_rabbitmq () {
     status_rabbitmq quiet
     if [ $RETVAL = 0 ] ; then
-        set +e
         if [ -f ${PID_FILE} ] ; then
+            set +e
             read PID <${PID_FILE} 2>/dev/null
-        fi
-        $CONTROL status > ${INIT_LOG_DIR}/shutdown_log 2> ${INIT_LOG_DIR}/shutdown_err
-        $CONTROL list_queues >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
-        $CONTROL list_exchanges >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
-        $CONTROL list_bindings >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
-        $CONTROL list_connections >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
-        $CONTROL list_channels >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
-        $CONTROL list_consumers >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
-        $CONTROL stop ${PID_FILE} >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err &
-        set -e
-        if [ ! -z "$PID" ] ; then
-            wait_for_process_to_stop ${PID}
-            force_stop_process ${PID}
+            $CONTROL status > ${INIT_LOG_DIR}/shutdown_log 2> ${INIT_LOG_DIR}/shutdown_err
+            $CONTROL list_queues >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+            $CONTROL list_exchanges >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+            $CONTROL list_bindings >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+            $CONTROL list_connections >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+            $CONTROL list_channels >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+            $CONTROL list_consumers >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err
+            $CONTROL stop ${PID_FILE} >> ${INIT_LOG_DIR}/shutdown_log 2>> ${INIT_LOG_DIR}/shutdown_err &
+            set -e
+
+            if [ ! -z "$PID" ] ; then
+                wait_for_process_to_stop ${PID}
+                force_stop_process ${PID}
+            fi
             remove_pid
         fi
     else

@@ -1,6 +1,5 @@
 #!/bin/sh
-# Replace the default dh_installinit prerm with a script that will forcefully
-# kill the running service. Works around Erlang hanging on shutdown.
+
 set -e
 
 CONTROL=/usr/sbin/rabbitmqctl
@@ -55,7 +54,7 @@ stop_rabbitmq () {
 
         if [ ! -z "$PID" ] ; then
             set +e
-            $CONTROL stop ${PID_FILE} >> ${INIT_LOG_DIR}/prerm_shutdown_log 2>> ${INIT_LOG_DIR}/prerm_shutdown_err &
+            $CONTROL stop ${PID_FILE} >> ${INIT_LOG_DIR}/ruh_preinst_shutdown_log 2>> ${INIT_LOG_DIR}/ruh_preinst_shutdown_err &
             set -e
 
             wait_for_process_to_stop ${PID}
@@ -65,4 +64,30 @@ stop_rabbitmq () {
     fi
 }
 
-stop_rabbitmq
+if [ -x "/etc/init.d/rabbitmq-server" ]; then
+  PROCEED=1
+
+  if [ -x "/usr/sbin/policy-rc.d" ]; then
+    RL=`/sbin/runlevel | sed 's/.*\ //'`
+    FALLBACK=`/usr/sbin/policy-rc.d rabbitmq-server stop ${RL}`
+    RC=$?
+    case ${RC} in
+      0|105|106)
+        PROCEED=1
+        ;;
+      *)
+        PROCEED=0
+        ;;
+    esac
+  fi
+
+  case ${PROCEED} in
+    0)
+      ;;
+    1)
+      stop_rabbitmq
+      ;;
+  esac
+fi
+
+exit 0

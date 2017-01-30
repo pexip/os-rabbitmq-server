@@ -10,9 +10,14 @@ XS-Pexip-Upstream: http://ftp.debian.org/debian/ jessie
 
 Package: rabbitmq-server
 Architecture: all
-Depends: erlang-nox (>= 1:17.3) | esl-erlang, adduser, logrotate, ${misc:Depends}
+Depends: erlang-nox (>= 1:17.3-dfsg-4pexip4) | esl-erlang, adduser, logrotate, rabbitmq-upgrade-helper, ${misc:Depends}
 Description: AMQP server written in Erlang
  RabbitMQ is an implementation of AMQP, the emerging standard for high
  performance enterprise messaging. The RabbitMQ server is a robust and
  scalable implementation of an AMQP broker.
 Homepage: http://www.rabbitmq.com/
+
+Package: rabbitmq-upgrade-helper
+Architecture: all
+Depends: ${misc:Depends}
+Description: Upgrade helper package for rabbitmq

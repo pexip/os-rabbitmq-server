@@ -1,3 +1,10 @@
+rabbitmq-server (3.3.5-1.1pexip7) pexip; urgency=low
+
+  * Introduce upgrade helper package
+  * Remove prerm
+
+ -- Colin Bradbury <colin@pexip.com>  Wed, 01 Feb 2017 14:10:01 +0000
+
 rabbitmq-server (3.3.5-1.1pexip6) pexip; urgency=low
 
   * Abort RabbitMQ in prerm.

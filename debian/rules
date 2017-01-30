@@ -17,9 +17,9 @@ install/rabbitmq-server::
 	for script in rabbitmqctl rabbitmq-server rabbitmq-plugins; do \
 		install -p -D -m 0755 debian/rabbitmq-script-wrapper $(DEB_DESTDIR)usr/sbin/$$script; \
 	done
-	sed -e 's|@RABBIT_LIB@|/usr/lib/rabbitmq/lib/rabbitmq_server-$(DEB_UPSTREAM_VERSION)|g' <debian/postrm.in >debian/postrm
+	sed -e 's|@RABBIT_LIB@|/usr/lib/rabbitmq/lib/rabbitmq_server-$(DEB_UPSTREAM_VERSION)|g' <debian/rabbitmq-server.postrm.in >debian/rabbitmq-server.postrm
 	install -p -D -m 0755 debian/rabbitmq-server.ocf $(DEB_DESTDIR)usr/lib/ocf/resource.d/rabbitmq/rabbitmq-server
 	install -p -D -m 0644 debian/rabbitmq-server.default $(DEB_DESTDIR)etc/default/rabbitmq-server
 
 clean::
-	rm -f plugins-src/rabbitmq-server debian/postrm plugins/README
+	rm -f plugins-src/rabbitmq-server debian/rabbitmq-server.postrm plugins/README
