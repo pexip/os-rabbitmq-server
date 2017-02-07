@@ -1,3 +1,9 @@
+rabbitmq-server (3.3.5-1.1pexip9) pexip; urgency=low
+
+  * Fix up preinst policy checks.
+
+ -- Colin Bradbury <colin@pexip.com>  Tue, 07 Feb 2017 16:38:33 +0000
+
 rabbitmq-server (3.3.5-1.1pexip8) pexip; urgency=low
 
   * Fix up install rules
