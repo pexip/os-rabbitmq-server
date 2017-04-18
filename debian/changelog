@@ -1,3 +1,15 @@
+rabbitmq-server (3.3.5-1.1+deb8u1pexip1) pexip; urgency=low
+
+  * New upstream release
+
+ -- John-Mark Bell <jmb@pexip.com>  Tue, 18 Apr 2017 08:20:58 +0100
+
+rabbitmq-server (3.3.5-1.1+deb8u1) jessie-security; urgency=medium
+
+  * CVE-2016-9877: apply backported upstream patch (Closes: #849849).
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 11 Jan 2017 02:17:32 +0100
+
 rabbitmq-server (3.3.5-1.1pexip9) pexip; urgency=low
 
   * Fix up preinst policy checks.
