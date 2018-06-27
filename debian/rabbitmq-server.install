@@ -1,1 +1,2 @@
 debian/tmp/*
+debian/forking.conf				/lib/systemd/system/rabbitmq-server.service.d

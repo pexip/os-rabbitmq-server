@@ -1,3 +1,10 @@
+rabbitmq-server (3.3.5-1.1+deb8u1pexip2) pexip; urgency=low
+
+  * debian/forking.conf: Ensure services created by sysv-generator
+    are correctly treated as daemons.
+
+ -- John-Mark Bell <jmb@pexip.com>  Wed, 27 Jun 2018 23:09:15 +0100
+
 rabbitmq-server (3.3.5-1.1+deb8u1pexip1) pexip; urgency=low
 
   * New upstream release
