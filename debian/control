@@ -6,7 +6,7 @@ XSBC-Pexip-Original-Maintainer: RabbitMQ Team <packaging@rabbitmq.com>
 XSBC-Pexip-Original-Uploaders: Blair Hester <bhester@gopivotal.com>
 Build-Depends: cdbs, debhelper (>= 5), erlang-dev, python-simplejson, xmlto, xsltproc, erlang-nox (>= 1:17.3), erlang-src (>= 1:17.3), unzip, zip
 Standards-Version: 3.9.2
-XS-Pexip-Upstream: http://ftp.debian.org/debian/ jessie
+XS-Pexip-Upstream: http://ftp.debian.org/debian/ stretch
 
 Package: rabbitmq-server
 Architecture: all
