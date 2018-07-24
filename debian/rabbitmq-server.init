@@ -1,11 +1,4 @@
 #!/bin/sh
-#
-# rabbitmq-server RabbitMQ broker
-#
-# chkconfig: - 80 05
-# description: Enable AMQP service provided by RabbitMQ
-#
-
 ### BEGIN INIT INFO
 # Provides:          rabbitmq-server
 # Required-Start:    $remote_fs $network
@@ -20,7 +13,7 @@ PATH=/sbin:/usr/sbin:/bin:/usr/bin
 NAME=rabbitmq-server
 DAEMON=/usr/sbin/${NAME}
 CONTROL=/usr/sbin/rabbitmqctl
-DESC="message broker"
+DESC="RabbitMQ Messaging Server"
 USER=rabbitmq
 ROTATE_SUFFIX=
 INIT_LOG_DIR=/var/log/rabbitmq

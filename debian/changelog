@@ -1,3 +1,157 @@
+rabbitmq-server (3.6.6-1) unstable; urgency=medium
+
+  [ Ondřej Nový ]
+  * Team upload.
+  * New upstream release (Closes: #849849, CVE-2016-9877)
+  * d/copyright: Fixed for new release
+  * d/ocf: Removed, use upstream one
+
+ -- Ondřej Kobližek <koblizeko@gmail.com>  Mon, 02 Jan 2017 15:49:03 +0100
+
+rabbitmq-server (3.6.5-1) unstable; urgency=medium
+
+  [ James Page ]
+  * New upstream release (Closes: #812377):
+    - Builds fine with the new erlang (Closes: #837241).
+  * [fa2d29e] Update watch file for upstream xz compression. (Closes: #813628).
+  * [b008e08] Imported Upstream version 3.6.0.
+  * [d0dc477] Update gbp configuration for dch use.
+
+  [ Thomas Goirand ]
+  * Also packaging the rabbitmqadmin cli.
+  * Do not do dh_auto_clean, as it removes all the deps folder.
+  * Disabled tests, as they download from github.
+  * Replaced git-core transition package by git in build-depends.
+  * Added rsync as build-depends-indep.
+  * Fix DESTDIR=$(DEB_DESTDIR) PREFIX=/usr as upstream Makefile changed.
+  * Added python-all and dh-python as build-depends.
+  * Update of debian/copyright for the new deps/* path from upstream, updated
+    debian/* info and fixed order.
+  * Copy some stuff from the upstream pacakging in debian/rules.
+  * Runtime depends on lsb-base.
+  * Overrides lintian false positive error js source missing.
+
+  [ Ondřej Nový ]
+  * Fixed VCS URLs (https).
+  * Fixed python shebang.
+  * Standards-Version is 3.9.8 now (no change).
+
+ -- Thomas Goirand <zigo@debian.org>  Sun, 14 Feb 2016 13:35:22 +0800
+
+rabbitmq-server (3.5.7-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- James Page <james.page@ubuntu.com>  Mon, 18 Jan 2016 14:05:40 +0000
+
+rabbitmq-server (3.5.4-3.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Make the default configuration file, which is read unconditionally on
+    startup, readable by others. This makes it possible to run rabbitmq-server
+    as users other than rabbitmq, e.g. when running test suites as part of
+    package builds (Closes: #801917)
+
+ -- Antonio Terceiro <terceiro@debian.org>  Sat, 31 Oct 2015 12:56:15 -0200
+
+rabbitmq-server (3.5.4-3) unstable; urgency=medium
+
+  * Fix /etc/rabbitmq creation (adding -p to mkdir for upgrades). Thanks to
+    Frederic Peters for the bug report (Closes: #801088).
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 06 Oct 2015 14:07:39 +0000
+
+rabbitmq-server (3.5.4-2) unstable; urgency=medium
+
+  * Cosmetic clean-up in debian/rabbitmq-server.postinst and .init.
+  * Fix the user / group of /etc/rabbitmq folder and conf files.
+  * Also fix user / group of an eventual /etc/rabbitmq/enabled_plugins when
+    upgrading the package.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 05 Oct 2015 15:47:58 +0200
+
+rabbitmq-server (3.5.4-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- James Page <james.page@ubuntu.com>  Tue, 04 Aug 2015 14:52:31 +0200
+
+rabbitmq-server (3.5.1-2) unstable; urgency=medium
+
+  [ Tony Breeds ]
+  * systemd: Ensure that rabbitmq has started before marking service as
+    running (LP: #1449056).
+
+  [ James Page ]
+  * systemd: Drop use of /etc/default/rabbitmq-server.
+
+ -- James Page <james.page@ubuntu.com>  Tue, 02 Jun 2015 11:40:59 +0100
+
+rabbitmq-server (3.5.1-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- James Page <james.page@ubuntu.com>  Wed, 13 May 2015 21:35:52 +0100
+
+rabbitmq-server (3.4.3-2) unstable; urgency=medium
+
+  * Restore missing changes from 3.4.2-4.
+
+ -- James Page <james.page@ubuntu.com>  Mon, 02 Feb 2015 07:44:33 +0200
+
+rabbitmq-server (3.4.3-1) unstable; urgency=medium
+
+  * New upstream point release.
+
+ -- James Page <james.page@ubuntu.com>  Wed, 28 Jan 2015 16:12:32 +0000
+
+rabbitmq-server (3.4.2-4) unstable; urgency=medium
+
+  * Re-added /usr/lib/erlang/lib /var/lib/rabbitmq/mnesia and
+    /var/log/rabbitmq which I removed form the package by mistake on the last
+    upload.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 28 Jan 2015 13:11:02 +0000
+
+rabbitmq-server (3.4.2-3) unstable; urgency=medium
+
+  * Removes debian/README which is useless (Closes: #703021).
+  * Provides a default /etc/rabbitmq/rabbitmq-env.conf (Closes: #543638).
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 27 Jan 2015 15:08:08 +0100
+
+rabbitmq-server (3.4.2-2) unstable; urgency=medium
+
+  * d/rabbitmq-server.dirs: Restore missing /etc/rabbitmq directory
+    (LP: #1410155).
+
+ -- James Page <james.page@ubuntu.com>  Tue, 13 Jan 2015 09:53:47 +0000
+
+rabbitmq-server (3.4.2-1) unstable; urgency=medium
+
+  [ James Page ]
+  * New upstream point release.
+  * d/control: Update for new maintainer information, add VCS repository
+    locations.
+  * d/source/format: Switch packaging to source format 3.0 (quilt).
+  * d/compat,control: Bump debhelper compat level to 9.
+  * d/*: wrap-and-sort.
+  * d/*: Move to standard debhelper, drop use of cdbs.
+  * d/rules,control,rabbitmq-server.service: Add systemd service
+    configuration.
+  * d/control: Bumped Standards-Version 3.9.6, no changes.
+
+  [ Thomas Goirand ]
+  * d/copyright: Rewrote as format 1.0.
+
+ -- James Page <james.page@ubuntu.com>  Fri, 19 Dec 2014 11:09:20 +0000
+
+rabbitmq-server (3.4.1-1) unstable; urgency=high
+
+  * New upstream release.
+
+ -- Blair Hester <bhester@gopivotal.com>  Tue, 04 Nov 2014 07:33:44 +0100
+
 rabbitmq-server (3.3.5-1.1+deb8u1pexip2) pexip; urgency=low
 
   * debian/forking.conf: Ensure services created by sysv-generator
@@ -10,12 +164,6 @@ rabbitmq-server (3.3.5-1.1+deb8u1pexip1) pexip; urgency=low
   * New upstream release
 
  -- John-Mark Bell <jmb@pexip.com>  Tue, 18 Apr 2017 08:20:58 +0100
-
-rabbitmq-server (3.3.5-1.1+deb8u1) jessie-security; urgency=medium
-
-  * CVE-2016-9877: apply backported upstream patch (Closes: #849849).
-
- -- Thomas Goirand <zigo@debian.org>  Wed, 11 Jan 2017 02:17:32 +0100
 
 rabbitmq-server (3.3.5-1.1pexip9) pexip; urgency=low
 
@@ -72,13 +220,6 @@ rabbitmq-server (3.3.5-1.1pexip1) pexip; urgency=low
   * New upstream release
 
  -- John-Mark Bell <jmb@pexip.com>  Tue, 04 Aug 2015 17:50:12 +0100
-
-rabbitmq-server (3.3.5-1.1) testing-proposed-updates; urgency=medium
-
-  * Non-maintainer upload.
-  * Do not trust X-Forwarded-For (Closes: #773134).
-
- -- Matt Kraai <kraai@debian.org>  Sun, 14 Dec 2014 14:51:41 -0800
 
 rabbitmq-server (3.3.5-1) unstable; urgency=low
 

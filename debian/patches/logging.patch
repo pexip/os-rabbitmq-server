@@ -1,0 +1,14 @@
+diff --git a/deps/rabbit/src/rabbit.erl b/deps/rabbit/src/rabbit.erl
+index 1f0df1a..6cd85fe 100644
+--- a/deps/rabbit/src/rabbit.erl
++++ b/deps/rabbit/src/rabbit.erl
+@@ -436,7 +436,8 @@ stop_and_halt() ->
+         %% foreground broker was running (or systemd journal) will
+         %% contain information about graceful termination.
+         io:format(standard_error, "Gracefully halting Erlang VM~n", []),
+-        init:stop()
++        init:stop(),
++        rabbit_misc:local_info_msg("Halting Erlang VM complete~n", [])
+     end,
+     ok.
+ 
