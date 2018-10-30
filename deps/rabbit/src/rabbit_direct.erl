@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_direct).
@@ -20,6 +20,9 @@
          start_channel/9, disconnect/2]).
 %% Internal
 -export([list_local/0]).
+
+%% For testing only
+-export([extract_extra_auth_props/4]).
 
 -include("rabbit.hrl").
 
@@ -65,33 +68,112 @@ list() ->
 
 %%----------------------------------------------------------------------------
 
-connect({none, _}, VHost, Protocol, Pid, Infos) ->
-    connect0(fun () -> {ok, rabbit_auth_backend_dummy:user()} end,
-             VHost, Protocol, Pid, Infos);
+auth_fun({none, _}, _VHost, _ExtraAuthProps) ->
+    fun () -> {ok, rabbit_auth_backend_dummy:user()} end;
 
-connect({Username, none}, VHost, Protocol, Pid, Infos) ->
-    connect0(fun () -> rabbit_access_control:check_user_login(Username, []) end,
-             VHost, Protocol, Pid, Infos);
+auth_fun({Username, none}, _VHost, _ExtraAuthProps) ->
+    fun () -> rabbit_access_control:check_user_login(Username, []) end;
 
-connect({Username, Password}, VHost, Protocol, Pid, Infos) ->
-    connect0(fun () -> rabbit_access_control:check_user_login(
-                         Username, [{password, Password}, {vhost, VHost}]) end,
-             VHost, Protocol, Pid, Infos).
+auth_fun({Username, Password}, VHost, ExtraAuthProps) ->
+    fun () ->
+        rabbit_access_control:check_user_login(
+            Username,
+            [{password, Password}, {vhost, VHost}] ++ ExtraAuthProps)
+    end.
 
-connect0(AuthFun, VHost, Protocol, Pid, Infos) ->
+connect(Creds, VHost, Protocol, Pid, Infos) ->
+    ExtraAuthProps = extract_extra_auth_props(Creds, VHost, Pid, Infos),
+    AuthFun = auth_fun(Creds, VHost, ExtraAuthProps),
     case rabbit:is_running() of
-        true  -> case AuthFun() of
-                     {ok, User = #user{username = Username}} ->
-                         notify_auth_result(Username,
-                           user_authentication_success, []),
-                         connect1(User, VHost, Protocol, Pid, Infos);
-                     {refused, Username, Msg, Args} ->
-                         notify_auth_result(Username,
-                           user_authentication_failure,
-                           [{error, rabbit_misc:format(Msg, Args)}]),
-                         {error, {auth_failure, "Refused"}}
-                 end;
+        true  ->
+            case whereis(rabbit_direct_client_sup) of
+                undefined ->
+                    {error, broker_is_booting};
+                _ ->
+                    case is_over_connection_limit(VHost, Creds, Pid) of
+                        true  ->
+                            {error, not_allowed};
+                        false ->
+                            case is_vhost_alive(VHost, Creds, Pid) of
+                                false ->
+                                    {error, {internal_error, vhost_is_down}};
+                                true  ->
+                                    case AuthFun() of
+                                        {ok, User = #user{username = Username}} ->
+                                            notify_auth_result(Username,
+                                                               user_authentication_success, []),
+                                            connect1(User, VHost, Protocol, Pid, Infos);
+                                        {refused, Username, Msg, Args} ->
+                                            notify_auth_result(Username,
+                                                               user_authentication_failure,
+                                                               [{error, rabbit_misc:format(Msg, Args)}]),
+                                            {error, {auth_failure, "Refused"}}
+                                    end %% AuthFun()
+                            end %% is_vhost_alive
+                    end %% is_over_connection_limit
+            end;
         false -> {error, broker_not_found_on_node}
+    end.
+
+extract_extra_auth_props(Creds, VHost, Pid, Infos) ->
+    case extract_protocol(Infos) of
+        undefined ->
+            [];
+        Protocol ->
+            maybe_call_connection_info_module(Protocol, Creds, VHost, Pid, Infos)
+    end.
+
+extract_protocol(Infos) ->
+    case proplists:get_value(protocol, Infos, undefined) of
+        {Protocol, _Version} ->
+            Protocol;
+        _ ->
+            undefined
+    end.
+
+maybe_call_connection_info_module(Protocol, Creds, VHost, Pid, Infos) ->
+    Module = rabbit_data_coercion:to_atom(string:to_lower(
+        "rabbit_" ++ rabbit_data_coercion:to_list(Protocol) ++ "_connection_info")
+    ),
+    Args = [Creds, VHost, Pid, Infos],
+    code_server_cache:maybe_call_mfa(Module, additional_authn_params, Args, []).
+
+is_vhost_alive(VHost, {Username, _Password}, Pid) ->
+    PrintedUsername = case Username of
+        none -> "";
+        _    -> Username
+    end,
+    case rabbit_vhost_sup_sup:is_vhost_alive(VHost) of
+        true  -> true;
+        false ->
+            rabbit_log_connection:error(
+                "Error on Direct connection ~p~n"
+                "access to vhost '~s' refused for user '~s': "
+                "vhost '~s' is down",
+                [Pid, VHost, PrintedUsername, VHost]),
+            false
+    end.
+
+is_over_connection_limit(VHost, {Username, _Password}, Pid) ->
+    PrintedUsername = case Username of
+        none -> "";
+        _    -> Username
+    end,
+    try rabbit_vhost_limit:is_over_connection_limit(VHost) of
+        false         -> false;
+        {true, Limit} ->
+            rabbit_log_connection:error(
+                "Error on Direct connection ~p~n"
+                "access to vhost '~s' refused for user '~s': "
+                "connection limit (~p) is reached",
+                [Pid, VHost, PrintedUsername, Limit]),
+            true
+    catch
+        throw:{error, {no_such_vhost, VHost}} ->
+            rabbit_log_connection:error(
+                "Error on Direct connection ~p~n"
+                "vhost ~s not found", [Pid, VHost]),
+            true
     end.
 
 notify_auth_result(Username, AuthResult, ExtraProps) ->
@@ -109,6 +191,7 @@ authz_socket_info_direct(Infos) ->
 connect1(User, VHost, Protocol, Pid, Infos) ->
     try rabbit_access_control:check_vhost_access(User, VHost, authz_socket_info_direct(Infos)) of
         ok -> ok = pg_local:join(rabbit_direct, Pid),
+	      rabbit_core_metrics:connection_created(Pid, Infos),
               rabbit_event:notify(connection_created, Infos),
               {ok, {User, rabbit_reader:server_properties(Protocol)}}
     catch
@@ -127,4 +210,5 @@ start_channel(Number, ClientChannelPid, ConnPid, ConnName, Protocol, User,
 
 disconnect(Pid, Infos) ->
     pg_local:leave(rabbit_direct, Pid),
+    rabbit_core_metrics:connection_closed(Pid),
     rabbit_event:notify(connection_closed, Infos).

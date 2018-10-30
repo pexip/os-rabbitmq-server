@@ -1,4 +1,13 @@
-<h1>Traces</h1>
+<h1>Traces: <b><%= node.name %></b></h1>
+<p>
+  Node:
+  <select id="traces-node">
+  <% for (var i = 0; i < nodes.length; i++) { %>
+     <option name="#/traces/<%= fmt_string(nodes[i].name) %>"<% if (nodes[i].name == node.name) { %>selected="selected"<% } %>><%= nodes[i].name %></option>
+  <% } %>
+  </select>
+</p>
+
 <div class="section">
   <h2>All traces</h2>
   <div class="hider updatable">
@@ -19,6 +28,7 @@
                 <th>Payload limit</th>
                 <th>Rate</th>
                 <th>Queued</th>
+                <th>Tracer connection username</th>
                 <th></th>
               </tr>
             </thead>
@@ -48,8 +58,9 @@
                   <div class="status-red"><acronym title="The trace failed to start - check the server logs for details.">FAILED</acronym></div>
                 </td>
                 <% } %>
+                <td><%= fmt_string(trace.tracer_connection_username) %></td>
                 <td>
-                  <form action="#/traces" method="delete">
+                  <form action="#/traces/node/<%= node.name %>" method="delete">
                     <input type="hidden" name="vhost" value="<%= fmt_string(trace.vhost) %>"/>
                     <input type="hidden" name="name" value="<%= fmt_string(trace.name) %>"/>
                     <input type="submit" value="Stop"/>
@@ -80,10 +91,10 @@
                   var file = files[i];
               %>
                 <tr<%= alt_rows(i)%>>
-                  <td><%= link_trace(file.name) %></td>
+                  <td><%= link_trace(node.name, file.name) %></td>
                   <td class="r"><%= fmt_bytes(file.size) %></td>
                   <td>
-                    <form action="#/trace-files" method="delete" class="inline-form">
+                    <form action="#/trace-files/node/<%= node.name %>" method="delete" class="inline-form">
                       <input type="hidden" name="name" value="<%= fmt_string(file.name) %>"/>
                       <input type="submit" value="Delete" />
                     </form>
@@ -104,7 +115,7 @@
 <div class="section">
   <h2>Add a new trace</h2>
   <div class="hider">
-    <form action="#/traces" method="put">
+    <form action="#/traces/node/<%= node.name %>" method="put">
       <table class="form">
 <% if (vhosts_interesting) { %>
         <tr>
@@ -131,6 +142,16 @@
               <option value="text">Text</option>
               <option value="json">JSON</option>
             </select>
+          </td>
+        </tr>
+        <tr>
+          <th><label>Tracer connection username:</label></th>
+          <td><input type="text" name="tracer_connection_username"/></td>
+          <td><label>Tracer connection password:</label></td>
+          <td>
+            <div id="password-div">
+              <input type="password" name="tracer_connection_password"/>
+            </div>
           </td>
         </tr>
         <tr>

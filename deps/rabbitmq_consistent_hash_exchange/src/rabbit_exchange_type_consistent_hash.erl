@@ -11,12 +11,14 @@
 %% The Original Code is RabbitMQ Consistent Hash Exchange.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2018 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_exchange_type_consistent_hash).
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
+
+-include("rabbitmq_consistent_hash_exchange.hrl").
 
 -behaviour(rabbit_exchange_type).
 
@@ -25,8 +27,7 @@
          create/2, delete/3, policy_changed/2,
          add_binding/3, remove_bindings/3, assert_args_equivalence/2]).
 -export([init/0]).
-
--record(bucket, {source_number, destination, binding}).
+-export([info/1, info/2]).
 
 -rabbit_boot_step(
    {rabbit_exchange_type_consistent_hash_registry,
@@ -40,52 +41,52 @@
 
 -rabbit_boot_step(
    {rabbit_exchange_type_consistent_hash_mnesia,
-    [{description, "exchange type x-consistent-hash: mnesia"},
+    [{description, "exchange type x-consistent-hash: shared state"},
      {mfa,         {?MODULE, init, []}},
      {requires,    database},
      {enables,     external_infrastructure}]}).
 
--define(TABLE, ?MODULE).
--define(PHASH2_RANGE, 134217728). %% 2^27
+%% This data model allows for efficient routing and exchange deletion
+%% but less efficient (linear) binding management.
+
+-define(HASH_RING_STATE_TABLE, rabbit_exchange_type_consistent_hash_ring_state).
+
 -define(PROPERTIES, [<<"correlation_id">>, <<"message_id">>, <<"timestamp">>]).
+
+%% OTP 19.3 does not support exs1024s
+-define(SEED_ALGORITHM, exs1024).
+
+info(_X) -> [].
+info(_X, _) -> [].
 
 description() ->
     [{description, <<"Consistent Hashing Exchange">>}].
 
 serialise_events() -> false.
 
-route(#exchange { name      = Name,
-                  arguments = Args },
-      #delivery { message = Msg }) ->
-    %% Yes, we're being exceptionally naughty here, by using ets on an
-    %% mnesia table. However, RabbitMQ-server itself is just as
-    %% naughty, and for good reasons.
+route(#exchange {name      = Name,
+                 arguments = Args},
+      #delivery {message = Msg}) ->
+    case ets:lookup(?HASH_RING_STATE_TABLE, Name) of
+        []  ->
+            [];
+        [#chx_hash_ring{bucket_map = BM}] ->
+            case maps:size(BM) of
+                0 -> [];
+                N ->
+                    K              = value_to_hash(hash_on(Args), Msg),
+                    SelectedBucket = jump_consistent_hash(K, N),
 
-    %% Note that given the nature of this select, it will force mnesia
-    %% to do a linear scan of the entries in the table that have the
-    %% correct exchange name. More sophisticated solutions include,
-    %% for example, having some sort of tree as the value of a single
-    %% mnesia entry for each exchange. However, such values tend to
-    %% end up as relatively deep data structures which cost a lot to
-    %% continually copy to the process heap. Consequently, such
-    %% approaches have not been found to be much faster, if at all.
-    H = erlang:phash2(hash(hash_on(Args), Msg), ?PHASH2_RANGE),
-    case ets:select(?TABLE, [{#bucket { source_number = {Name, '$2'},
-                                        destination   = '$1',
-                                        _             = '_' },
-                              [{'>=', '$2', H}],
-                              ['$1']}], 1) of
-        '$end_of_table' ->
-            case ets:match_object(?TABLE, #bucket { source_number = {Name, '_'},
-                                                    _ = '_' }, 1) of
-                {[Bucket], _Cont} -> [Bucket#bucket.destination];
-                _                 -> []
-            end;
-        {Destinations, _Continuation} ->
-            Destinations
+                    case maps:get(SelectedBucket, BM, undefined) of
+                        undefined ->
+                            rabbit_log:warning("Bucket ~p not found", [SelectedBucket]),
+                            [];
+                        Queue     -> [Queue]
+                    end
+            end
     end.
 
-validate(#exchange { arguments = Args }) ->
+validate(#exchange{arguments = Args}) ->
     case hash_args(Args) of
         {undefined, undefined} ->
             ok;
@@ -116,84 +117,152 @@ validate_binding(_X, #binding { key = K }) ->
             {error, {binding_invalid, "The binding key must be an integer: ~p", [K]}}
     end.
 
-create(_Tx, _X) -> ok.
+maybe_initialise_hash_ring_state(transaction, #exchange{name = Name}) ->
+    maybe_initialise_hash_ring_state(transaction, Name);
+maybe_initialise_hash_ring_state(transaction, X = #resource{}) ->
+    case mnesia:read(?HASH_RING_STATE_TABLE, X) of
+        [_] -> ok;
+        []  ->
+            mnesia:write_lock_table(?HASH_RING_STATE_TABLE),
+            ok = mnesia:write(?HASH_RING_STATE_TABLE, #chx_hash_ring{
+                                                         exchange = X,
+                                                         next_bucket_number = 0,
+                                                         bucket_map = #{}}, write)
+    end;
 
-delete(transaction, #exchange { name = Name }, _Bs) ->
-    ok = mnesia:write_lock_table(?TABLE),
-    [ok = mnesia:delete_object(?TABLE, R, write) ||
-        R <- mnesia:match_object(
-               ?TABLE, #bucket{source_number = {Name, '_'}, _ = '_'}, write)],
-    ok;
-delete(_Tx, _X, _Bs) -> ok.
+maybe_initialise_hash_ring_state(_, X) ->
+    rabbit_misc:execute_mnesia_transaction(
+      fun() -> maybe_initialise_hash_ring_state(transaction, X) end).
+
+create(transaction, X) ->
+    maybe_initialise_hash_ring_state(transaction, X);
+create(Tx, X) ->
+      maybe_initialise_hash_ring_state(Tx, X).
+
+delete(transaction, #exchange{name = Name}, _Bs) ->
+    mnesia:write_lock_table(?HASH_RING_STATE_TABLE),
+
+    ok = mnesia:delete({?HASH_RING_STATE_TABLE, Name});
+delete(_Tx, _X, _Bs) ->
+    ok.
 
 policy_changed(_X1, _X2) -> ok.
 
-add_binding(transaction, _X,
-            #binding { source = S, destination = D, key = K } = B) ->
-    %% Use :select rather than :match_object so that we can limit the
-    %% number of results and not bother copying results over to this
-    %% process.
-    case mnesia:select(?TABLE,
-                       [{#bucket { binding = B, _ = '_' }, [], [ok]}],
-                       1, read) of
-        '$end_of_table' ->
-            ok = mnesia:write_lock_table(?TABLE),
-            BucketCount = lists:min([list_to_integer(binary_to_list(K)),
-                                     ?PHASH2_RANGE]),
-            [ok = mnesia:write(?TABLE,
-                               #bucket { source_number = {S, N},
-                                         destination   = D,
-                                         binding       = B },
-                               write) || N <- find_numbers(S, BucketCount, [])],
+add_binding(transaction, X,
+            B = #binding{source = S, destination = D, key = K}) ->
+    Weight = rabbit_data_coercion:to_integer(K),
+
+    case mnesia:read(?HASH_RING_STATE_TABLE, S) of
+        [State0 = #chx_hash_ring{bucket_map = BM0,
+                                 next_bucket_number = NexN0}] ->
+            NextN    = NexN0 + Weight,
+            %% hi/lo bucket counters are 0-based but weight is 1-based
+            Range   = lists:seq(NexN0, (NextN - 1)),
+            BM      = lists:foldl(fun(Key, Acc) ->
+                                          maps:put(Key, D, Acc)
+                                  end, BM0, Range),
+            State   = State0#chx_hash_ring{bucket_map = BM,
+                                           next_bucket_number = NextN},
+
+            ok = mnesia:write(?HASH_RING_STATE_TABLE, State, write),
             ok;
-        _ ->
-            ok
+        [] ->
+            maybe_initialise_hash_ring_state(transaction, S),
+            add_binding(transaction, X, B)
     end;
 add_binding(none, _X, _B) ->
     ok.
 
 remove_bindings(transaction, _X, Bindings) ->
-    ok = mnesia:write_lock_table(?TABLE),
-    [ok = mnesia:delete(?TABLE, Key, write) ||
-        Binding <- Bindings,
-        Key <- mnesia:select(?TABLE,
-                             [{#bucket { source_number = '$1',
-                                         binding       = Binding,
-                                         _             = '_' }, [], ['$1']}],
-                             write)],
+    [remove_binding(B) || B <- Bindings],
+
     ok;
-remove_bindings(none, _X, _Bs) ->
+remove_bindings(none, X, Bindings) ->
+    rabbit_misc:execute_mnesia_transaction(
+     fun() -> remove_bindings(transaction, X, Bindings) end),
     ok.
+
+remove_binding(#binding{source = S, destination = D, key = RK}) ->
+    Weight = rabbit_data_coercion:to_integer(RK),
+
+    case mnesia:read(?HASH_RING_STATE_TABLE, S) of
+        [State0 = #chx_hash_ring{bucket_map = BM0,
+                                 next_bucket_number = NexN0}] ->
+            %% Buckets with lower numbers stay as is; buckets that
+            %% belong to this binding are removed; buckets with
+            %% greater numbers are updated (their numbers are adjusted downwards by weight)
+            BucketsOfThisBinding = maps:filter(fun (_K, V) -> V =:= D end, BM0),
+            case maps:size(BucketsOfThisBinding) of
+                0             -> ok;
+                N when N >= 1 ->
+                    KeysOfThisBinding  = maps:keys(BucketsOfThisBinding),
+                    LastBucket         = lists:last(KeysOfThisBinding),
+                    FirstBucket        = hd(KeysOfThisBinding),
+                    BucketsDownTheRing = maps:filter(fun (K, _) -> K > LastBucket end, BM0),
+                    UnchangedBuckets = maps:filter(fun (K, _) -> K < FirstBucket end, BM0),
+
+                    %% final state with "down the ring" buckets updated
+                    NewBucketsDownTheRing = maps:fold(
+                                              fun(K0, V, Acc)  ->
+                                                      maps:put(K0 - Weight, V, Acc)
+                                              end, #{}, BucketsDownTheRing),
+                    BM1 = maps:merge(UnchangedBuckets, NewBucketsDownTheRing),
+                    NextN = NexN0 - Weight,
+                    State = State0#chx_hash_ring{bucket_map = BM1,
+                                                 next_bucket_number = NextN},
+
+                    ok = mnesia:write(?HASH_RING_STATE_TABLE, State, write)
+            end;
+        [] ->
+            rabbit_log:warning("Can't remove binding: hash ring state for exchange ~s wasn't found",
+                               [rabbit_misc:rs(S)]),
+            ok
+    end.
+
 
 assert_args_equivalence(X, Args) ->
     rabbit_exchange:assert_args_equivalence(X, Args).
 
 init() ->
-    mnesia:create_table(?TABLE, [{record_name, bucket},
-                                 {attributes, record_info(fields, bucket)},
-                                 {type, ordered_set}]),
-    mnesia:add_table_copy(?TABLE, node(), ram_copies),
-    mnesia:wait_for_tables([?TABLE], 30000),
+    mnesia:create_table(?HASH_RING_STATE_TABLE, [{record_name, chx_hash_ring},
+                                                 {attributes, record_info(fields, chx_hash_ring)},
+                                                 {type, ordered_set}]),
+    mnesia:add_table_copy(?HASH_RING_STATE_TABLE, node(), ram_copies),
+    mnesia:wait_for_tables([?HASH_RING_STATE_TABLE], 30000),
     ok.
 
-find_numbers(_Source, 0, Acc) ->
-    Acc;
-find_numbers(Source, N, Acc) ->
-    Number = rand_compat:uniform(?PHASH2_RANGE) - 1,
-    case mnesia:read(?TABLE, {Source, Number}, write) of
-        []  -> find_numbers(Source, N-1, [Number | Acc]);
-        [_] -> find_numbers(Source, N, Acc)
-    end.
+%%
+%% Jump-consistent hashing.
+%%
 
-hash(undefined, #basic_message { routing_keys = Routes }) ->
+jump_consistent_hash(_Key, 1) ->
+    0;
+jump_consistent_hash(KeyList, NumberOfBuckets) when is_list(KeyList) ->
+    jump_consistent_hash(hd(KeyList), NumberOfBuckets);
+jump_consistent_hash(Key, NumberOfBuckets) when is_integer(Key) ->
+    SeedState = rand:seed_s(?SEED_ALGORITHM, {Key, Key, Key}),
+    jump_consistent_hash_value(-1, 0, NumberOfBuckets, SeedState);
+jump_consistent_hash(Key, NumberOfBuckets) ->
+    jump_consistent_hash(erlang:phash2(Key), NumberOfBuckets).
+
+jump_consistent_hash_value(B, J, NumberOfBuckets, _SeedState) when J >= NumberOfBuckets ->
+    B;
+
+jump_consistent_hash_value(_B0, J0, NumberOfBuckets, SeedState0) ->
+    B = J0,
+    {R, SeedState} = rand:uniform_s(SeedState0),
+    J = trunc((B + 1) / R),
+    jump_consistent_hash_value(B, J, NumberOfBuckets, SeedState).
+
+value_to_hash(undefined, #basic_message { routing_keys = Routes }) ->
     Routes;
-hash({header, Header}, #basic_message { content = Content }) ->
+value_to_hash({header, Header}, #basic_message { content = Content }) ->
     Headers = rabbit_basic:extract_headers(Content),
     case Headers of
         undefined -> undefined;
         _         -> rabbit_misc:table_lookup(Headers, Header)
     end;
-hash({property, Property}, #basic_message { content = Content }) ->
+value_to_hash({property, Property}, #basic_message { content = Content }) ->
     #content{properties = #'P_basic'{ correlation_id = CorrId,
                                       message_id     = MsgId,
                                       timestamp      = Timestamp }} =

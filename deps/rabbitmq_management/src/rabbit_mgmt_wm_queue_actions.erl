@@ -16,28 +16,23 @@
 
 -module(rabbit_mgmt_wm_queue_actions).
 
--export([init/1, resource_exists/2, post_is_create/2, is_authorized/2,
-         allowed_methods/2, process_post/2]).
--export([finish_request/2]).
--export([encodings_provided/2]).
+-export([init/2, resource_exists/2, is_authorized/2,
+         allowed_methods/2, content_types_accepted/2, accept_content/2]).
+-export([variances/2]).
 
--include("rabbit_mgmt.hrl").
--include_lib("webmachine/include/webmachine.hrl").
+-include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 %%--------------------------------------------------------------------
 
-init(_Config) -> {ok, #context{}}.
+init(Req, _State) ->
+    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
 
-finish_request(ReqData, Context) ->
-    {ok, rabbit_mgmt_cors:set_headers(ReqData, Context), Context}.
+variances(Req, Context) ->
+    {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
 
 allowed_methods(ReqData, Context) ->
-    {['POST', 'OPTIONS'], ReqData, Context}.
-
-encodings_provided(ReqData, Context) ->
-    {[{"identity", fun(X) -> X end},
-     {"gzip", fun(X) -> zlib:gzip(X) end}], ReqData, Context}.
+    {[<<"POST">>, <<"OPTIONS">>], ReqData, Context}.
 
 resource_exists(ReqData, Context) ->
     {case rabbit_mgmt_wm_queue:queue(ReqData) of
@@ -45,18 +40,18 @@ resource_exists(ReqData, Context) ->
          _         -> true
      end, ReqData, Context}.
 
-post_is_create(ReqData, Context) ->
-    {false, ReqData, Context}.
+content_types_accepted(ReqData, Context) ->
+   {[{'*', accept_content}], ReqData, Context}.
 
-process_post(ReqData, Context) ->
+accept_content(ReqData, Context) ->
     rabbit_mgmt_util:post_respond(do_it(ReqData, Context)).
 
-do_it(ReqData, Context) ->
-    VHost = rabbit_mgmt_util:vhost(ReqData),
-    QName = rabbit_mgmt_util:id(queue, ReqData),
+do_it(ReqData0, Context) ->
+    VHost = rabbit_mgmt_util:vhost(ReqData0),
+    QName = rabbit_mgmt_util:id(queue, ReqData0),
     rabbit_mgmt_util:with_decode(
-      [action], ReqData, Context,
-      fun([Action], _Body) ->
+      [action], ReqData0, Context,
+      fun([Action], _Body, ReqData) ->
               rabbit_amqqueue:with(
                 rabbit_misc:r(VHost, queue, QName),
                 fun(Q) -> action(Action, Q, ReqData, Context) end)
@@ -72,7 +67,7 @@ action(<<"sync">>, #amqqueue{pid = QPid}, ReqData, Context) ->
     {true, ReqData, Context};
 
 action(<<"cancel_sync">>, #amqqueue{pid = QPid}, ReqData, Context) ->
-    rabbit_amqqueue:cancel_sync_mirrors(QPid),
+    _ = rabbit_amqqueue:cancel_sync_mirrors(QPid),
     {true, ReqData, Context};
 
 action(Else, _Q, ReqData, Context) ->

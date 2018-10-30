@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% @doc This is a utility module that is used to expose an arbitrary function
@@ -70,7 +70,7 @@ start_link(Connection, Queue, Fun) ->
 %%      RpcServer = pid()
 %% @doc Stops an exisiting RPC server.
 stop(Pid) ->
-    gen_server:call(Pid, stop, infinity).
+    gen_server:call(Pid, stop, amqp_util:call_timeout()).
 
 %%--------------------------------------------------------------------------
 %% gen_server callbacks

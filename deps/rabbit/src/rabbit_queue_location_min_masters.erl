@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_queue_location_min_masters).
@@ -37,8 +37,8 @@ description() ->
     [{description,
       <<"Locate queue master node from cluster node with least bound queues">>}].
 
-queue_master_location(#amqqueue{}) ->
-    Cluster            = rabbit_queue_master_location_misc:all_nodes(),
+queue_master_location(#amqqueue{} = Q) ->
+    Cluster            = rabbit_queue_master_location_misc:all_nodes(Q),
     VHosts             = rabbit_vhost:list(),
     BoundQueueMasters  = get_bound_queue_masters_per_vhost(VHosts, []),
     {_Count, MinMaster}= get_min_master(Cluster, BoundQueueMasters),
@@ -57,23 +57,26 @@ count_masters(Node, Masters) ->
 get_bound_queue_masters_per_vhost([], Acc) ->
     lists:flatten(Acc);
 get_bound_queue_masters_per_vhost([VHost|RemVHosts], Acc) ->
-    Bindings          = rabbit_binding:list(VHost),
-    BoundQueueMasters = get_queue_master_per_binding(VHost, Bindings, []),
+    BoundQueueNames =
+        lists:filtermap(
+            fun(#binding{destination =#resource{kind = queue,
+                                                name = QueueName}}) ->
+                    {true, QueueName};
+               (_) ->
+                    false
+            end,
+            rabbit_binding:list(VHost)),
+    UniqQueueNames = lists:usort(BoundQueueNames),
+    BoundQueueMasters = get_queue_masters(VHost, UniqQueueNames, []),
     get_bound_queue_masters_per_vhost(RemVHosts, [BoundQueueMasters|Acc]).
 
 
-get_queue_master_per_binding(_VHost, [], BoundQueueNodes) -> BoundQueueNodes;
-get_queue_master_per_binding(VHost, [#binding{destination=
-                                                  #resource{kind=queue,
-                                                            name=QueueName}}|
-                                     RemBindings],
-                             QueueMastersAcc) ->
+get_queue_masters(_VHost, [], BoundQueueNodes) -> BoundQueueNodes;
+get_queue_masters(VHost, [QueueName | RemQueueNames], QueueMastersAcc) ->
     QueueMastersAcc0 = case rabbit_queue_master_location_misc:lookup_master(
                               QueueName, VHost) of
                            {ok, Master} when is_atom(Master) ->
                                [Master|QueueMastersAcc];
                            _ -> QueueMastersAcc
                        end,
-    get_queue_master_per_binding(VHost, RemBindings, QueueMastersAcc0);
-get_queue_master_per_binding(VHost, [_|RemBindings], QueueMastersAcc) ->
-    get_queue_master_per_binding(VHost, RemBindings, QueueMastersAcc).
+    get_queue_masters(VHost, RemQueueNames, QueueMastersAcc0).

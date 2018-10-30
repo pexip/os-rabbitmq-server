@@ -27,37 +27,8 @@ if not defined ERLANG_HOME (
 )
 
 REM ## Set defaults
-REM . ${SCRIPT_DIR}/rabbitmq-defaults
 call "%SCRIPT_DIR%\rabbitmq-defaults.bat"
 
-set DEFAULT_SCHEDULER_BIND_TYPE=db
-
-REM [ "x" = "x$RABBITMQ_SCHEDULER_BIND_TYPE" ] && RABBITMQ_SCHEDULER_BIND_TYPE=${DEFAULT_SCHEDULER_BIND_TYPE}
-REM set the default scheduling bind type
-if "!RABBITMQ_SCHEDULER_BIND_TYPE!"=="" (
-    set RABBITMQ_SCHEDULER_BIND_TYPE=!DEFAULT_SCHEDULER_BIND_TYPE!
-)
-
-REM DEFAULT_DISTRIBUTION_BUFFER_SIZE=32000
-REM set the VM distribution buffer size
-REM [ "x" = "x$RABBITMQ_DISTRIBUTION_BUFFER_SIZE" ] && RABBITMQ_DISTRIBUTION_BUFFER_SIZE=${DEFAULT_DISTRIBUTION_BUFFER_SIZE}
-set DEFAULT_DISTRIBUTION_BUFFER_SIZE=32000
-if "!RABBITMQ_DISTRIBUTION_BUFFER_SIZE!"=="" (
-    set RABBITMQ_DISTRIBUTION_BUFFER_SIZE=!DEFAULT_DISTRIBUTION_BUFFER_SIZE!
-)
-
-REM # warn about old rabbitmq.conf file, if no new one
-REM if [ -f /etc/rabbitmq/rabbitmq.conf ] && \
-REM    [ ! -f ${CONF_ENV_FILE} ] ; then
-REM     echo -n "WARNING: ignoring /etc/rabbitmq/rabbitmq.conf -- "
-REM     echo "location has moved to ${CONF_ENV_FILE}"
-REM fi
-
-REM Common defaults
-set SERVER_ERL_ARGS=+P 1048576 +t 5000000 +stbt !RABBITMQ_SCHEDULER_BIND_TYPE! +zdbbl !RABBITMQ_DISTRIBUTION_BUFFER_SIZE!
-
-REM ## Get configuration variables from the configure environment file
-REM [ -f ${CONF_ENV_FILE} ] && . ${CONF_ENV_FILE} || true
 if "!RABBITMQ_CONF_ENV_FILE!"=="" (
     set RABBITMQ_CONF_ENV_FILE=!CONF_ENV_FILE!
 )
@@ -66,6 +37,41 @@ if exist "!RABBITMQ_CONF_ENV_FILE!" (
     call "!RABBITMQ_CONF_ENV_FILE!"
 )
 
+set DEFAULT_SCHEDULER_BIND_TYPE=db
+if "!RABBITMQ_SCHEDULER_BIND_TYPE!"=="" (
+    set RABBITMQ_SCHEDULER_BIND_TYPE=!SCHEDULER_BIND_TYPE!
+)
+if "!RABBITMQ_SCHEDULER_BIND_TYPE!"=="" (
+    set RABBITMQ_SCHEDULER_BIND_TYPE=!DEFAULT_SCHEDULER_BIND_TYPE!
+)
+
+set DEFAULT_DISTRIBUTION_BUFFER_SIZE=128000
+if "!RABBITMQ_DISTRIBUTION_BUFFER_SIZE!"=="" (
+    set RABBITMQ_DISTRIBUTION_BUFFER_SIZE=!DISTRIBUTION_BUFFER_SIZE!
+)
+if "!RABBITMQ_DISTRIBUTION_BUFFER_SIZE!"=="" (
+    set RABBITMQ_DISTRIBUTION_BUFFER_SIZE=!DEFAULT_DISTRIBUTION_BUFFER_SIZE!
+)
+
+set DEFAULT_MAX_NUMBER_OF_PROCESSES=1048576
+if "!RABBITMQ_MAX_NUMBER_OF_PROCESSES!"=="" (
+    set RABBITMQ_MAX_NUMBER_OF_PROCESSES=!MAX_NUMBER_OF_PROCESSES!
+)
+if "!RABBITMQ_MAX_NUMBER_OF_PROCESSES!"=="" (
+    set RABBITMQ_MAX_NUMBER_OF_PROCESSES=!DEFAULT_MAX_NUMBER_OF_PROCESSES!
+)
+
+set DEFAULT_MAX_NUMBER_OF_ATOMS=5000000
+if "!RABBITMQ_MAX_NUMBER_OF_ATOMS!"=="" (
+    set RABBITMQ_MAX_NUMBER_OF_ATOMS=!MAX_NUMBER_OF_ATOMS!
+)
+if "!RABBITMQ_MAX_NUMBER_OF_ATOMS!"=="" (
+    set RABBITMQ_MAX_NUMBER_OF_ATOMS=!DEFAULT_MAX_NUMBER_OF_ATOMS!
+)
+
+REM Common defaults
+set SERVER_ERL_ARGS=+P !RABBITMQ_MAX_NUMBER_OF_PROCESSES! +t !RABBITMQ_MAX_NUMBER_OF_ATOMS! +stbt !RABBITMQ_SCHEDULER_BIND_TYPE! +zdbbl !RABBITMQ_DISTRIBUTION_BUFFER_SIZE!
+
 REM Make sure $RABBITMQ_BASE contains no non-ASCII characters.
 if not exist "!RABBITMQ_BASE!" (
     mkdir "!RABBITMQ_BASE!"
@@ -73,17 +79,18 @@ if not exist "!RABBITMQ_BASE!" (
 for /f "delims=" %%F in ("!RABBITMQ_BASE!") do set RABBITMQ_BASE=%%~sF
 
 REM Check for the short names here too
-if "!RABBITMQ_USE_LONGNAME!"=="" (
-    if "!USE_LONGNAME!"=="" (
-        set RABBITMQ_NAME_TYPE="-sname"
-        set NAMETYPE=shortnames
-    )
-)
-
 if "!RABBITMQ_USE_LONGNAME!"=="true" (
+    set RABBITMQ_NAME_TYPE=-name
+    set NAMETYPE=longnames
+) else (
     if "!USE_LONGNAME!"=="true" (
-        set RABBITMQ_NAME_TYPE="-name"
+        set RABBITMQ_USE_LONGNAME=true
+        set RABBITMQ_NAME_TYPE=-name
         set NAMETYPE=longnames
+    ) else (
+        set RABBITMQ_USE_LONGNAME=false
+        set RABBITMQ_NAME_TYPE=-sname
+        set NAMETYPE=shortnames
     )
 )
 
@@ -92,8 +99,8 @@ if "!RABBITMQ_NODENAME!"=="" (
     if "!NODENAME!"=="" (
         REM We use Erlang to query the local hostname because
         REM !COMPUTERNAME! and Erlang may return different results.
-	REM Start erl with -sname to make sure epmd is started.
-	call "%ERLANG_HOME%\bin\erl.exe" -A0 -noinput -boot start_clean -sname rabbit-prelaunch-epmd -eval "init:stop()." >nul 2>&1
+        REM Start erl with -sname to make sure epmd is started.
+        call "%ERLANG_HOME%\bin\erl.exe" -A0 -noinput -boot start_clean -sname rabbit-prelaunch-epmd -eval "init:stop()." >nul 2>&1
         for /f "delims=" %%F in ('call "%ERLANG_HOME%\bin\erl.exe" -A0 -noinput -boot start_clean -eval "net_kernel:start([list_to_atom(""rabbit-gethostname-"" ++ os:getpid()), %NAMETYPE%]), [_, H] = string:tokens(atom_to_list(node()), ""@""), io:format(""~s~n"", [H]), init:stop()."') do @set HOSTNAME=%%F
         set RABBITMQ_NODENAME=rabbit@!HOSTNAME!
         set HOSTNAME=
@@ -167,11 +174,37 @@ if "!RABBITMQ_SERVER_ERL_ARGS!"=="" (
 )
 
 REM [ "x" = "x$RABBITMQ_CONFIG_FILE" ] && RABBITMQ_CONFIG_FILE=${CONFIG_FILE}
+CALL :unquote RABBITMQ_CONFIG_FILE %RABBITMQ_CONFIG_FILE%
 if "!RABBITMQ_CONFIG_FILE!"=="" (
     if "!CONFIG_FILE!"=="" (
         set RABBITMQ_CONFIG_FILE=!RABBITMQ_BASE!\rabbitmq
     ) else (
         set RABBITMQ_CONFIG_FILE=!CONFIG_FILE!
+    )
+)
+
+if "!RABBITMQ_GENERATED_CONFIG_DIR!"=="" (
+    if "!GENERATED_CONFIG_DIR!"=="" (
+        set RABBITMQ_GENERATED_CONFIG_DIR=!RABBITMQ_BASE!\config
+    ) else (
+        set RABBITMQ_GENERATED_CONFIG_DIR=!GENERATED_CONFIG_DIR!
+    )
+)
+
+CALL :unquote RABBITMQ_ADVANCED_CONFIG_FILE %RABBITMQ_ADVANCED_CONFIG_FILE%
+if "!RABBITMQ_ADVANCED_CONFIG_FILE!"=="" (
+    if "!ADVANCED_CONFIG_FILE!"=="" (
+        set RABBITMQ_ADVANCED_CONFIG_FILE=!RABBITMQ_BASE!\advanced.config
+    ) else (
+        set RABBITMQ_ADVANCED_CONFIG_FILE=!ADVANCED_CONFIG_FILE!
+    )
+)
+
+if "!RABBITMQ_SCHEMA_DIR!" == "" (
+    if "!SCHEMA_DIR!"=="" (
+        set RABBITMQ_SCHEMA_DIR=!RABBITMQ_HOME!\priv\schema
+    ) else (
+        set RABBITMQ_SCHEMA_DIR=!SCHEMA_DIR!
     )
 )
 
@@ -202,10 +235,18 @@ if not exist "!RABBITMQ_MNESIA_BASE!" (
 for /f "delims=" %%F in ("!RABBITMQ_MNESIA_BASE!") do set RABBITMQ_MNESIA_BASE=%%~sF
 
 REM [ "x" = "x$RABBITMQ_SERVER_START_ARGS" ] && RABBITMQ_SERVER_START_ARGS=${SERVER_START_ARGS}
-REM No Windows equivalent
+if "!RABBITMQ_SERVER_START_ARGS!"=="" (
+    if not "!SERVER_START_ARGS!"=="" (
+        set RABBITMQ_SERVER_START_ARGS=!SERVER_START_ARGS!
+    )
+)
 
 REM [ "x" = "x$RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS" ] && RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=${SERVER_ADDITIONAL_ERL_ARGS}
-REM No Windows equivalent
+if "!RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS!"=="" (
+    if not "!SERVER_ADDITIONAL_ERL_ARGS!"=="" (
+        set RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=!SERVER_ADDITIONAL_ERL_ARGS!
+    )
+)
 
 REM [ "x" = "x$RABBITMQ_MNESIA_DIR" ] && RABBITMQ_MNESIA_DIR=${MNESIA_DIR}
 REM [ "x" = "x$RABBITMQ_MNESIA_DIR" ] && RABBITMQ_MNESIA_DIR=${RABBITMQ_MNESIA_BASE}/${RABBITMQ_NODENAME}
@@ -289,36 +330,43 @@ if "!RABBITMQ_LOGS!"=="" (
         set RABBITMQ_LOGS=!LOGS!
     )
 )
-if not "!RABBITMQ_LOGS" == "-" (
+if not "!RABBITMQ_LOGS!" == "-" (
     if not exist "!RABBITMQ_LOGS!" (
         for /f "delims=" %%F in ("!RABBITMQ_LOGS!") do mkdir %%~dpF 2>NUL
         copy /y NUL "!RABBITMQ_LOGS!" >NUL
     )
     for /f "delims=" %%F in ("!RABBITMQ_LOGS!") do set RABBITMQ_LOGS=%%~sF
 )
-
-REM [ "x" = "x$RABBITMQ_SASL_LOGS" ] && RABBITMQ_SASL_LOGS=${SASL_LOGS}
-REM [ "x" = "x$RABBITMQ_SASL_LOGS" ] && RABBITMQ_SASL_LOGS="${RABBITMQ_LOG_BASE}/${RABBITMQ_NODENAME}-sasl.log"
-if "!RABBITMQ_SASL_LOGS!"=="" (
-    if "!SASL_LOGS!"=="" (
-        set RABBITMQ_SASL_LOGS=!RABBITMQ_LOG_BASE!\!RABBITMQ_NODENAME!-sasl.log
-    ) else (
-        set RABBITMQ_SASL_LOGS=!SASL_LOGS!
-    )
+rem [ "x" = "x$RABBITMQ_UPGRADE_LOG" ] && RABBITMQ_UPGRADE_LOG="${RABBITMQ_LOG_BASE}/${RABBITMQ_NODENAME}_upgrade.log"
+if "!RABBITMQ_UPGRADE_LOG!" == "" (
+    set RABBITMQ_UPGRADE_LOG=!RABBITMQ_LOG_BASE!\!RABBITMQ_NODENAME!_upgrade.log
 )
-if not "!RABBITMQ_SASL_LOGS" == "-" (
-    if not exist "!RABBITMQ_SASL_LOGS!" (
-        for /f "delims=" %%F in ("!RABBITMQ_SASL_LOGS!") do mkdir %%~dpF 2>NUL
-        copy /y NUL "!RABBITMQ_SASL_LOGS!" >NUL
-    )
-    for /f "delims=" %%F in ("!RABBITMQ_SASL_LOGS!") do set RABBITMQ_SASL_LOGS=%%~sF
+REM [ "x" = "x$ERL_CRASH_DUMP"] && ERL_CRASH_DUMP="${RABBITMQ_LOG_BASE}/erl_crash.dump"
+if "!ERL_CRASH_DUMP!"=="" (
+    set ERL_CRASH_DUMP=!RABBITMQ_LOG_BASE!\erl_crash.dump
 )
 
 REM [ "x" = "x$RABBITMQ_CTL_ERL_ARGS" ] && RABBITMQ_CTL_ERL_ARGS=${CTL_ERL_ARGS}
-if "!$RABBITMQ_CTL_ERL_ARGS!"=="" (
+if "!RABBITMQ_CTL_ERL_ARGS!"=="" (
     if not "!CTL_ERL_ARGS!"=="" (
         set RABBITMQ_CTL_ERL_ARGS=!CTL_ERL_ARGS!
     )
+)
+if "!RABBITMQ_CTL_DIST_PORT_MIN!"=="" (
+    if not "!CTL_DIST_PORT_MIN!"=="" (
+        set RABBITMQ_CTL_DIST_PORT_MIN=!CTL_DIST_PORT_MIN!
+    )
+)
+if "!RABBITMQ_CTL_DIST_PORT_MAX!"=="" (
+    if not "!CTL_DIST_PORT_MAX!"=="" (
+        set RABBITMQ_CTL_DIST_PORT_MAX=!CTL_DIST_PORT_MAX!
+    )
+)
+if "!RABBITMQ_CTL_DIST_PORT_MIN!"=="" (
+    set /a RABBITMQ_CTL_DIST_PORT_MIN=10000+!RABBITMQ_DIST_PORT!
+)
+if "!RABBITMQ_CTL_DIST_PORT_MAX!"=="" (
+    set /a RABBITMQ_CTL_DIST_PORT_MAX=10010+!RABBITMQ_DIST_PORT!
 )
 
 REM ADDITIONAL WINDOWS ONLY CONFIG ITEMS
@@ -406,7 +454,12 @@ set paths=
 exit /b
 
 :filter_path
-set ERL_LIBS=%ERL_LIBS%;%~dps1%~n1%~x1
+REM Ensure ERL_LIBS begins with valid path
+IF "%ERL_LIBS%"=="" (
+    set ERL_LIBS=%~dps1%~n1%~x1
+) else (
+    set ERL_LIBS=%ERL_LIBS%;%~dps1%~n1%~x1
+)
 exit /b
 
 :filter_paths_done
@@ -426,3 +479,7 @@ REM ##--- End of overridden <var_name> variables
 REM
 REM # Since we source this elsewhere, don't accidentally stop execution
 REM true
+
+:unquote
+set %1=%~2
+EXIT /B 0

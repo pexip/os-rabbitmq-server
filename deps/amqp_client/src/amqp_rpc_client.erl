@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% @doc This module allows the simple execution of an asynchronous RPC over
@@ -34,7 +34,7 @@
                 reply_queue,
                 exchange,
                 routing_key,
-                continuations = dict:new(),
+                continuations = #{},
                 correlation_id = 0}).
 
 %%--------------------------------------------------------------------------
@@ -70,7 +70,7 @@ start_link(Connection, Queue) ->
 %%      RpcClient = pid()
 %% @doc Stops an exisiting RPC client.
 stop(Pid) ->
-    gen_server:call(Pid, stop, infinity).
+    gen_server:call(Pid, stop, amqp_util:call_timeout()).
 
 %% @spec (RpcClient, Payload) -> ok
 %% where
@@ -79,7 +79,7 @@ stop(Pid) ->
 %% @doc Invokes an RPC. Note the caller of this function is responsible for
 %% encoding the request and decoding the response.
 call(RpcClient, Payload) ->
-    gen_server:call(RpcClient, {call, Payload}, infinity).
+    gen_server:call(RpcClient, {call, Payload}, amqp_util:call_timeout()).
 
 %%--------------------------------------------------------------------------
 %% Plumbing
@@ -116,7 +116,7 @@ publish(Payload, From,
     amqp_channel:call(Channel, Publish, #amqp_msg{props = Props,
                                                   payload = Payload}),
     State#state{correlation_id = CorrelationId + 1,
-                continuations = dict:store(EncodedCorrelationId, From, Continuations)}.
+                continuations = maps:put(EncodedCorrelationId, From, Continuations)}.
 
 %%--------------------------------------------------------------------------
 %% gen_server callbacks
@@ -175,10 +175,10 @@ handle_info({#'basic.deliver'{delivery_tag = DeliveryTag},
              #amqp_msg{props = #'P_basic'{correlation_id = Id},
                        payload = Payload}},
             State = #state{continuations = Conts, channel = Channel}) ->
-    From = dict:fetch(Id, Conts),
+    From = maps:get(Id, Conts),
     gen_server:reply(From, Payload),
     amqp_channel:call(Channel, #'basic.ack'{delivery_tag = DeliveryTag}),
-    {noreply, State#state{continuations = dict:erase(Id, Conts) }}.
+    {noreply, State#state{continuations = maps:remove(Id, Conts) }}.
 
 %% @private
 code_change(_OldVsn, State, _Extra) ->

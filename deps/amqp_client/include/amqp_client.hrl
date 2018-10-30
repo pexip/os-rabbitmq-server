@@ -27,10 +27,10 @@
                               virtual_host       = <<"/">>,
                               host               = "localhost",
                               port               = undefined,
-                              channel_max        = 0,
+                              channel_max        = 2047,
                               frame_max          = 0,
                               heartbeat          = 10,
-                              connection_timeout = infinity,
+                              connection_timeout = 60000,
                               ssl_options        = none,
                               auth_mechanisms    =
                                   [fun amqp_auth_mechanisms:plain/3,

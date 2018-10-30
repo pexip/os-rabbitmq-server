@@ -2,13 +2,17 @@
 # -*- makefile -*-
 
 DEB_DESTDIR=debian/rabbitmq-server
-VERSION = $(shell dpkg-parsechangelog | awk '/^Version:/ {version=$$0; sub(/Version: /, "", version); sub(/-.*/, "", version); print version;}')
+VERSION = $(shell dpkg-parsechangelog -SVersion | sed -e 's/^[[:digit:]]*://' -e 's/[-].*//' -e 's/~/.0/' -e 's/+dfsg1//' | head -n 1)
+
+export LC_ALL=en_US.UTF-8
+export LANG=en_US.UTF-8
 
 %:
 	dh $@ --parallel --with python2,systemd
 
 override_dh_auto_clean:
 	$(MAKE) clean distclean-manpages
+	rm -rf .erlang.mk
 
 override_dh_auto_build:
 	$(MAKE) dist manpages
@@ -62,3 +66,8 @@ override_dh_auto_clean:
 override_dh_python2:
 	dh_python2 --shebang=/usr/bin/python
 
+#override_dh_link:
+#	dh_link
+#	mv $(CURDIR)/debian/rabbitmq-server/usr/sbin/rabbitmqctl $(CURDIR)/debian/rabbitmq-server/usr/sbin/rabbitmqctl-real
+#	cp $(CURDIR)/debian/rabbitmq-debian-wrapper $(CURDIR)/debian/rabbitmq-server/usr/sbin/rabbitmqctl
+#	ln -s rabbitmqctl $(CURDIR)/debian/rabbitmq-server/usr/lib/rabbitmq/bin/rabbitmqctl-real

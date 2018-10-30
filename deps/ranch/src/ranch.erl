@@ -1,4 +1,4 @@
-%% Copyright (c) 2011-2015, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2011-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -14,8 +14,10 @@
 
 -module(ranch).
 
+-export([start_listener/5]).
 -export([start_listener/6]).
 -export([stop_listener/1]).
+-export([child_spec/5]).
 -export([child_spec/6]).
 -export([accept_ack/1]).
 -export([remove_connection/1]).
@@ -25,9 +27,13 @@
 -export([set_max_connections/2]).
 -export([get_protocol_options/1]).
 -export([set_protocol_options/2]).
+-export([info/0]).
+-export([procs/2]).
 -export([filter_options/3]).
 -export([set_option_default/3]).
 -export([require/1]).
+
+-deprecated([start_listener/6, child_spec/6]).
 
 -type max_conns() :: non_neg_integer() | infinity.
 -export_type([max_conns/0]).
@@ -35,6 +41,7 @@
 -type opt() :: {ack_timeout, timeout()}
 	| {connection_type, worker | supervisor}
 	| {max_connections, max_conns()}
+	| {num_acceptors, pos_integer()}
 	| {shutdown, timeout() | brutal_kill}
 	| {socket, any()}.
 -export_type([opt/0]).
@@ -42,19 +49,23 @@
 -type ref() :: any().
 -export_type([ref/0]).
 
+-spec start_listener(ref(), module(), any(), module(), any())
+	-> supervisor:startchild_ret().
+start_listener(Ref, Transport, TransOpts, Protocol, ProtoOpts) ->
+	NumAcceptors = proplists:get_value(num_acceptors, TransOpts, 10),
+	start_listener(Ref, NumAcceptors, Transport, TransOpts, Protocol, ProtoOpts).
+
 -spec start_listener(ref(), non_neg_integer(), module(), any(), module(), any())
 	-> supervisor:startchild_ret().
-start_listener(Ref, NbAcceptors, Transport, TransOpts, Protocol, ProtoOpts)
-		when is_integer(NbAcceptors) andalso is_atom(Transport)
+start_listener(Ref, NumAcceptors, Transport, TransOpts, Protocol, ProtoOpts)
+		when is_integer(NumAcceptors) andalso is_atom(Transport)
 		andalso is_atom(Protocol) ->
 	_ = code:ensure_loaded(Transport),
-	%% @todo Remove in Ranch 2.0 and simply require ssl.
-	_ = ensure_ssl(Transport),
 	case erlang:function_exported(Transport, name, 0) of
 		false ->
 			{error, badarg};
 		true ->
-			Res = supervisor:start_child(ranch_sup, child_spec(Ref, NbAcceptors,
+			Res = supervisor:start_child(ranch_sup, child_spec(Ref, NumAcceptors,
 					Transport, TransOpts, Protocol, ProtoOpts)),
 			Socket = proplists:get_value(socket, TransOpts),
 			case Res of
@@ -74,8 +85,20 @@ start_listener(Ref, NbAcceptors, Transport, TransOpts, Protocol, ProtoOpts)
 				_ ->
 					ok
 			end,
-			Res
+			maybe_started(Res)
 	end.
+
+maybe_started({error, {{shutdown,
+		{failed_to_start_child, ranch_acceptors_sup,
+			{listen_error, _, Reason}}}, _}} = Error) ->
+	start_error(Reason, Error);
+maybe_started(Res) ->
+	Res.
+
+start_error(E=eaddrinuse, _) -> {error, E};
+start_error(E=eacces, _) -> {error, E};
+start_error(E=no_cert, _) -> {error, E};
+start_error(_, Error) -> Error.
 
 -spec stop_listener(ref()) -> ok | {error, not_found}.
 stop_listener(Ref) ->
@@ -87,22 +110,20 @@ stop_listener(Ref) ->
 			{error, Reason}
 	end.
 
+-spec child_spec(ref(), module(), any(), module(), any())
+	-> supervisor:child_spec().
+child_spec(Ref, Transport, TransOpts, Protocol, ProtoOpts) ->
+	NumAcceptors = proplists:get_value(num_acceptors, TransOpts, 10),
+	child_spec(Ref, NumAcceptors, Transport, TransOpts, Protocol, ProtoOpts).
+
 -spec child_spec(ref(), non_neg_integer(), module(), any(), module(), any())
 	-> supervisor:child_spec().
-child_spec(Ref, NbAcceptors, Transport, TransOpts, Protocol, ProtoOpts)
-		when is_integer(NbAcceptors) andalso is_atom(Transport)
+child_spec(Ref, NumAcceptors, Transport, TransOpts, Protocol, ProtoOpts)
+		when is_integer(NumAcceptors) andalso is_atom(Transport)
 		andalso is_atom(Protocol) ->
-	%% @todo Remove in Ranch 2.0 and simply require ssl.
-	_ = ensure_ssl(Transport),
 	{{ranch_listener_sup, Ref}, {ranch_listener_sup, start_link, [
-		Ref, NbAcceptors, Transport, TransOpts, Protocol, ProtoOpts
+		Ref, NumAcceptors, Transport, TransOpts, Protocol, ProtoOpts
 	]}, permanent, infinity, supervisor, [ranch_listener_sup]}.
-
-%% @todo Remove in Ranch 2.0 and simply require ssl.
-ensure_ssl(ranch_ssl) ->
-	require([crypto, asn1, public_key, ssl]);
-ensure_ssl(_) ->
-	ok.
 
 -spec accept_ack(ref()) -> ok.
 accept_ack(Ref) ->
@@ -113,7 +134,7 @@ accept_ack(Ref) ->
 -spec remove_connection(ref()) -> ok.
 remove_connection(Ref) ->
 	ConnsSup = ranch_server:get_connections_sup(Ref),
-	ConnsSup ! {remove_connection, Ref},
+	ConnsSup ! {remove_connection, Ref, self()},
 	ok.
 
 -spec get_addr(ref()) -> {inet:ip_address(), inet:port_number()}.
@@ -141,20 +162,57 @@ get_protocol_options(Ref) ->
 set_protocol_options(Ref, Opts) ->
 	ranch_server:set_protocol_options(Ref, Opts).
 
+-spec info() -> [{any(), [{atom(), any()}]}].
+info() ->
+	[{Ref, listener_info(Ref, Pid)}
+		|| {Ref, Pid} <- ranch_server:get_listener_sups()].
+
+listener_info(Ref, Pid) ->
+	[_, NumAcceptors, Transport, TransOpts, Protocol, _] = ranch_server:get_listener_start_args(Ref),
+	ConnsSup = ranch_server:get_connections_sup(Ref),
+	{IP, Port} = get_addr(Ref),
+	MaxConns = get_max_connections(Ref),
+	ProtoOpts = get_protocol_options(Ref),
+	[
+		{pid, Pid},
+		{ip, IP},
+		{port, Port},
+		{num_acceptors, NumAcceptors},
+		{max_connections, MaxConns},
+		{active_connections, ranch_conns_sup:active_connections(ConnsSup)},
+		{all_connections, proplists:get_value(active, supervisor:count_children(ConnsSup))},
+		{transport, Transport},
+		{transport_options, TransOpts},
+		{protocol, Protocol},
+		{protocol_options, ProtoOpts}
+	].
+
+-spec procs(ref(), acceptors | connections) -> [pid()].
+procs(Ref, acceptors) ->
+	procs1(Ref, ranch_acceptors_sup);
+procs(Ref, connections) ->
+	procs1(Ref, ranch_conns_sup).
+
+procs1(Ref, Sup) ->
+	ListenerSup = ranch_server:get_listener_sup(Ref),
+	{_, SupPid, _, _} = lists:keyfind(Sup, 1,
+		supervisor:which_children(ListenerSup)),
+	[Pid || {_, Pid, _, _} <- supervisor:which_children(SupPid)].
+
 -spec filter_options([inet | inet6 | {atom(), any()} | {raw, any(), any(), any()}],
 	[atom()], Acc) -> Acc when Acc :: [any()].
-filter_options(UserOptions, AllowedKeys, DefaultOptions) ->
-	AllowedOptions = filter_user_options(UserOptions, AllowedKeys),
+filter_options(UserOptions, DisallowedKeys, DefaultOptions) ->
+	AllowedOptions = filter_user_options(UserOptions, DisallowedKeys),
 	lists:foldl(fun merge_options/2, DefaultOptions, AllowedOptions).
 
 %% 2-tuple options.
-filter_user_options([Opt = {Key, _}|Tail], AllowedKeys) ->
-	case lists:member(Key, AllowedKeys) of
-		true ->
-			[Opt|filter_user_options(Tail, AllowedKeys)];
+filter_user_options([Opt = {Key, _}|Tail], DisallowedKeys) ->
+	case lists:member(Key, DisallowedKeys) of
 		false ->
+			[Opt|filter_user_options(Tail, DisallowedKeys)];
+		true ->
 			filter_options_warning(Opt),
-			filter_user_options(Tail, AllowedKeys)
+			filter_user_options(Tail, DisallowedKeys)
 	end;
 %% Special option forms.
 filter_user_options([inet|Tail], AllowedKeys) ->
@@ -163,9 +221,9 @@ filter_user_options([inet6|Tail], AllowedKeys) ->
 	[inet6|filter_user_options(Tail, AllowedKeys)];
 filter_user_options([Opt = {raw, _, _, _}|Tail], AllowedKeys) ->
 	[Opt|filter_user_options(Tail, AllowedKeys)];
-filter_user_options([Opt|Tail], AllowedKeys) ->
+filter_user_options([Opt|Tail], DisallowedKeys) ->
 	filter_options_warning(Opt),
-	filter_user_options(Tail, AllowedKeys);
+	filter_user_options(Tail, DisallowedKeys);
 filter_user_options([], _) ->
 	[].
 

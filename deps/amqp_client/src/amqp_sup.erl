@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% @private
@@ -44,4 +44,4 @@ start_connection_sup(AmqpParams) ->
 init([]) ->
     {ok, {{simple_one_for_one, 0, 1},
           [{connection_sup, {amqp_connection_sup, start_link, []},
-           temporary, infinity, supervisor, [amqp_connection_sup]}]}}.
+           temporary, ?SUPERVISOR_WAIT, supervisor, [amqp_connection_sup]}]}}.

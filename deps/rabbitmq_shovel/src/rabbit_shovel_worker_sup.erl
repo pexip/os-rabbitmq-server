@@ -11,7 +11,7 @@
 %%  The Original Code is RabbitMQ.
 %%
 %%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%  Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_shovel_worker_sup).
@@ -30,9 +30,10 @@ start_link(ShovelName, ShovelConfig) ->
 init([Name, Config]) ->
     ChildSpecs = [{Name,
                    {rabbit_shovel_worker, start_link, [static, Name, Config]},
-                   case proplists:get_value(reconnect_delay, Config, none) of
-                       N when is_integer(N) andalso N > 0 -> {permanent, N};
-                       _                                  -> temporary
+                   case Config of
+                       #{reconnect_delay := N}
+                         when is_integer(N) andalso N > 0 -> {permanent, N};
+                       _ -> temporary
                    end,
                    16#ffffffff,
                    worker,

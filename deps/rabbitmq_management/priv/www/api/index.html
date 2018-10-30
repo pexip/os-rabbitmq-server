@@ -28,7 +28,7 @@
     <p>Many URIs require the name of a virtual host as part of the
     path, since names only uniquely identify objects within a virtual
     host. As the default virtual host is called "<code>/</code>", this
-    will need to be encoded as "<code>%2f</code>".</p>
+    will need to be encoded as "<code>%2F</code>".</p>
 
     <p>PUTing a resource creates it. The JSON object you upload must
     have certain mandatory keys (documented below) and may have
@@ -54,9 +54,9 @@
     list of subfields separated by dots. See the example below.</p>
 
     <p>Most of the GET queries return many fields per
-    object. See <a href="/doc/stats.html">the separate stats
+    object. See <a href="../doc/stats.html">the separate stats
     documentation</a>.</p>
-    
+
     <h2>Examples</h2>
 
     <p>A few quick examples for Windows and Unix, using the command line
@@ -125,12 +125,12 @@ Content-Length: 0</pre>
 <pre>:: Windows
 C:\&gt; curl -i -u guest:guest -H "content-type:application/json" ^
        -XPUT -d"{""type"":""direct"",""durable"":true}" ^
-       http://localhost:15672/api/exchanges/%2f/my-new-exchange
+       http://localhost:15672/api/exchanges/%2F/my-new-exchange
 
 # Unix
 $ curl -i -u guest:guest -H "content-type:application/json" \
     -XPUT -d'{"type":"direct","durable":true}' \
-    http://localhost:15672/api/exchanges/%2f/my-new-exchange
+    http://localhost:15672/api/exchanges/%2F/my-new-exchange
 
 HTTP/1.1 204 No Content
 Server: MochiWeb/1.1 WebMachine/1.10.0 (never breaks eye contact)
@@ -144,11 +144,11 @@ Content-Length: 0</pre>
         And delete it again:
 <pre>:: Windows
 C:\&gt; curl -i -u guest:guest -H "content-type:application/json" ^
-       -XDELETE http://localhost:15672/api/exchanges/%2f/my-new-exchange
+       -XDELETE http://localhost:15672/api/exchanges/%2F/my-new-exchange
 
 # Unix
 $ curl -i -u guest:guest -H "content-type:application/json" \
-    -XDELETE http://localhost:15672/api/exchanges/%2f/my-new-exchange
+    -XDELETE http://localhost:15672/api/exchanges/%2F/my-new-exchange
 
 HTTP/1.1 204 No Content
 Server: MochiWeb/1.1 WebMachine/1.10.0 (never breaks eye contact)
@@ -225,7 +225,7 @@ Content-Length: 0</pre>
         </td>
         <td>
           The server definitions - exchanges, queues, bindings, users,
-          virtual hosts, permissions and parameters. Everything apart from
+          virtual hosts, permissions, topic permissions, and parameters. Everything apart from
           messages. POST to upload an existing set of definitions. Note
           that:
           <ul>
@@ -524,14 +524,14 @@ Content-Length: 0</pre>
         <td>
           Get messages from a queue. (This is not an HTTP GET as it
           will alter the state of the queue.) You should post a body looking like:
-          <pre>{"count":5,"requeue":true,"encoding":"auto","truncate":50000}</pre>
+          <pre>{"count":5,"ackmode":"ack_requeue_true","encoding":"auto","truncate":50000}</pre>
           <ul>
             <li><code>count</code> controls the maximum number of
             messages to get. You may get fewer messages than this if
             the queue cannot immediately provide them.</li>
-            <li><code>requeue</code> determines whether the messages will be
-            removed from the queue. If requeue is true they will be requeued -
-            but their <code>redelivered</code> flag will be set.</li>
+            <li><code>ackmode</code> determines whether the messages will be
+            removed from the queue. If ackmode is ack_requeue_true or reject_requeue_true they will be requeued -
+            if ackmode is ack_requeue_false or reject_requeue_false they will be removed.
             <li><code>encoding</code> must be either "auto" (in which case the
             payload will be returned as a string if it is valid UTF-8, and
             base64 encoded otherwise), or "base64" (in which case the payload
@@ -570,14 +570,21 @@ Content-Length: 0</pre>
         <td></td>
         <td>X</td>
         <td class="path">/api/bindings/<i>vhost</i>/e/<i>exchange</i>/q/<i>queue</i></td>
-        <td>A list of all bindings between an exchange and a
-        queue. Remember, an exchange and a queue can be bound
-        together many times! To create a new binding, POST to this
-        URI. You will need a body looking something like this:
-          <pre>{"routing_key":"my_routing_key","arguments":{}}</pre>
-          All keys are optional.
-          The response will contain a <code>Location</code> header
-          telling you the URI of your new binding.
+        <td>
+          <p>
+            A list of all bindings between an exchange and a
+            queue. Remember, an exchange and a queue can be bound
+            together many times!
+            </p>
+          <p>
+            To create a new binding, POST to this
+            URI. Request body should be a JSON object optionally containing
+            two fields, <code>routing_key</code> (a string) and <code>arguments</code> (a map of optional arguments):
+            <pre>{"routing_key":"my_routing_key", "arguments":{"x-arg": "value"}}</pre>
+            All keys are optional.
+            The response will contain a <code>Location</code> header
+            telling you the URI of your new binding.
+          </p>
         </td>
       </tr>
       <tr>
@@ -588,7 +595,9 @@ Content-Length: 0</pre>
         <td class="path">/api/bindings/<i>vhost</i>/e/<i>exchange</i>/q/<i>queue</i>/<i>props</i></td>
         <td>An individual binding between an exchange and a queue.
         The <i>props</i> part of the URI is a "name" for the binding
-        composed of its routing key and a hash of its arguments.</td>
+        composed of its routing key and a hash of its
+        arguments. <i>props</i> is the field named "properties_key"
+        from a bindings listing response.</td>
       </tr>
       <tr>
         <td>X</td>
@@ -597,9 +606,22 @@ Content-Length: 0</pre>
         <td>X</td>
         <td class="path">/api/bindings/<i>vhost</i>/e/<i>source</i>/e/<i>destination</i></td>
         <td>
-          A list of all bindings between two exchanges. Similar to
+          <p>
+          A list of all bindings between two exchanges, similar to
           the list of all bindings between an exchange and a queue,
           above.
+          </p>
+          <p>
+          <p>
+            To create a new binding, POST to this
+            URI. Request body should be a JSON object optionally containing
+            two fields, <code>routing_key</code> (a string) and <code>arguments</code> (a map of optional arguments):
+            <pre>{"routing_key":"my_routing_key", "arguments":{"x-arg": "value"}}</pre>
+            All keys are optional.
+            The response will contain a <code>Location</code> header
+            telling you the URI of your new binding.
+          </p>
+          </p>
         </td>
       </tr>
       <tr>
@@ -646,8 +668,41 @@ Content-Length: 0</pre>
         <td></td>
         <td></td>
         <td></td>
-        <td class="path">/api/users</td>
+        <td class="path">/api/vhosts/<i>name</i>/topic-permissions</td>
+        <td>A list of all topic permissions for a given virtual host.</td>
+      </tr>
+      <tr>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td>X</td>
+        <td class="path">/api/vhosts/<i>name</i>/start/<i>node</i></td>
+        <td>Starts virtual host <i>name</i> on node <i>node</i>.</td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/users/</td>
         <td>A list of all users.</td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/users/without-permissions</td>
+        <td>A list of users that do not have access to any virtual host.</td>
+      </tr>
+      <tr>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td>X</td>
+        <td class="path">/api/users/bulk-delete</td>
+        <td>Bulk deletes a list of users. Request body must contain the list:
+        <pre>{"users" : ["user1", "user2", "user3"]}</pre></td>
       </tr>
       <tr>
         <td>X</td>
@@ -661,10 +716,12 @@ or:
 <pre>{"password_hash":"2lmoth8l4H0DViLaK9Fxi6l9ds8=", "tags":"administrator"}</pre>
         The <code>tags</code> key is mandatory. Either
         <code>password</code> or <code>password_hash</code>
-        must be set. Setting <code>password_hash</code> to "" will ensure the
+        must be set. Setting <code>password_hash</code> to <code>""</code> will ensure the
         user cannot use a password to log in. <code>tags</code> is a
         comma-separated list of tags for the user. Currently recognised tags
-        are "administrator", "monitoring" and "management".
+        are <code>administrator</code>, <code>monitoring</code> and <code>management</code>.
+        <code>password_hash</code> must be generated using the algorithm described
+        <a href="http://rabbitmq.com/passwords.html#computing-password-hash">here</a>.
         </td>
       </tr>
       <tr>
@@ -674,6 +731,14 @@ or:
         <td></td>
         <td class="path">/api/users/<i>user</i>/permissions</td>
         <td>A list of all permissions for a given user.</td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/users/<i>user</i>/topic-permissions</td>
+        <td>A list of all topic permissions for a given user.</td>
       </tr>
       <tr>
         <td>X</td>
@@ -706,8 +771,26 @@ or:
         <td></td>
         <td></td>
         <td></td>
+        <td class="path">/api/topic-permissions</td>
+        <td>A list of all topic permissions for all users.</td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td>X</td>
+        <td>X</td>
+        <td></td>
+        <td class="path">/api/topic-permissions/<i>vhost</i>/<i>user</i></td>
+        <td>Topic permissions for a user and virtual host. To PUT a topic permission, you will need a body looking something like this:
+          <pre>{"exchange":"amq.topic","write":"^a","read":".*"}</pre>
+          All keys are mandatory.</td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
         <td class="path">/api/parameters</td>
-        <td>A list of all parameters.</td>
+        <td>A list of all vhost-scoped parameters.</td>
       </tr>
       <tr>
         <td>X</td>
@@ -715,7 +798,7 @@ or:
         <td></td>
         <td></td>
         <td class="path">/api/parameters/<i>component</i></td>
-        <td>A list of all parameters for a given component.</td>
+        <td>A list of all vhost-scoped parameters for a given component.</td>
       </tr>
       <tr>
         <td>X</td>
@@ -723,7 +806,7 @@ or:
         <td></td>
         <td></td>
         <td class="path">/api/parameters/<i>component</i>/<i>vhost</i></td>
-        <td>A list of all parameters for a given component and virtual host.</td>
+        <td>A list of all vhost-scoped parameters for a given component and virtual host.</td>
       </tr>
       <tr>
         <td>X</td>
@@ -731,10 +814,27 @@ or:
         <td>X</td>
         <td></td>
         <td class="path">/api/parameters/<i>component</i>/<i>vhost</i>/<i>name</i></td>
-        <td>An individual parameter. To PUT a parameter, you will need a body looking something like this:
+        <td>An individual vhost-scoped parameter. To PUT a parameter, you will need a body looking something like this:
 <pre>{"vhost": "/","component":"federation","name":"local_username","value":"guest"}</pre>
 </td>
       </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/global-parameters</td>
+        <td>A list of all global parameters.</td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td>X</td>
+        <td>X</td>
+        <td></td>
+        <td class="path">/api/global-parameters/<i>name</i></td>
+        <td>An individual global parameter. To PUT a parameter, you will need a body looking something like this:
+<pre>{"name":"user_vhost_mapping","value":{"guest":"/","rabbit":"warren"}}</pre>
+        </td>
       <tr>
         <td>X</td>
         <td></td>
@@ -760,6 +860,34 @@ or:
         <td>
           An individual policy. To PUT a policy, you will need a body looking something like this:
 <pre>{"pattern":"^amq.", "definition": {"federation-upstream-set":"all"}, "priority":0, "apply-to": "all"}</pre>
+          <code>pattern</code> and <code>definition</code> are mandatory, <code>priority</code> and <code>apply-to</code> are optional.
+        </td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/operator-policies</td>
+        <td>A list of all operator policiy overrides.</td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/operator-policies/<i>vhost</i></td>
+        <td>A list of all operator policiy overrides in a given virtual host.</td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td>X</td>
+        <td>X</td>
+        <td></td>
+        <td class="path">/api/operator-policies/<i>vhost</i>/<i>name</i></td>
+        <td>
+          An individual operator policy. To PUT a policy, you will need a body looking something like this:
+<pre>{"pattern":"^amq.", "definition": {"expires":100}, "priority":0, "apply-to": "queues"}</pre>
           <code>pattern</code> and <code>definition</code> are mandatory, <code>priority</code> and <code>apply-to</code> are optional.
         </td>
       </tr>
@@ -806,6 +934,38 @@ or:
           return HTTP status 200 with body: <pre>{"status":"ok"}</pre> If
           something fails, will return HTTP status 200 with the body of
           <pre>{"status":"failed","reason":"string"}</pre>
+        </td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/vhost-limits</td>
+        <td>
+            Lists per-vhost limits for all vhosts.
+        </td>
+      </tr>
+      <tr>
+        <td>X</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="path">/api/vhost-limits/<i>vhost</i></td>
+        <td>
+            Lists per-vhost limits for specific vhost.
+        </td>
+      </tr>
+      <tr>
+        <td></td>
+        <td>X</td>
+        <td>X</td>
+        <td></td>
+        <td class="path">/api/vhost-limits/<i>vhost</i>/<i>name</i></td>
+        <td>
+            Set or delete per-vost limit for <code>vhost</code> with <code>name</code>.
+            Limits are set using a JSON document in the body:
+            <pre>{"max-connections": 100, "max-queues": 200}</pre>
         </td>
       </tr>
     </table>

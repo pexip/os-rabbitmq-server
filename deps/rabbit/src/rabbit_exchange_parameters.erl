@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_exchange_parameters).
@@ -21,9 +21,7 @@
 -include("rabbit.hrl").
 
 -export([register/0]).
--export([validate/5, notify/4, notify_clear/3]).
-
--import(rabbit_misc, [pget/2]).
+-export([validate/5, notify/5, notify_clear/4]).
 
 -rabbit_boot_step({?MODULE,
                    [{description, "exchange parameters"},
@@ -36,14 +34,15 @@ register() ->
                              ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT, ?MODULE),
     %% ensure there are no leftovers from before node restart/crash
     rabbit_runtime_parameters:clear_component(
-      ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT),
+      ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT,
+      ?INTERNAL_USER),
     ok.
 
 validate(_VHost, ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT, _Name, _Term, _User) ->
     ok.
 
-notify(_VHost, ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT, _Name, _Term) ->
+notify(_VHost, ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT, _Name, _Term, _Username) ->
     ok.
 
-notify_clear(_VHost, ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT, _Name) ->
+notify_clear(_VHost, ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT, _Name, _Username) ->
     ok.

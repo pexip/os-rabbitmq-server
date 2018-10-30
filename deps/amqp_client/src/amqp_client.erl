@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% @private
@@ -27,8 +27,13 @@
 %%---------------------------------------------------------------------------
 
 start() ->
-    application:start(rabbit_common),
-    application:start(amqp_client).
+    %% rabbit_common needs compiler and syntax_tools, see
+    %%
+    %%  * https://github.com/rabbitmq/rabbitmq-erlang-client/issues/72
+    %%  * https://github.com/rabbitmq/rabbitmq-common/pull/149
+    application:ensure_all_started(rabbit_common),
+    {ok, _} = application:ensure_all_started(amqp_client),
+    ok.
 
 %%---------------------------------------------------------------------------
 %% application callbacks

@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_exchange_link_sup_sup).
@@ -59,7 +59,7 @@ stop_child(X) ->
 %%----------------------------------------------------------------------------
 
 init([]) ->
-    {ok, {{one_for_one, 3, 10}, []}}.
+    {ok, {{one_for_one, 1200, 60}, []}}.
 
 %% See comment in rabbit_federation_queue_link_sup_sup:id/1
 id(X = #exchange{policy = Policy}) -> X1 = rabbit_exchange:immutable(X),

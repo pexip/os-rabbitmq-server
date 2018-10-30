@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_link_util).
@@ -23,7 +23,7 @@
 -export([start_conn_ch/5, disposable_channel_call/2, disposable_channel_call/3,
          disposable_connection_call/3, ensure_connection_closed/1,
          log_terminate/4, unacked_new/0, ack/3, nack/3, forward/9,
-         handle_down/6, get_connection_name/2]).
+         handle_down/6, get_connection_name/2, log_warning/3]).
 
 %% temp
 -export([connection_error/6]).
@@ -36,7 +36,8 @@
 
 start_conn_ch(Fun, Upstream, UParams,
               XorQName = #resource{virtual_host = DownVHost}, State) ->
-    case open_monitor(#amqp_params_direct{virtual_host = DownVHost}, get_connection_name(Upstream, UParams)) of
+    ConnName = get_connection_name(Upstream, UParams),
+    case open_monitor(#amqp_params_direct{virtual_host = DownVHost}, ConnName) of
         {ok, DConn, DCh} ->
             case Upstream#upstream.ack_mode of
                 'on-confirm' ->
@@ -46,7 +47,7 @@ start_conn_ch(Fun, Upstream, UParams,
                 _ ->
                     ok
             end,
-            case open_monitor(UParams#upstream_params.params, get_connection_name(Upstream, UParams)) of
+            case open_monitor(UParams#upstream_params.params, ConnName) of
                 {ok, Conn, Ch} ->
                     %% Don't trap exits until we have established
                     %% connections so that if we try to delete
@@ -274,9 +275,15 @@ log_terminate(Reason, Upstream, UParams, XorQName) ->
 log_info   (XorQName, Fmt, Args) -> log(info,    XorQName, Fmt, Args).
 log_warning(XorQName, Fmt, Args) -> log(warning, XorQName, Fmt, Args).
 
-log(Level, XorQName, Fmt, Args) ->
-    rabbit_log:log(federation, Level, "Federation ~s " ++ Fmt,
-                   [rabbit_misc:rs(XorQName) | Args]).
+log(Level, XorQName, Fmt0, Args0) ->
+    Fmt = "Federation ~s " ++ Fmt0,
+    Args = [rabbit_misc:rs(XorQName) | Args0],
+    case Level of
+        debug   -> rabbit_log_federation:debug(Fmt, Args);
+        info    -> rabbit_log_federation:info(Fmt, Args);
+        warning -> rabbit_log_federation:warning(Fmt, Args);
+        error   -> rabbit_log_federation:error(Fmt, Args)
+    end.
 
 %%----------------------------------------------------------------------------
 
@@ -284,13 +291,18 @@ disposable_channel_call(Conn, Method) ->
     disposable_channel_call(Conn, Method, fun(_, _) -> ok end).
 
 disposable_channel_call(Conn, Method, ErrFun) ->
-    {ok, Ch} = amqp_connection:open_channel(Conn),
     try
-        amqp_channel:call(Ch, Method)
-    catch exit:{{shutdown, {server_initiated_close, Code, Text}}, _} ->
-            ErrFun(Code, Text)
-    after
-        ensure_channel_closed(Ch)
+        {ok, Ch} = amqp_connection:open_channel(Conn),
+        try
+            amqp_channel:call(Ch, Method)
+        catch exit:{{shutdown, {server_initiated_close, Code, Text}}, _} ->
+                ErrFun(Code, Text)
+        after
+            ensure_channel_closed(Ch)
+        end
+    catch
+          Exception:Reason ->
+            rabbit_log_federation:error("Federation link could not create a disposable (one-off) channel due to an error ~p: ~p~n", [Exception, Reason])
     end.
 
 disposable_connection_call(Params, Method, ErrFun) ->
@@ -300,6 +312,8 @@ disposable_connection_call(Params, Method, ErrFun) ->
                 amqp_channel:call(Ch, Method)
             catch exit:{{shutdown, {connection_closing,
                                     {server_initiated_close, Code, Txt}}}, _} ->
+                    ErrFun(Code, Txt);
+                    exit:{{shutdown, {server_initiated_close, Code, Txt}}, _} ->
                     ErrFun(Code, Txt)
             after
                 ensure_connection_closed(Conn)

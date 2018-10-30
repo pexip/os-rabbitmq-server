@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_router).
@@ -36,17 +36,14 @@
 
 %%----------------------------------------------------------------------------
 
-%% TODO: Maybe this should be handled by a cursor instead.
-%% TODO: This causes a full scan for each entry with the same source
+%% No need to call mnesia:dirty_select/2 (cf. note below), let alone go
+%%  through qlc because query is so simple !
 match_bindings(SrcName, Match) ->
-    Query = qlc:q([DestinationName ||
-                      #route{binding = Binding = #binding{
-                                         source      = SrcName1,
-                                         destination = DestinationName}} <-
-                          mnesia:table(rabbit_route),
-                      SrcName == SrcName1,
-                      Match(Binding)]),
-    mnesia:async_dirty(fun qlc:e/1, [Query]).
+    MatchHead = #route{binding = #binding{source      = SrcName,
+                                          _           = '_'}},
+    Routes = ets:select(rabbit_route, [{MatchHead, [], [['$_']]}]),
+    [ Dest || [#route{binding = Binding = #binding{destination = Dest}}] <-
+        Routes, Match(Binding)].
 
 match_routing_key(SrcName, [RoutingKey]) ->
     find_routes(#route{binding = #binding{source      = SrcName,

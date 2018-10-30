@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_sup).
@@ -65,4 +65,8 @@ init([]) ->
                    {rabbit_federation_queue_link_sup_sup, start_link, []},
                   transient, ?SUPERVISOR_WAIT, supervisor,
                   [rabbit_federation_queue_link_sup_sup]},
-    {ok, {{one_for_one, 3, 10}, [Status, XLinkSupSup, QLinkSupSup]}}.
+    %% with default reconnect-delay of 5 second, this supports up to
+    %% 100 links constantly failing and being restarted a minute
+    %% (or 200 links if reconnect-delay is 10 seconds, 600 with 30 seconds,
+    %% etc: N * (60/reconnect-delay) <= 1200)
+    {ok, {{one_for_one, 1200, 60}, [Status, XLinkSupSup, QLinkSupSup]}}.

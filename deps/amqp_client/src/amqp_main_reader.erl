@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% @private
@@ -51,7 +51,7 @@ init([Sock, Connection, ConnName, ChMgr, AState]) ->
                    channels_manager = ChMgr,
                    astate           = AState,
                    message          = none},
-    case rabbit_net:async_recv(Sock, 0, infinity) of
+    case rabbit_net:async_recv(Sock, 0, amqp_util:call_timeout()) of
         {ok, _}         -> {ok, State};
         {error, Reason} -> {stop, Reason, _} = handle_error(Reason, State),
                            {stop, Reason}
@@ -72,7 +72,7 @@ handle_cast(Cast, State) ->
 handle_info({inet_async, Sock, _, {ok, Data}},
             State = #state {sock = Sock}) ->
     %% Latency hiding: Request next packet first, then process data
-    case rabbit_net:async_recv(Sock, 0, infinity) of
+    case rabbit_net:async_recv(Sock, 0, amqp_util:call_timeout()) of
          {ok, _}         -> handle_data(Data, State);
          {error, Reason} -> handle_error(Reason, State)
     end;

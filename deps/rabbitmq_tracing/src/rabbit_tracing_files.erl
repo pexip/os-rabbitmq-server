@@ -11,7 +11,7 @@
 %%  The Original Code is RabbitMQ.
 %%
 %%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%  Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_tracing_files).
@@ -38,7 +38,7 @@ full_path(Name0) when is_binary(Name0) ->
     full_path(binary_to_list(Name0));
 full_path(Name0) ->
     {ok, Dir} = application:get_env(rabbitmq_tracing, directory),
-    case mochiweb_util:safe_relative_path(Name0) of
+    case rabbit_http_util:safe_relative_path(Name0) of
         undefined -> exit(how_rude);
         Name      -> Dir ++ "/" ++ Name
     end.

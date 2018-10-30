@@ -55,7 +55,7 @@ ets_table(Name) ->
 
 init([]) ->
     ensure_timer(),
-    {ok, #state{procs = procs(dict:new()),
+    {ok, #state{procs = procs(#{}),
                 ets_tables = ets_tables([])}}.
 
 handle_call({ets_tables, Key, Order, Count}, _From,
@@ -66,7 +66,7 @@ handle_call({procs, Key, Order, Count}, _From, State = #state{procs = Procs}) ->
     {reply, toplist(Key, Order, Count, flatten(Procs)), State};
 
 handle_call({proc, Pid}, _From, State = #state{procs = Procs}) ->
-    {reply, dict:find(Pid, Procs), State}.
+    {reply, maps:find(Pid, Procs), State}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -98,14 +98,15 @@ procs(OldProcs) ->
                       Procs;
                   Props ->
                       Delta = (reductions(Props) -
-                                   case dict:find(Pid, OldProcs) of
+                                   case maps:find(Pid, OldProcs) of
                                        {ok, OldProps} -> reductions(OldProps);
                                        error          -> 0
                                    end) div ?EVERY,
-                      dict:store(
-                        Pid, [{reduction_delta, Delta} | Props], Procs)
+                      NewProps = expand_gen_server2_info(
+                                   Pid, [{reduction_delta, Delta} | Props]),
+                      maps:put(Pid, NewProps, Procs)
               end
-      end, dict:new(), processes()).
+      end, #{}, processes()).
 
 reductions(Props) ->
     {reductions, R} = lists:keyfind(reductions, 1, Props),
@@ -135,7 +136,7 @@ table_info(TableName) when is_atom(TableName) ->
     end.
 
 flatten(Procs) ->
-    dict:fold(fun(Name, Props, Rest) ->
+    maps:fold(fun(Name, Props, Rest) ->
                       [[{pid, Name} | Props] | Rest]
               end, [], Procs).
 
@@ -162,3 +163,11 @@ bytes(Words) ->  try
                  catch
                      _:_ -> 0
                  end.
+
+expand_gen_server2_info(Pid, Props) ->
+    case rabbit_core_metrics:get_gen_server2_stats(Pid) of
+        not_found ->
+            [{buffer_len, -1} | Props];
+        BufferLength ->
+            [{buffer_len, BufferLength} | Props]
+    end.

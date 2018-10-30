@@ -1,0 +1,9 @@
+#!/bin/sh
+
+set -e
+
+if [ -z "${LANG}" ] || [ "${LANG}" = "" ] ; then
+	LANG=en_US.UTF-8
+fi
+
+rabbitmqctl-real $@

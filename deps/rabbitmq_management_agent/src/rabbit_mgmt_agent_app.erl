@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Console.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_agent_app).
@@ -20,7 +20,7 @@
 -export([start/2, stop/1]).
 
 start(_Type, _StartArgs) ->
-    rabbit_mgmt_agent_sup:start_link().
+    rabbit_mgmt_agent_sup_sup:start_link().
 
 stop(_State) ->
     ok.

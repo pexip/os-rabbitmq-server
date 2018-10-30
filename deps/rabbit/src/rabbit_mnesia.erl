@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mnesia).
@@ -45,6 +45,11 @@
 
 %% Used internally in rpc calls
 -export([node_info/0, remove_node_if_mnesia_running/1]).
+
+-ifdef(TEST).
+-compile(export_all).
+-export([init_with_lock/3]).
+-endif.
 
 -include("rabbit.hrl").
 
@@ -98,13 +103,18 @@ init() ->
     ensure_mnesia_dir(),
     case is_virgin_node() of
         true  ->
-            rabbit_log:info("Database directory at ~s is empty. Initialising from scratch...~n",
+            rabbit_log:info("Node database directory at ~s is empty. "
+                            "Assuming we need to join an existing cluster or initialise from scratch...~n",
                             [dir()]),
-            init_from_config();
+            rabbit_peer_discovery:log_configured_backend(),
+            rabbit_peer_discovery:maybe_init(),
+            init_with_lock();
         false ->
             NodeType = node_type(),
             init_db_and_upgrade(cluster_nodes(all), NodeType,
-                                NodeType =:= ram)
+                                NodeType =:= ram, _Retry = true),
+            rabbit_peer_discovery:maybe_init(),
+            rabbit_peer_discovery:maybe_register()
     end,
     %% We intuitively expect the global name server to be synced when
     %% Mnesia is up. In fact that's not guaranteed to be the case -
@@ -112,15 +122,48 @@ init() ->
     ok = rabbit_node_monitor:global_sync(),
     ok.
 
+init_with_lock() ->
+    {Retries, Timeout} = rabbit_peer_discovery:retry_timeout(),
+    init_with_lock(Retries, Timeout, fun init_from_config/0).
+
+init_with_lock(0, _, InitFromConfig) ->
+    case rabbit_peer_discovery:lock_acquisition_failure_mode() of
+        ignore ->
+            rabbit_log:warning("Cannot acquire a lock during clustering", []),
+            InitFromConfig(),
+            rabbit_peer_discovery:maybe_register();
+        fail ->
+            exit(cannot_acquire_startup_lock)
+    end;
+init_with_lock(Retries, Timeout, InitFromConfig) ->
+    case rabbit_peer_discovery:lock() of
+        not_supported ->
+            rabbit_log:info("Peer discovery backend does not support locking, falling back to randomized delay"),
+            %% See rabbitmq/rabbitmq-server#1202 for details.
+            rabbit_peer_discovery:maybe_inject_randomized_delay(),
+            InitFromConfig(),
+            rabbit_peer_discovery:maybe_register();
+        {error, _Reason} ->
+            timer:sleep(Timeout),
+            init_with_lock(Retries - 1, Timeout, InitFromConfig);
+        {ok, Data} ->
+            try
+                InitFromConfig(),
+                rabbit_peer_discovery:maybe_register()
+            after
+                rabbit_peer_discovery:unlock(Data)
+            end
+    end.
+
 init_from_config() ->
     FindBadNodeNames = fun
         (Name, BadNames) when is_atom(Name) -> BadNames;
         (Name, BadNames)                    -> [Name | BadNames]
     end,
-    {TryNodes, NodeType} =
-        case application:get_env(rabbit, cluster_nodes) of
+    {DiscoveredNodes, NodeType} =
+        case rabbit_peer_discovery:discover_cluster_nodes() of
             {ok, {Nodes, Type} = Config}
-            when is_list(Nodes) andalso (Type == disc orelse Type == ram) ->
+            when is_list(Nodes) andalso (Type == disc orelse Type == disk orelse Type == ram) ->
                 case lists:foldr(FindBadNodeNames, [], Nodes) of
                     []       -> Config;
                     BadNames -> e({invalid_cluster_node_names, BadNames})
@@ -137,23 +180,36 @@ init_from_config() ->
             {ok, _} ->
                 e(invalid_cluster_nodes_conf)
         end,
-    case TryNodes of
-        [] -> init_db_and_upgrade([node()], disc, false);
-        _  -> auto_cluster(TryNodes, NodeType)
+    rabbit_log:info("All discovered existing cluster peers: ~s~n",
+                    [rabbit_peer_discovery:format_discovered_nodes(DiscoveredNodes)]),
+    Peers = nodes_excl_me(DiscoveredNodes),
+    case Peers of
+        [] ->
+            rabbit_log:info("Discovered no peer nodes to cluster with"),
+            init_db_and_upgrade([node()], disc, false, _Retry = true);
+        _  ->
+            rabbit_log:info("Peer nodes we can cluster with: ~s~n",
+                [rabbit_peer_discovery:format_discovered_nodes(Peers)]),
+            join_discovered_peers(Peers, NodeType)
     end.
 
-auto_cluster(TryNodes, NodeType) ->
-    case find_auto_cluster_node(nodes_excl_me(TryNodes)) of
+%% Attempts to join discovered,
+%% reachable and compatible (in terms of Mnesia internal protocol version and such)
+%% cluster peers in order.
+join_discovered_peers(TryNodes, NodeType) ->
+    case find_reachable_peer_to_cluster_with(nodes_excl_me(TryNodes)) of
         {ok, Node} ->
-            rabbit_log:info("Node '~p' selected for auto-clustering~n", [Node]),
+            rabbit_log:info("Node '~s' selected for auto-clustering~n", [Node]),
             {ok, {_, DiscNodes, _}} = discover_cluster0(Node),
-            init_db_and_upgrade(DiscNodes, NodeType, true),
+            init_db_and_upgrade(DiscNodes, NodeType, true, _Retry = true),
+            rabbit_connection_tracking:boot(),
             rabbit_node_monitor:notify_joined_cluster();
         none ->
             rabbit_log:warning(
-              "Could not find any node for auto-clustering from: ~p~n"
-              "Starting blank node...~n", [TryNodes]),
-            init_db_and_upgrade([node()], disc, false)
+              "Could not successfully contact any node of: ~s (as in Erlang distribution). "
+               "Starting as a blank standalone node...~n",
+                [string:join(lists:map(fun atom_to_list/1, TryNodes), ",")]),
+            init_db_and_upgrade([node()], disc, false, _Retry = true)
     end.
 
 %% Make the node join a cluster. The node will be reset automatically
@@ -193,7 +249,8 @@ join_cluster(DiscoveryNode, NodeType) ->
                     rabbit_log:info("Clustering with ~p as ~p node~n",
                                     [ClusterNodes, NodeType]),
                     ok = init_db_with_mnesia(ClusterNodes, NodeType,
-                                             true, true),
+                                             true, true, _Retry = true),
+                    rabbit_connection_tracking:boot(),
                     rabbit_node_monitor:notify_joined_cluster(),
                     ok;
                 {error, Reason} ->
@@ -232,7 +289,7 @@ reset_gracefully() ->
     %% need to check for consistency because we are resetting.
     %% Force=true here so that reset still works when clustered with a
     %% node which is down.
-    init_db_with_mnesia(AllNodes, node_type(), false, false),
+    init_db_with_mnesia(AllNodes, node_type(), false, false, _Retry = false),
     case is_only_clustered_disc_node() of
         true  -> e(resetting_only_disc_node);
         false -> ok
@@ -281,7 +338,7 @@ update_cluster_nodes(DiscoveryNode) ->
             rabbit_node_monitor:write_cluster_status(Status),
             rabbit_log:info("Updating cluster nodes from ~p~n",
                             [DiscoveryNode]),
-            init_db_with_mnesia(AllNodes, node_type(), true, true);
+            init_db_with_mnesia(AllNodes, node_type(), true, true, _Retry = false);
         false ->
             e(inconsistent_cluster)
     end,
@@ -295,6 +352,9 @@ update_cluster_nodes(DiscoveryNode) ->
 %%     the last or second to last after the node we're removing to go
 %%     down
 forget_cluster_node(Node, RemoveWhenOffline) ->
+    forget_cluster_node(Node, RemoveWhenOffline, true).
+
+forget_cluster_node(Node, RemoveWhenOffline, EmitNodeDeletedEvent) ->
     case lists:member(Node, cluster_nodes(all)) of
         true  -> ok;
         false -> e(not_a_cluster_node)
@@ -306,6 +366,9 @@ forget_cluster_node(Node, RemoveWhenOffline) ->
         {false,  true} -> rabbit_log:info(
                             "Removing node ~p from cluster~n", [Node]),
                           case remove_node_if_mnesia_running(Node) of
+                              ok when EmitNodeDeletedEvent ->
+                                  rabbit_event:notify(node_deleted, [{node, Node}]),
+                                  ok;
                               ok               -> ok;
                               {error, _} = Err -> throw(Err)
                           end
@@ -325,8 +388,11 @@ remove_node_offline_node(Node) ->
                 %% is by force loading the table, and making sure that
                 %% they are loaded.
                 rabbit_table:force_load(),
-                rabbit_table:wait_for_replicated(),
-                forget_cluster_node(Node, false),
+                rabbit_table:wait_for_replicated(_Retry = false),
+                %% We skip the 'node_deleted' event because the
+                %% application is stopped and thus, rabbit_event is not
+                %% enabled.
+                forget_cluster_node(Node, false, false),
                 force_load_next_boot()
             after
                 stop_mnesia()
@@ -470,7 +536,7 @@ init_db(ClusterNodes, NodeType, CheckOtherNodes) ->
         {[_ | _], _, _} ->
             %% Subsequent node in cluster, catch up
             maybe_force_load(),
-            ok = rabbit_table:wait_for_replicated(),
+            ok = rabbit_table:wait_for_replicated(_Retry = true),
             ok = rabbit_table:create_local_copy(NodeType)
     end,
     ensure_schema_integrity(),
@@ -480,7 +546,7 @@ init_db(ClusterNodes, NodeType, CheckOtherNodes) ->
 init_db_unchecked(ClusterNodes, NodeType) ->
     init_db(ClusterNodes, NodeType, false).
 
-init_db_and_upgrade(ClusterNodes, NodeType, CheckOtherNodes) ->
+init_db_and_upgrade(ClusterNodes, NodeType, CheckOtherNodes, Retry) ->
     ok = init_db(ClusterNodes, NodeType, CheckOtherNodes),
     ok = case rabbit_upgrade:maybe_upgrade_local() of
              ok                    -> ok;
@@ -495,14 +561,14 @@ init_db_and_upgrade(ClusterNodes, NodeType, CheckOtherNodes) ->
         disc -> ok
     end,
     %% ...and all nodes will need to wait for tables
-    rabbit_table:wait_for_replicated(),
+    rabbit_table:wait_for_replicated(Retry),
     ok.
 
 init_db_with_mnesia(ClusterNodes, NodeType,
-                    CheckOtherNodes, CheckConsistency) ->
+                    CheckOtherNodes, CheckConsistency, Retry) ->
     start_mnesia(CheckConsistency),
     try
-        init_db_and_upgrade(ClusterNodes, NodeType, CheckOtherNodes)
+        init_db_and_upgrade(ClusterNodes, NodeType, CheckOtherNodes, Retry)
     after
         stop_mnesia()
     end.
@@ -539,7 +605,7 @@ ensure_mnesia_not_running() ->
     end.
 
 ensure_schema_integrity() ->
-    case rabbit_table:check_schema_integrity() of
+    case rabbit_table:check_schema_integrity(_Retry = true) of
         ok ->
             ok;
         {error, Reason} ->
@@ -670,7 +736,7 @@ discover_cluster0(Node) ->
     rpc:call(Node, rabbit_mnesia, cluster_status_from_mnesia, []).
 
 schema_ok_or_move() ->
-    case rabbit_table:check_schema_integrity() of
+    case rabbit_table:check_schema_integrity(_Retry = false) of
         ok ->
             ok;
         {error, Reason} ->
@@ -840,12 +906,12 @@ with_running_or_clean_mnesia(Fun) ->
     case IsMnesiaRunning of
         true  -> Fun();
         false ->
-            {ok, MnesiaDir} = application:get_env(mnesia, dir),
+            SavedMnesiaDir = dir(),
             application:unset_env(mnesia, dir),
             mnesia:start(),
             Result = Fun(),
             application:stop(mnesia),
-            application:set_env(mnesia, dir, MnesiaDir),
+            application:set_env(mnesia, dir, SavedMnesiaDir),
             Result
     end.
 
@@ -858,7 +924,7 @@ check_rabbit_consistency(Remote) ->
 %% that a `reset' would leave it in.  We cannot simply check if the
 %% mnesia tables aren't there because restarted RAM nodes won't have
 %% tables while still being non-virgin.  What we do instead is to
-%% check if the mnesia directory is non existant or empty, with the
+%% check if the mnesia directory is non existent or empty, with the
 %% exception of the cluster status files, which will be there thanks to
 %% `rabbit_node_monitor:prepare_cluster_status_file/0'.
 is_virgin_node() ->
@@ -875,13 +941,13 @@ is_virgin_node() ->
             false
     end.
 
-find_auto_cluster_node([]) ->
+find_reachable_peer_to_cluster_with([]) ->
     none;
-find_auto_cluster_node([Node | Nodes]) ->
+find_reachable_peer_to_cluster_with([Node | Nodes]) ->
     Fail = fun (Fmt, Args) ->
                    rabbit_log:warning(
-                     "Could not auto-cluster with ~s: " ++ Fmt, [Node | Args]),
-                   find_auto_cluster_node(Nodes)
+                     "Could not auto-cluster with node ~s: " ++ Fmt, [Node | Args]),
+                   find_reachable_peer_to_cluster_with(Nodes)
            end,
     case remote_node_info(Node) of
         {badrpc, _} = Reason ->

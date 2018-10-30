@@ -1,4 +1,4 @@
-Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: RabbitMQ
 Source: http://www.rabbitmq.com/
 
@@ -65,7 +65,7 @@ Copyright: (c) 2007-2013, GoPivotal, Inc.
            (c) 2008-2012, John Leuner <jewel@debian.org>
            (c) 2015, Antonio Terceiro <terceiro@debian.org>
            (c) 2014-2016, James Page <james.page@canonical.com>
-           (c) 2014-2016, Thomas Goirand <zigo@debian.org>
+           (c) 2014-2018, Thomas Goirand <zigo@debian.org>
 License: MPL-1.1
 
 License: Expat

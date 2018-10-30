@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_util).
@@ -53,9 +53,9 @@ validate_arg(Name, Type, Args) ->
 
 fail(Fmt, Args) -> rabbit_misc:protocol_error(precondition_failed, Fmt, Args).
 
-name(                 #resource{name = XName})  -> XName;
-name(#exchange{name = #resource{name = XName}}) -> XName;
-name(#amqqueue{name = #resource{name = QName}}) -> QName.
+name(                 #resource{name = XorQName})  -> XorQName;
+name(#exchange{name = #resource{name = XName}})    -> XName;
+name(#amqqueue{name = #resource{name = QName}})    -> QName.
 
 vhost(                 #resource{virtual_host = VHost})  -> VHost;
 vhost(#exchange{name = #resource{virtual_host = VHost}}) -> VHost;

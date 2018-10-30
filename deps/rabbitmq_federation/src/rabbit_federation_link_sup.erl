@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_link_sup).
@@ -23,7 +23,7 @@
 
 %% Supervises the upstream links for an exchange or queue.
 
--export([start_link/1, adjust/3]).
+-export([start_link/1, adjust/3, restart/2]).
 -export([init/1]).
 
 start_link(XorQ) ->
@@ -70,6 +70,11 @@ adjust(Sup, Q = #amqqueue{}, {upstream_set, _}) ->
 adjust(Sup, XorQ, {clear_upstream_set, _}) ->
     adjust(Sup, XorQ, everything).
 
+restart(Sup, Upstream) ->
+    ok = supervisor2:terminate_child(Sup, Upstream),
+    {ok, _Pid} = supervisor2:restart_child(Sup, Upstream),
+    ok.
+
 start(Sup, Upstream, XorQ) ->
     {ok, _Pid} = supervisor2:start_child(Sup, spec(Upstream, XorQ)),
     ok.
@@ -101,7 +106,7 @@ specs(XorQ) ->
 spec(U = #upstream{reconnect_delay = Delay}, #exchange{name = XName}) ->
     {U, {rabbit_federation_exchange_link, start_link, [{U, XName}]},
      {permanent, Delay}, ?WORKER_WAIT, worker,
-     [rabbit_federation_link]};
+     [rabbit_federation_exchange_link]};
 
 spec(Upstream = #upstream{reconnect_delay = Delay}, Q = #amqqueue{}) ->
     {Upstream, {rabbit_federation_queue_link, start_link, [{Upstream, Q}]},

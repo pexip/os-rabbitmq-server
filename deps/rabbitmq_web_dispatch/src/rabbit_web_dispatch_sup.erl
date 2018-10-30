@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_web_dispatch_sup).
@@ -36,9 +36,21 @@ ensure_listener(Listener) ->
         undefined ->
             {error, {no_port_given, Listener}};
         _ ->
-            Child = {{rabbit_web_dispatch_web, name(Listener)},
-                     {mochiweb_http, start, [mochi_options(Listener)]},
-                     transient, 5000, worker, dynamic},
+            {Transport, TransportOpts, ProtoOpts} = preprocess_config(Listener),
+            ProtoOptsMap = maps:from_list(ProtoOpts),
+            StreamHandlers = stream_handlers_config(ProtoOpts),
+            rabbit_log:debug("Starting HTTP[S] listener with transport ~s, options ~p and protocol options ~p, stream handlers ~p",
+                             [Transport, TransportOpts, ProtoOptsMap, StreamHandlers]),
+            CowboyOptsMap =
+                maps:merge(#{env =>
+                                #{rabbit_listener => Listener},
+                             middlewares =>
+                                [rabbit_cowboy_middleware, cowboy_router, cowboy_handler],
+                             stream_handlers => StreamHandlers},
+                           ProtoOptsMap),
+            Child = ranch:child_spec(name(Listener), 100,
+                Transport, TransportOpts,
+                cowboy_clear, CowboyOptsMap),
             case supervisor:start_child(?SUP, Child) of
                 {ok,                      _}  -> new;
                 {error, {already_started, _}} -> existing;
@@ -48,8 +60,8 @@ ensure_listener(Listener) ->
 
 stop_listener(Listener) ->
     Name = name(Listener),
-    ok = supervisor:terminate_child(?SUP, {rabbit_web_dispatch_web, Name}),
-    ok = supervisor:delete_child(?SUP, {rabbit_web_dispatch_web, Name}).
+    ok = supervisor:terminate_child(?SUP, {ranch_listener_sup, Name}),
+    ok = supervisor:delete_child(?SUP, {ranch_listener_sup, Name}).
 
 %% @spec init([[instance()]]) -> SupervisorTree
 %% @doc supervisor callback.
@@ -57,43 +69,28 @@ init([]) ->
     Registry = {rabbit_web_dispatch_registry,
                 {rabbit_web_dispatch_registry, start_link, []},
                 transient, 5000, worker, dynamic},
-    {ok, {{one_for_one, 10, 10}, [Registry]}}.
+    Log = {rabbit_mgmt_access_logger, {gen_event, start_link,
+            [{local, webmachine_log_event}]},
+           permanent, 5000, worker, [dynamic]},
+    {ok, {{one_for_one, 10, 10}, [Registry, Log]}}.
 
 %% ----------------------------------------------------------------------
-
-mochi_options(Listener) ->
-    [{name, name(Listener)},
-     {loop, loopfun(Listener)} |
-     ssl_config(proplists:delete(
-                  name, proplists:delete(ignore_in_use, Listener)))].
-
-loopfun(Listener) ->
-    fun (Req) ->
-            case rabbit_web_dispatch_registry:lookup(Listener, Req) of
-                no_handler ->
-                    Req:not_found();
-                {error, Reason} ->
-                    Req:respond({500, [], "Registry Error: " ++ Reason});
-                {handler, Handler} ->
-                    Handler(Req)
-            end
-    end.
 
 name(Listener) ->
     Port = proplists:get_value(port, Listener),
     list_to_atom(atom_to_list(?MODULE) ++ "_" ++ integer_to_list(Port)).
 
-ssl_config(Options) ->
+preprocess_config(Options) ->
     case proplists:get_value(ssl, Options) of
-        true -> rabbit_networking:ensure_ssl(),
+        true -> _ = rabbit_networking:ensure_ssl(),
                 case rabbit_networking:poodle_check('HTTP') of
                     ok     -> case proplists:get_value(ssl_opts, Options) of
                                   undefined -> auto_ssl(Options);
                                   _         -> fix_ssl(Options)
                               end;
-                    danger -> proplists:delete(ssl, Options)
+                    danger -> {ranch_tcp, transport_config(Options), protocol_config(Options)}
                 end;
-        _    -> Options
+        _    -> {ranch_tcp, transport_config(Options), protocol_config(Options)}
     end.
 
 auto_ssl(Options) ->
@@ -105,8 +102,36 @@ auto_ssl(Options) ->
 
 fix_ssl(Options) ->
     SSLOpts = proplists:get_value(ssl_opts, Options),
-    rabbit_misc:pset(ssl_opts,
-                     rabbit_networking:fix_ssl_options(SSLOpts), Options).
+    {ranch_ssl,
+        transport_config(Options ++ rabbit_networking:fix_ssl_options(SSLOpts)),
+        protocol_config(Options)}.
+
+transport_config(Options0) ->
+    Options = proplists:delete(ssl,
+        proplists:delete(ssl_opts,
+            proplists:delete(cowboy_opts,
+                Options0))),
+    case proplists:get_value(ip, Options) of
+        undefined ->
+            Options;
+        IP when is_tuple(IP) ->
+            Options;
+        IP when is_list(IP) ->
+            {ok, ParsedIP} = inet_parse:address(IP),
+            [{ip, ParsedIP}|proplists:delete(ip, Options)]
+    end.
+
+protocol_config(Options) ->
+    proplists:get_value(cowboy_opts, Options, []).
+
+stream_handlers_config(Options) ->
+    case lists:keyfind(compress, 1, Options) of
+        {compress, false} -> [rabbit_cowboy_stream_h, cowboy_stream_h];
+        %% Compress by default. Since 2.0 the compress option in cowboys
+        %% has been replaced by the cowboy_compress_h handler
+        %% Compress is not applied if data < 300 bytes
+        _ -> [rabbit_cowboy_stream_h, cowboy_compress_h, cowboy_stream_h]
+    end.
 
 check_error(Listener, Error) ->
     Ignore = proplists:get_value(ignore_in_use, Listener, false),

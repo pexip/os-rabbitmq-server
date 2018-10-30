@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_upstream_exchange).
@@ -34,8 +34,12 @@
 -export([validate/1, validate_binding/2,
          create/2, delete/3, policy_changed/2,
          add_binding/3, remove_bindings/3, assert_args_equivalence/2]).
+-export([info/1, info/2]).
 
 %%----------------------------------------------------------------------------
+
+info(_X) -> [].
+info(_X, _) -> [].
 
 description() ->
     [{description,      <<"Federation upstream helper exchange">>},

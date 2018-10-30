@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% TODO rename this
@@ -19,11 +19,11 @@
 
 -rabbit_boot_step({?MODULE,
                    [{description, "federation exchange decorator"},
-                    {mfa, {rabbit_exchange_decorator, register,
-                           [<<"federation">>, ?MODULE]}},
+                    {mfa, {rabbit_registry, register,
+                           [exchange_decorator, <<"federation">>, ?MODULE]}},
                     {requires, rabbit_registry},
-                    {cleanup, {rabbit_exchange_decorator, unregister,
-                               [<<"federation">>]}},
+                    {cleanup, {rabbit_registry, unregister,
+                               [exchange_decorator, <<"federation">>]}},
                     {enables, recovery}]}).
 
 -include_lib("amqp_client/include/amqp_client.hrl").
