@@ -1,6 +1,7 @@
 [Unit]
 Description=RabbitMQ Messaging Server
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -10,6 +11,8 @@ LimitNOFILE=65536
 ExecStart=/usr/sbin/rabbitmq-server
 ExecStartPost=/usr/lib/rabbitmq/bin/rabbitmq-server-wait
 ExecStop=/usr/sbin/rabbitmqctl stop
+Restart=always
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
