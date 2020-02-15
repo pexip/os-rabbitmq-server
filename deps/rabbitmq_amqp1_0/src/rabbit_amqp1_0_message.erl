@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_amqp1_0_message).
@@ -118,8 +118,8 @@ assemble(Expected, _, Actual, _) ->
 decode_section(<<>>) ->
     none;
 decode_section(MsgBin) ->
-    {AmqpValue, Rest} = rabbit_amqp1_0_binary_parser:parse(MsgBin),
-    {rabbit_amqp1_0_framing:decode(AmqpValue), Rest}.
+    {AmqpValue, Rest} = amqp10_binary_parser:parse(MsgBin),
+    {amqp10_framing:decode(AmqpValue), Rest}.
 
 chunk(Rest, Uneaten) ->
     ChunkLen = size(Uneaten) - size(Rest),
@@ -172,16 +172,16 @@ unwrap({_Type, Thing}) -> Thing.
 
 to_expiration(undefined) ->
     undefined;
-to_expiration({timestamp, Num}) ->
+to_expiration({uint, Num}) ->
     list_to_binary(integer_to_list(Num)).
 
 from_expiration(undefined) ->
     undefined;
-from_expiration(MaybeIntegerBin) ->
-    case catch list_to_integer(binary_to_list(MaybeIntegerBin)) of
-        {'EXIT', {badarg, _}} ->
-            undefined;
-        Integer -> {timestamp, Integer}
+from_expiration(PBasic) ->
+    case rabbit_basic:parse_expiration(PBasic) of
+        {ok, undefined} -> undefined;
+        {ok, N} -> {uint, N};
+        _ -> undefined
     end.
 
 set_header(Header, Value, undefined) ->
@@ -206,10 +206,10 @@ annotated_message(RKey, #'basic.deliver'{redelivered = Redelivered},
                      _ -> false
                  end,
        priority = wrap(ubyte, Props#'P_basic'.priority),
-       ttl = from_expiration(Props#'P_basic'.expiration),
+       ttl = from_expiration(Props),
        first_acquirer = not Redelivered,
        delivery_count = undefined},
-    HeadersBin = rabbit_amqp1_0_framing:encode_bin(Header10),
+    HeadersBin = amqp10_framing:encode_bin(Header10),
     MsgAnnoBin =
         case table_lookup(Headers, ?MESSAGE_ANNOTATIONS_HEADER) of
             undefined  -> <<>>;
@@ -237,7 +237,7 @@ annotated_message(RKey, #'basic.deliver'{redelivered = Redelivered},
                   content_type = wrap(symbol, Props#'P_basic'.content_type),
                   content_encoding = wrap(symbol, Props#'P_basic'.content_encoding),
                   creation_time = wrap(timestamp, Props#'P_basic'.timestamp)},
-                rabbit_amqp1_0_framing:encode_bin(Props10)
+                amqp10_framing:encode_bin(Props10)
         end,
     AppPropsBin =
         case table_lookup(Headers, ?APP_PROPERTIES_HEADER) of
@@ -250,7 +250,7 @@ annotated_message(RKey, #'basic.deliver'{redelivered = Redelivered},
                   <<"amqp-1.0">> ->
                       Content;
                   _Else -> % e.g., <<"binary">> if originally from 1.0
-                      rabbit_amqp1_0_framing:encode_bin(
+                      amqp10_framing:encode_bin(
                         #'v1_0.data'{content = Content})
               end,
     FooterBin =

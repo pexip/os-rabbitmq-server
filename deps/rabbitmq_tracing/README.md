@@ -34,23 +34,34 @@ sophisticated or efficient, it loads the whole log into memory. If you
 have large log files you may wish to transfer them off the server in
 some other way.
 
-## HTTP API
+## HTTP API Endpoints
 
 ```
 GET            /api/traces
+GET            /api/traces/node/<node>
 GET            /api/traces/<vhost>
+GET            /api/traces/node/<node>/<vhost>
 GET PUT DELETE /api/traces/<vhost>/<name>
+GET PUT DELETE /api/traces/node/<node>/<vhost>/<name>
 GET            /api/trace-files
+GET            /api/trace-files/node/<node>
 GET     DELETE /api/trace-files/<name>    (GET returns the file as text/plain)
+GET     DELETE /api/trace-files/node/<node>/<name>    (GET returns the file as text/plain)
 ```
 
 Example for how to create a trace using [RabbitMQ HTTP API](http://www.rabbitmq.com/management.html):
 
 ```
 curl -i -u guest:guest -H "content-type:application/json" -XPUT \
-     http://localhost:55672/api/traces/%2f/my-trace \
-     -d'{"format":"text","pattern":"#", "max_payload_bytes":1000}'
+     http://localhost:15672/api/traces/%2f/my-trace \
+     -d'{"format":"text","pattern":"#", "max_payload_bytes":1000,
+         "tracer_connection_username":"guest", "tracer_connection_password":"guest"}'
 ```
 
-`max_payload_bytes` is optional (omit it to prevent payload truncation),
-format and pattern are mandatory.
+The format and pattern fields are mandatory.
+
+`tracer_connection_username` and `tracer_connection_password` control what credentials the tracing
+connection will use. Both are optional and default to the configured
+plugin values.
+
+`max_payload_bytes` is optional (omit it to prevent payload truncation).

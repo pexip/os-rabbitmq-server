@@ -11,36 +11,31 @@
 %%   The Original Code is RabbitMQ Management Plugin.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_connection).
 
--export([init/1, resource_exists/2, to_json/2, content_types_provided/2,
+-export([init/2, resource_exists/2, to_json/2, content_types_provided/2,
          is_authorized/2, allowed_methods/2, delete_resource/2, conn/1]).
--export([finish_request/2]).
--export([encodings_provided/2]).
+-export([variances/2]).
 
--include("rabbit_mgmt.hrl").
--include_lib("webmachine/include/webmachine.hrl").
+-include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 %%--------------------------------------------------------------------
 
-init(_Config) -> {ok, #context{}}.
+init(Req, _State) ->
+    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
 
-finish_request(ReqData, Context) ->
-    {ok, rabbit_mgmt_cors:set_headers(ReqData, ?MODULE), Context}.
+variances(Req, Context) ->
+    {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
 
 content_types_provided(ReqData, Context) ->
-   {[{"application/json", to_json}], ReqData, Context}.
-
-encodings_provided(ReqData, Context) ->
-    {[{"identity", fun(X) -> X end},
-     {"gzip", fun(X) -> zlib:gzip(X) end}], ReqData, Context}.
+   {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
 
 allowed_methods(ReqData, Context) ->
-    {['HEAD', 'GET', 'DELETE', 'OPTIONS'], ReqData, Context}.
+    {[<<"HEAD">>, <<"GET">>, <<"DELETE">>, <<"OPTIONS">>], ReqData, Context}.
 
 resource_exists(ReqData, Context) ->
     case conn(ReqData) of
@@ -50,18 +45,17 @@ resource_exists(ReqData, Context) ->
 
 to_json(ReqData, Context) ->
     rabbit_mgmt_util:reply(
-      {struct, rabbit_mgmt_format:strip_pids(conn(ReqData))}, ReqData, Context).
+      maps:from_list(rabbit_mgmt_format:strip_pids(conn(ReqData))), ReqData, Context).
 
 delete_resource(ReqData, Context) ->
-    Conn = conn(ReqData),
-    Pid = proplists:get_value(pid, Conn),
-    Reason = case wrq:get_req_header(<<"X-Reason">>, ReqData) of
-                 undefined -> "Closed via management plugin";
-                 V         -> V
-             end,
-    case proplists:get_value(type, Conn) of
-        direct  -> amqp_direct_connection:server_close(Pid, 320, Reason);
-        network -> rabbit_networking:close_connection(Pid, Reason)
+    case conn(ReqData) of
+        not_found -> ok;
+        Conn      ->
+            case proplists:get_value(pid, Conn) of
+                undefined -> ok;
+                Pid when is_pid(Pid) ->
+                    force_close_connection(ReqData, Conn, Pid)
+            end
     end,
     {true, ReqData, Context}.
 
@@ -78,3 +72,14 @@ is_authorized(ReqData, Context) ->
 conn(ReqData) ->
     rabbit_mgmt_db:get_connection(rabbit_mgmt_util:id(connection, ReqData),
                                   rabbit_mgmt_util:range_ceil(ReqData)).
+
+force_close_connection(ReqData, Conn, Pid) ->
+    Reason = case cowboy_req:header(<<"x-reason">>, ReqData) of
+                 undefined -> "Closed via management plugin";
+                 V         -> binary_to_list(V)
+             end,
+            case proplists:get_value(type, Conn) of
+                direct  -> amqp_direct_connection:server_close(Pid, 320, Reason);
+                network -> rabbit_networking:close_connection(Pid, Reason)
+            end,
+    ok.

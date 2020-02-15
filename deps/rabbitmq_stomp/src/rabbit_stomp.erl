@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_stomp).
@@ -20,6 +20,11 @@
 
 -behaviour(application).
 -export([start/2, stop/1]).
+-export([parse_default_user/2]).
+-export([connection_info_local/1,
+         emit_connection_info_local/3,
+         emit_connection_info_all/4,
+         list/0]).
 
 -define(DEFAULT_CONFIGURATION,
         #stomp_configuration{
@@ -35,6 +40,24 @@ start(normal, []) ->
 
 stop(_State) ->
     ok.
+
+emit_connection_info_all(Nodes, Items, Ref, AggregatorPid) ->
+    Pids = [spawn_link(Node, rabbit_stomp, emit_connection_info_local,
+                       [Items, Ref, AggregatorPid])
+            || Node <- Nodes],
+    rabbit_control_misc:await_emitters_termination(Pids),
+    ok.
+
+emit_connection_info_local(Items, Ref, AggregatorPid) ->
+    rabbit_control_misc:emitting_map_with_exit_handler(
+      AggregatorPid, Ref, fun(Pid) ->
+                                  rabbit_stomp_reader:info(Pid, Items)
+                          end,
+      list()).
+
+connection_info_local(Items) ->
+    Connections = list(),
+    [rabbit_stomp_reader:info(Pid, Items) || Pid <- Connections].
 
 parse_listener_configuration() ->
     {ok, Listeners} = application:get_env(tcp_listeners),
@@ -85,3 +108,11 @@ report_configuration(#stomp_configuration{
     end,
 
     ok.
+
+list() ->
+    [Client
+     || {_, ListSupPid, _, _} <- supervisor2:which_children(rabbit_stomp_sup),
+        {_, RanchSup, supervisor, _} <- supervisor2:which_children(ListSupPid),
+        {ranch_conns_sup, ConnSup, _, _} <- supervisor:which_children(RanchSup),
+        {_, CliSup, _, _} <- supervisor:which_children(ConnSup),
+        {rabbit_stomp_reader, Client, _, _} <- supervisor:which_children(CliSup)].

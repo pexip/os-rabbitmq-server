@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% @private
@@ -55,12 +55,12 @@ start_link(TypeSup, AMQPParams) ->
     gen_server:start_link(?MODULE, {TypeSup, AMQPParams}, []).
 
 connect(Pid) ->
-    gen_server:call(Pid, connect, infinity).
+    gen_server:call(Pid, connect, amqp_util:call_timeout()).
 
 open_channel(Pid, ProposedNumber, Consumer) ->
     case gen_server:call(Pid,
                          {command, {open_channel, ProposedNumber, Consumer}},
-                         infinity) of
+                         amqp_util:call_timeout()) of
         {ok, ChannelPid} -> ok = amqp_channel:open(ChannelPid),
                             {ok, ChannelPid};
         Error            -> Error
@@ -79,19 +79,19 @@ channels_terminated(Pid) ->
     gen_server:cast(Pid, channels_terminated).
 
 close(Pid, Close, Timeout) ->
-    gen_server:call(Pid, {command, {close, Close, Timeout}}, infinity).
+    gen_server:call(Pid, {command, {close, Close, Timeout}}, amqp_util:call_timeout()).
 
 server_close(Pid, Close) ->
     gen_server:cast(Pid, {server_close, Close}).
 
 info(Pid, Items) ->
-    gen_server:call(Pid, {info, Items}, infinity).
+    gen_server:call(Pid, {info, Items}, amqp_util:call_timeout()).
 
 info_keys() ->
     ?INFO_KEYS.
 
 info_keys(Pid) ->
-    gen_server:call(Pid, info_keys, infinity).
+    gen_server:call(Pid, info_keys, amqp_util:call_timeout()).
 
 %%---------------------------------------------------------------------------
 %% Behaviour
@@ -221,9 +221,18 @@ handle_cast({register_blocked_handler, HandlerPid}, State) ->
 %% @private
 handle_info({'DOWN', _, process, BlockHandler, Reason},
             State = #state{block_handler = {BlockHandler, _Ref}}) ->
-    ?LOG_WARN("Connection (~p): Unregistering block handler ~p because it died. "
+    ?LOG_WARN("Connection (~p): Unregistering connection.{blocked,unblocked} handler ~p because it died. "
               "Reason: ~p~n", [self(), BlockHandler, Reason]),
     {noreply, State#state{block_handler = none}};
+handle_info({'EXIT', BlockHandler, Reason},
+            State = #state{block_handler = {BlockHandler, Ref}}) ->
+    ?LOG_WARN("Connection (~p): Unregistering connection.{blocked,unblocked} handler ~p because it died. "
+              "Reason: ~p~n", [self(), BlockHandler, Reason]),
+    erlang:demonitor(Ref, [flush]),
+    {noreply, State#state{block_handler = none}};
+%% propagate the exit to the module that will stop with a sensible reason logged
+handle_info({'EXIT', _Pid, _Reason} = Info, State) ->
+    callback(handle_message, [Info], State);
 handle_info(Info, State) ->
     callback(handle_message, [Info], State).
 

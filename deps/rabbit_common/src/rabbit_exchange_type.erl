@@ -11,10 +11,14 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_exchange_type).
+
+-behaviour(rabbit_registry_class).
+
+-export([added_to_rabbit_registry/2, removed_from_rabbit_registry/1]).
 
 -type(tx() :: 'transaction' | 'none').
 -type(serial() :: pos_integer() | tx()).
@@ -63,3 +67,11 @@
 -callback assert_args_equivalence(rabbit_types:exchange(),
                                   rabbit_framing:amqp_table()) ->
     'ok' | rabbit_types:connection_exit().
+
+%% Exchange type specific info keys
+-callback info(rabbit_types:exchange()) -> [{atom(), term()}].
+
+-callback info(rabbit_types:exchange(), [atom()]) -> [{atom(), term()}].
+
+added_to_rabbit_registry(_Type, _ModuleName) -> ok.
+removed_from_rabbit_registry(_Type) -> ok.

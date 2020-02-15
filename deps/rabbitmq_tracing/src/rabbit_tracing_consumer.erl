@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_tracing_consumer).
@@ -46,14 +46,17 @@ info_all(Pid) ->
 
 %%----------------------------------------------------------------------------
 
-init(Args) ->
+init(Args0) ->
     process_flag(trap_exit, true),
+    Args = filter_optional_user_pass(Args0),
     Name = pget(name, Args),
     VHost = pget(vhost, Args),
-    Username = rabbit_tracing_util:coerce_env_value(username,
-        rabbit_misc:get_env(rabbitmq_tracing, username, ?DEFAULT_USERNAME)),
-    Password = rabbit_tracing_util:coerce_env_value(password,
-        rabbit_misc:get_env(rabbitmq_tracing, password, ?DEFAULT_PASSWORD)),
+    Username = pget(tracer_connection_username, Args,
+                    rabbit_misc:get_env(rabbitmq_tracing, username, ?DEFAULT_USERNAME)),
+    Password = pget(tracer_connection_password, Args,
+                    rabbit_misc:get_env(rabbitmq_tracing, password, ?DEFAULT_PASSWORD)),
+    Username = rabbit_tracing_util:coerce_env_value(username, Username),
+    Password = rabbit_tracing_util:coerce_env_value(password, Password),
     MaxPayload = pget(max_payload_bytes, Args, unlimited),
     {ok, Conn} = amqp_connection:start(
                    #amqp_params_direct{virtual_host = VHost,
@@ -154,7 +157,7 @@ delivery_to_log_record({#'basic.deliver'{routing_key = Key},
     {longstr, User}   = table_lookup(H, <<"user">>),
     {signedint, Chan} = table_lookup(H, <<"channel">>),
     #log_record{timestamp    = rabbit_mgmt_format:now_to_str_ms(
-                                 time_compat:os_system_time(milli_seconds)),
+                                 os:system_time(milli_seconds)),
                 type         = Type,
                 exchange     = X,
                 queue        = Q,
@@ -203,22 +206,22 @@ log(text, Record, State) ->
     print_log(io_lib:format(Fmt, Args), State);
 
 log(json, Record, State) ->
-    print_log(mochijson2:encode(
-                [{timestamp,    Record#log_record.timestamp},
-                 {type,         Record#log_record.type},
-                 {node,         Record#log_record.node},
-                 {connection,   Record#log_record.connection},
-                 {vhost,        Record#log_record.vhost},
-                 {user,         Record#log_record.username},
-                 {channel,      Record#log_record.channel},
-                 {exchange,     Record#log_record.exchange},
-                 {queue,        Record#log_record.queue},
-                 {routed_queues, Record#log_record.routed_queues},
-                 {routing_keys, Record#log_record.routing_keys},
-                 {properties,   rabbit_mgmt_format:amqp_table(
-                                   Record#log_record.properties)},
-                 {payload,      base64:encode(Record#log_record.payload)}])
-              ++ "\n",
+    print_log([rabbit_json:encode(
+                #{timestamp     => Record#log_record.timestamp,
+                  type          => Record#log_record.type,
+                  node          => Record#log_record.node,
+                  connection    => Record#log_record.connection,
+                  vhost         => Record#log_record.vhost,
+                  user          => Record#log_record.username,
+                  channel       => Record#log_record.channel,
+                  exchange      => Record#log_record.exchange,
+                  queue         => Record#log_record.queue,
+                  routed_queues => Record#log_record.routed_queues,
+                  routing_keys  => Record#log_record.routing_keys,
+                  properties    => rabbit_mgmt_format:amqp_table(
+                                     Record#log_record.properties),
+                  payload       => base64:encode(Record#log_record.payload)}),
+              "\n"],
               State).
 
 print_log(LogMsg, State = #state{buf = Buf, buf_cnt = BufCnt}) ->
@@ -238,4 +241,16 @@ truncate(Payload, #state{max_payload = Max}) ->
         true  -> Payload;
         false -> <<Trunc:Max/binary, _/binary>> = Payload,
                  Trunc
+    end.
+
+filter_optional_user_pass(Args) ->
+    case lists:member({tracer_connection_username,<<>>}, Args) of
+        true ->
+            [{K, V} || {K, V} <- Args,
+                       not lists:member(K, [tracer_connection_username,
+                                            tracer_connection_password,
+                                            <<"tracer_connection_username">>,
+                                            <<"tracer_connection_password">>])];
+        _ ->
+            Args
     end.

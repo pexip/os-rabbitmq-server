@@ -1,9 +1,8 @@
 {application,cowboy,
-             [{description,"Small, fast, modular HTTP server."},
-              {vsn,"1.0.3"},
-              {id,"git"},
+             [{description,"Small, fast, modern HTTP server."},
+              {vsn,"2.2.2"},
               {modules,[]},
-              {registered,[cowboy_clock,cowboy_sup]},
-              {applications,[kernel,stdlib,ranch,cowlib,crypto]},
+              {registered,[cowboy_sup,cowboy_clock]},
+              {applications,[kernel,stdlib,crypto,cowlib,ranch]},
               {mod,{cowboy_app,[]}},
               {env,[]}]}.

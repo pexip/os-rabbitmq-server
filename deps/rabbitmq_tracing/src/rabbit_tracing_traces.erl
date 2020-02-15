@@ -11,7 +11,7 @@
 %%  The Original Code is RabbitMQ.
 %%
 %%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%  Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_tracing_traces).
@@ -116,7 +116,9 @@ vhost_tracing(VHost, Table) ->
 
 augment(Trace) ->
     Pid = pget(pid, Trace),
-    Trace1 = lists:keydelete(pid, 1, Trace),
+    Trace1 = lists:keydelete(tracer_connection_password, 1,
+                             lists:keydelete(<<"tracer_connection_password">>, 1,
+                                             lists:keydelete(pid, 1, Trace))),
     case Pid of
         undefined -> Trace1;
         _         -> rabbit_tracing_consumer:info_all(Pid) ++ Trace1

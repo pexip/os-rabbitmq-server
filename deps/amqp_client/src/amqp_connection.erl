@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% @type close_reason(Type) = {shutdown, amqp_reason(Type)}.
@@ -121,7 +121,7 @@
 %%     defaults to 0 (turned off) (network only)</li>
 %% <li>connection_timeout :: non_neg_integer() | 'infinity'
 %%     - The connection timeout in milliseconds,
-%%     defaults to 'infinity' (network only)</li>
+%%     defaults to 30000 (network only)</li>
 %% <li>ssl_options :: term() - The second parameter to be used with the
 %%     ssl:connect/2 function, defaults to 'none' (network only)</li>
 %% <li>client_properties :: [{binary(), atom(), binary()}] - A list of extra
@@ -157,7 +157,7 @@ start(AmqpParams) ->
 %% running in the same process space.  If the port is set to 'undefined',
 %% the default ports will be selected depending on whether this is a
 %% normal or an SSL connection.
-%% If ConnectionName is binary - it will be added to client_properties as 
+%% If ConnectionName is binary - it will be added to client_properties as
 %% user specified connection name.
 start(AmqpParams, ConnName) when ConnName == undefined; is_binary(ConnName) ->
     ensure_started(),
@@ -171,17 +171,18 @@ start(AmqpParams, ConnName) when ConnName == undefined; is_binary(ConnName) ->
                 AmqpParams
         end,
     AmqpParams2 = set_connection_name(ConnName, AmqpParams1),
-    {ok, _Sup, Connection} = amqp_sup:start_connection_sup(AmqpParams2),
+    AmqpParams3 = amqp_ssl:maybe_enhance_ssl_options(AmqpParams2),
+    {ok, _Sup, Connection} = amqp_sup:start_connection_sup(AmqpParams3),
     amqp_gen_connection:connect(Connection).
 
 set_connection_name(undefined, Params) -> Params;
-set_connection_name(ConnName, 
+set_connection_name(ConnName,
                     #amqp_params_network{client_properties = Props} = Params) ->
     Params#amqp_params_network{
         client_properties = [
             {<<"connection_name">>, longstr, ConnName} | Props
         ]};
-set_connection_name(ConnName, 
+set_connection_name(ConnName,
                     #amqp_params_direct{client_properties = Props} = Params) ->
     Params#amqp_params_direct{
         client_properties = [
@@ -195,15 +196,15 @@ set_connection_name(ConnName,
 %% application controller is in the process of shutting down the very
 %% application which is making this call.
 ensure_started() ->
-    [ensure_started(App) || App <- [xmerl, rabbit_common, amqp_client]].
+    [ensure_started(App) || App <- [syntax_tools, compiler, xmerl,
+                                    rabbit_common, amqp_client]].
 
 ensure_started(App) ->
     case is_pid(application_controller:get_master(App)) andalso amqp_sup:is_ready() of
         true  -> ok;
-        false -> case application:start(App) of
-                     ok                              -> ok;
-                     {error, {already_started, App}} -> ok;
-                     {error, _} = E                  -> throw(E)
+        false -> case application:ensure_all_started(App) of
+                     {ok, _}        -> ok;
+                     {error, _} = E -> throw(E)
                  end
     end.
 
@@ -278,7 +279,7 @@ close(ConnectionPid, Timeout) ->
 %% @doc Closes the AMQP connection, allowing the caller to set the reply
 %% code and text.
 close(ConnectionPid, Code, Text) ->
-    close(ConnectionPid, Code, Text, infinity).
+    close(ConnectionPid, Code, Text, amqp_util:call_timeout()).
 
 %% @spec (ConnectionPid, Code, Text, Timeout) -> ok | closing
 %% where

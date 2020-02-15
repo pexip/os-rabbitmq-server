@@ -11,17 +11,17 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_binding).
 -include("rabbit.hrl").
 
--export([recover/2, exists/1, add/1, add/2, remove/1, remove/2, list/1]).
+-export([recover/0, recover/2, exists/1, add/2, add/3, remove/1, remove/3, list/1]).
 -export([list_for_source/1, list_for_destination/1,
          list_for_source_and_destination/2]).
 -export([new_deletions/0, combine_deletions/2, add_deletion/3,
-         process_deletions/1]).
+         process_deletions/2]).
 -export([info_keys/0, info/1, info/2, info_all/1, info_all/2, info_all/4]).
 %% these must all be run inside a mnesia tx
 -export([has_for_source/1, remove_for_source/1,
@@ -52,15 +52,15 @@
 
 %% TODO this should really be opaque but that seems to confuse 17.1's
 %% dialyzer into objecting to everything that uses it.
--type deletions() :: ?DICT_TYPE().
+-type deletions() :: dict:dict().
 
 -spec recover([rabbit_exchange:name()], [rabbit_amqqueue:name()]) ->
                         'ok'.
 -spec exists(rabbit_types:binding()) -> boolean() | bind_errors().
--spec add(rabbit_types:binding())              -> bind_res().
--spec add(rabbit_types:binding(), inner_fun()) -> bind_res().
+-spec add(rabbit_types:binding(), rabbit_types:username()) -> bind_res().
+-spec add(rabbit_types:binding(), inner_fun(), rabbit_types:username()) -> bind_res().
 -spec remove(rabbit_types:binding())              -> bind_res().
--spec remove(rabbit_types:binding(), inner_fun()) -> bind_res().
+-spec remove(rabbit_types:binding(), inner_fun(), rabbit_types:username()) -> bind_res().
 -spec list(rabbit_types:vhost()) -> bindings().
 -spec list_for_source
         (rabbit_types:binding_source()) -> bindings().
@@ -84,7 +84,7 @@
         (rabbit_types:binding_destination(), boolean()) -> deletions().
 -spec remove_transient_for_destination
         (rabbit_types:binding_destination()) -> deletions().
--spec process_deletions(deletions()) -> rabbit_misc:thunk('ok').
+-spec process_deletions(deletions(), rabbit_types:username()) -> rabbit_misc:thunk('ok').
 -spec combine_deletions(deletions(), deletions()) -> deletions().
 -spec add_deletion
         (rabbit_exchange:name(),
@@ -102,16 +102,20 @@
                     routing_key, arguments,
                     vhost]).
 
-recover(XNames, QNames) ->
+%% Global table recovery
+recover() ->
     rabbit_misc:table_filter(
-      fun (Route) ->
-              mnesia:read({rabbit_semi_durable_route, Route}) =:= []
-      end,
-      fun (Route,  true) ->
-              ok = mnesia:write(rabbit_semi_durable_route, Route, write);
-          (_Route, false) ->
-              ok
-      end, rabbit_durable_route),
+        fun (Route) ->
+            mnesia:read({rabbit_semi_durable_route, Route}) =:= []
+        end,
+        fun (Route,  true) ->
+            ok = mnesia:write(rabbit_semi_durable_route, Route, write);
+            (_Route, false) ->
+                ok
+        end, rabbit_durable_route).
+
+%% Virtual host-specific recovery
+recover(XNames, QNames) ->
     XNameSet = sets:from_list(XNames),
     QNameSet = sets:from_list(QNames),
     SelectSet = fun (#resource{kind = exchange}) -> XNameSet;
@@ -158,21 +162,23 @@ exists(Binding) ->
                        rabbit_misc:const(mnesia:read({rabbit_route, B}) /= [])
                end, fun not_found_or_absent_errs/1).
 
-add(Binding) -> add(Binding, fun (_Src, _Dst) -> ok end).
+add(Binding, ActingUser) -> add(Binding, fun (_Src, _Dst) -> ok end, ActingUser).
 
-add(Binding, InnerFun) ->
+add(Binding, InnerFun, ActingUser) ->
     binding_action(
       Binding,
       fun (Src, Dst, B) ->
               case rabbit_exchange:validate_binding(Src, B) of
                   ok ->
+                      lock_resource(Src),
+                      lock_resource(Dst),
                       %% this argument is used to check queue exclusivity;
                       %% in general, we want to fail on that in preference to
                       %% anything else
                       case InnerFun(Src, Dst) of
                           ok ->
                               case mnesia:read({rabbit_route, B}) of
-                                  []  -> add(Src, Dst, B);
+                                  []  -> add(Src, Dst, B, ActingUser);
                                   [_] -> fun () -> ok end
                               end;
                           {error, _} = Err ->
@@ -183,7 +189,9 @@ add(Binding, InnerFun) ->
               end
       end, fun not_found_or_absent_errs/1).
 
-add(Src, Dst, B) ->
+add(Src, Dst, B, ActingUser) ->
+    lock_resource(Src),
+    lock_resource(Dst),
     [SrcDurable, DstDurable] = [durable(E) || E <- [Src, Dst]],
     case (SrcDurable andalso DstDurable andalso
           mnesia:read({rabbit_durable_route, B}) =/= []) of
@@ -193,35 +201,41 @@ add(Src, Dst, B) ->
                  Serial = rabbit_exchange:serial(Src),
                  fun () ->
                          x_callback(Serial, Src, add_binding, B),
-                         ok = rabbit_event:notify(binding_created, info(B))
+                         ok = rabbit_event:notify(
+                                binding_created,
+                                info(B) ++ [{user_who_performed_action, ActingUser}])
                  end;
         true  -> rabbit_misc:const({error, binding_not_found})
     end.
 
-remove(Binding) -> remove(Binding, fun (_Src, _Dst) -> ok end).
+remove(Binding) -> remove(Binding, fun (_Src, _Dst) -> ok end, ?INTERNAL_USER).
 
-remove(Binding, InnerFun) ->
+remove(Binding, InnerFun, ActingUser) ->
     binding_action(
       Binding,
       fun (Src, Dst, B) ->
+              lock_resource(Src),
+              lock_resource(Dst),
               case mnesia:read(rabbit_route, B, write) of
                   [] -> case mnesia:read(rabbit_durable_route, B, write) of
                             [] -> rabbit_misc:const(ok);
                             _  -> rabbit_misc:const({error, binding_not_found})
                         end;
                   _  -> case InnerFun(Src, Dst) of
-                            ok               -> remove(Src, Dst, B);
+                            ok               -> remove(Src, Dst, B, ActingUser);
                             {error, _} = Err -> rabbit_misc:const(Err)
                         end
               end
       end, fun absent_errs_only/1).
 
-remove(Src, Dst, B) ->
+remove(Src, Dst, B, ActingUser) ->
+    lock_resource(Src),
+    lock_resource(Dst),
     ok = sync_route(#route{binding = B}, durable(Src), durable(Dst),
                     fun mnesia:delete_object/3),
     Deletions = maybe_auto_delete(
                   B#binding.source, [B], new_deletions(), false),
-    process_deletions(Deletions).
+    process_deletions(Deletions, ActingUser).
 
 list(VHostPath) ->
     VHostResource = rabbit_misc:r(VHostPath, '_'),
@@ -301,12 +315,12 @@ has_for_source(SrcName) ->
         contains(rabbit_semi_durable_route, Match).
 
 remove_for_source(SrcName) ->
-    lock_route_tables(),
+    lock_resource(SrcName),
     Match = #route{binding = #binding{source = SrcName, _ = '_'}},
     remove_routes(
       lists:usort(
-        mnesia:match_object(rabbit_route, Match, write) ++
-            mnesia:match_object(rabbit_semi_durable_route, Match, write))).
+        mnesia:match_object(rabbit_route, Match, read) ++
+            mnesia:match_object(rabbit_semi_durable_route, Match, read))).
 
 remove_for_destination(DstName, OnlyDurable) ->
     remove_for_destination(DstName, OnlyDurable, fun remove_routes/1).
@@ -328,14 +342,6 @@ binding_action(Binding = #binding{source      = SrcName,
               SortedArgs = rabbit_misc:sort_field_table(Arguments),
               Fun(Src, Dst, Binding#binding{args = SortedArgs})
       end, ErrFun).
-
-delete_object(Tab, Record, LockKind) ->
-    %% this 'guarded' delete prevents unnecessary writes to the mnesia
-    %% disk log
-    case mnesia:match_object(Tab, Record, LockKind) of
-        []  -> ok;
-        [_] -> mnesia:delete_object(Tab, Record, LockKind)
-    end.
 
 sync_route(Route, true, true, Fun) ->
     ok = Fun(rabbit_durable_route, Route, write),
@@ -396,32 +402,12 @@ continue('$end_of_table')    -> false;
 continue({[_|_], _})         -> true;
 continue({[], Continuation}) -> continue(mnesia:select(Continuation)).
 
-%% For bulk operations we lock the tables we are operating on in order
-%% to reduce the time complexity. Without the table locks we end up
-%% with num_tables*num_bulk_bindings row-level locks. Taking each lock
-%% takes time proportional to the number of existing locks, thus
-%% resulting in O(num_bulk_bindings^2) complexity.
-%%
-%% The locks need to be write locks since ultimately we end up
-%% removing all these rows.
-%%
-%% The downside of all this is that no other binding operations except
-%% lookup/routing (which uses dirty ops) can take place
-%% concurrently. However, that is the case already since the bulk
-%% operations involve mnesia:match_object calls with a partial key,
-%% which entails taking a table lock.
-lock_route_tables() ->
-    [mnesia:lock({table, T}, write) || T <- [rabbit_route,
-                                             rabbit_reverse_route,
-                                             rabbit_semi_durable_route,
-                                             rabbit_durable_route]].
-
 remove_routes(Routes) ->
     %% This partitioning allows us to suppress unnecessary delete
     %% operations on disk tables, which require an fsync.
     {RamRoutes, DiskRoutes} =
         lists:partition(fun (R) -> mnesia:match_object(
-                                     rabbit_durable_route, R, write) == [] end,
+                                     rabbit_durable_route, R, read) == [] end,
                         Routes),
     %% Of course the destination might not really be durable but it's
     %% just as easy to try to delete it from the semi-durable table
@@ -434,27 +420,34 @@ remove_routes(Routes) ->
 
 remove_transient_routes(Routes) ->
     [begin
-         ok = sync_transient_route(R, fun delete_object/3),
+         ok = sync_transient_route(R, fun mnesia:delete_object/3),
          R#route.binding
      end || R <- Routes].
 
 remove_for_destination(DstName, OnlyDurable, Fun) ->
-    lock_route_tables(),
+    lock_resource(DstName),
     MatchFwd = #route{binding = #binding{destination = DstName, _ = '_'}},
     MatchRev = reverse_route(MatchFwd),
     Routes = case OnlyDurable of
-                 false -> [reverse_route(R) ||
+                 false ->
+                        [reverse_route(R) ||
                               R <- mnesia:match_object(
-                                     rabbit_reverse_route, MatchRev, write)];
+                                     rabbit_reverse_route, MatchRev, read)];
                  true  -> lists:usort(
                             mnesia:match_object(
-                              rabbit_durable_route, MatchFwd, write) ++
+                              rabbit_durable_route, MatchFwd, read) ++
                                 mnesia:match_object(
-                                  rabbit_semi_durable_route, MatchFwd, write))
+                                  rabbit_semi_durable_route, MatchFwd, read))
              end,
     Bindings = Fun(Routes),
     group_bindings_fold(fun maybe_auto_delete/4, new_deletions(),
                         lists:keysort(#binding.source, Bindings), OnlyDurable).
+
+%% Instead of locking entire table on remove operations we can lock the
+%% affected resource only.
+lock_resource(Name) ->
+    mnesia:lock({global, Name, mnesia:table_info(rabbit_route, where_to_write)},
+                write).
 
 %% Requires that its input binding list is sorted in exchange-name
 %% order, so that the grouping of bindings (for passing to
@@ -539,7 +532,7 @@ merge_entry({X1, Deleted1, Bindings1}, {X2, Deleted2, Bindings2}) ->
      anything_but(not_deleted, Deleted1, Deleted2),
      [Bindings1 | Bindings2]}.
 
-process_deletions(Deletions) ->
+process_deletions(Deletions, ActingUser) ->
     AugmentedDeletions =
         dict:map(fun (_XName, {X, deleted, Bindings}) ->
                          Bs = lists:flatten(Bindings),
@@ -553,16 +546,21 @@ process_deletions(Deletions) ->
     fun() ->
             dict:fold(fun (XName, {X, deleted, Bs, Serial}, ok) ->
                               ok = rabbit_event:notify(
-                                     exchange_deleted, [{name, XName}]),
-                              del_notify(Bs),
+                                     exchange_deleted,
+                                     [{name, XName},
+                                      {user_who_performed_action, ActingUser}]),
+                              del_notify(Bs, ActingUser),
                               x_callback(Serial, X, delete, Bs);
                           (_XName, {X, not_deleted, Bs, Serial}, ok) ->
-                              del_notify(Bs),
+                              del_notify(Bs, ActingUser),
                               x_callback(Serial, X, remove_bindings, Bs)
                       end, ok, AugmentedDeletions)
     end.
 
-del_notify(Bs) -> [rabbit_event:notify(binding_deleted, info(B)) || B <- Bs].
+del_notify(Bs, ActingUser) -> [rabbit_event:notify(
+                               binding_deleted,
+                               info(B) ++ [{user_who_performed_action, ActingUser}])
+                             || B <- Bs].
 
 x_callback(Serial, X, F, Bs) ->
     ok = rabbit_exchange:callback(X, F, Serial, [X, Bs]).

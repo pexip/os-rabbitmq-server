@@ -11,12 +11,12 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 %% There are two types of alarms handled by this module:
 %%
 %% * per-node resource (disk, memory) alarms for the whole cluster. If any node
-%%   has an alarm, then all publishing should be disabled througout the
+%%   has an alarm, then all publishing should be disabled across the
 %%   cluster until all alarms clear. When a node sets such an alarm,
 %%   this information is automatically propagated throughout the cluster.
 %%   `#alarms.alarmed_nodes' is being used to track this type of alarms.
@@ -128,8 +128,12 @@ handle_call(_Request, State) ->
 
 handle_event({set_alarm, {{resource_limit, Source, Node}, []}}, State) ->
     case is_node_alarmed(Source, Node, State) of
-        true -> {ok, State};
-        false -> handle_set_resource_alarm(Source, Node, State)
+        true ->
+            {ok, State};
+        false ->
+            rabbit_event:notify(alarm_set, [{source, Source},
+                                            {node, Node}]),
+            handle_set_resource_alarm(Source, Node, State)
     end;
 handle_event({set_alarm, Alarm}, State = #alarms{alarms = Alarms}) ->
     case lists:member(Alarm, Alarms) of
@@ -141,6 +145,8 @@ handle_event({set_alarm, Alarm}, State = #alarms{alarms = Alarms}) ->
 handle_event({clear_alarm, {resource_limit, Source, Node}}, State) ->
     case is_node_alarmed(Source, Node, State) of
         true  ->
+            rabbit_event:notify(alarm_cleared, [{source, Source},
+                                                {node, Node}]),
             handle_clear_resource_alarm(Source, Node, State);
         false ->
             {ok, State}

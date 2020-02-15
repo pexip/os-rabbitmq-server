@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(amqp_uri).
@@ -26,8 +26,10 @@
 
 %% Reformat a URI to remove authentication secrets from it (before we
 %% log it or display it anywhere).
+-spec remove_credentials(URI :: string() | binary()) -> string().
 remove_credentials(URI) ->
-    Props = uri_parser:parse(URI,
+    UriString = rabbit_data_coercion:to_list(URI),
+    Props = uri_parser:parse(UriString,
                              [{host, undefined}, {path, undefined},
                               {port, undefined}, {'query', []}]),
     PortPart = case proplists:get_value(port, Props) of
@@ -62,16 +64,23 @@ remove_credentials(URI) ->
 %% than once).  The extra parameters that may be specified for an SSL
 %% connection are cacertfile, certfile, keyfile, verify,
 %% fail_if_no_peer_cert, password, and depth.
+-type parse_result() :: {ok, #amqp_params_network{}} |
+                        {ok, #amqp_params_direct{}} |
+                        {error, {any(), string()}}.
+
+-spec parse(Uri :: string() | binary()) -> parse_result().
 parse(Uri) -> parse(Uri, <<"/">>).
 
+-spec parse(Uri :: string() | binary(), DefaultVHost :: binary()) -> parse_result().
 parse(Uri, DefaultVHost) ->
     try return(parse1(Uri, DefaultVHost))
     catch throw:Err -> {error, {Err, Uri}};
           error:Err -> {error, {Err, Uri}}
     end.
 
-parse1(Uri, DefaultVHost) when is_list(Uri) ->
-    case uri_parser:parse(Uri, [{host, undefined}, {path, undefined},
+parse1(Uri, DefaultVHost) when is_list(Uri); is_binary(Uri) ->
+    UriString = rabbit_data_coercion:to_list(Uri),
+    case uri_parser:parse(UriString, [{host, undefined}, {path, undefined},
                                 {port, undefined}, {'query', []}]) of
         {error, Err} ->
             throw({unable_to_parse_uri, Err});
@@ -119,14 +128,19 @@ build_broker(ParsedUri, DefaultVHost) ->
                              end
             end,
     UserInfo = proplists:get_value(userinfo, ParsedUri),
-    set_user_info(case unescape_string(Host) of
-                      undefined -> #amqp_params_direct{virtual_host = VHost};
-                      Host1     -> Mech = mechanisms(ParsedUri),
-                                   #amqp_params_network{host            = Host1,
-                                                        port            = Port,
-                                                        virtual_host    = VHost,
-                                                        auth_mechanisms = Mech}
-                  end, UserInfo).
+    Record = case {unescape_string(Host), Port} of
+                 {undefined, undefined} ->
+                     #amqp_params_direct{virtual_host = VHost};
+                 {undefined, _Port} ->
+                     fail(port_requires_host);
+                 {Host1, Port1}     ->
+                     Mech = mechanisms(ParsedUri),
+                     #amqp_params_network{host            = Host1,
+                                          port            = Port1,
+                                          virtual_host    = VHost,
+                                          auth_mechanisms = Mech}
+             end,
+    set_user_info(Record, UserInfo).
 
 set_user_info(Ps, UserInfo) ->
     case UserInfo of
@@ -152,7 +166,7 @@ set(KVs, Ps, Fields) ->
     Ps1.
 
 build_ssl_broker(ParsedUri, DefaultVHost) ->
-    Params = build_broker(ParsedUri, DefaultVHost),
+    Params0 = build_broker(ParsedUri, DefaultVHost),
     Query = proplists:get_value('query', ParsedUri),
     SSLOptions =
         run_state_monad(
@@ -168,15 +182,17 @@ build_ssl_broker(ParsedUri, DefaultVHost) ->
                               L
                       end
            end || {Fun, Key} <-
-                      [{fun find_path_parameter/1,    cacertfile},
-                       {fun find_path_parameter/1,    certfile},
-                       {fun find_path_parameter/1,    keyfile},
-                       {fun find_atom_parameter/1,    verify},
+                      [{fun find_path_parameter/1, cacertfile},
+                       {fun find_path_parameter/1, certfile},
+                       {fun find_path_parameter/1, keyfile},
+                       {fun find_atom_parameter/1, verify},
                        {fun find_boolean_parameter/1, fail_if_no_peer_cert},
                        {fun find_identity_parameter/1, password},
-                       {fun find_integer_parameter/1,  depth}]],
+                       {fun find_sni_parameter/1, server_name_indication},
+                       {fun find_integer_parameter/1, depth}]],
           []),
-    Params#amqp_params_network{ssl_options = SSLOptions}.
+    Params1 = Params0#amqp_params_network{ssl_options = SSLOptions},
+    amqp_ssl:maybe_enhance_ssl_options(Params1).
 
 broker_add_query(Params = #amqp_params_direct{}, Uri) ->
     broker_add_query(Params, Uri, record_info(fields, amqp_params_direct));
@@ -220,6 +236,11 @@ parse_amqp_param(Field, String) ->
     fail({parameter_unconfigurable_in_query, Field, String}).
 
 find_path_parameter(Value) ->
+    find_identity_parameter(Value).
+
+find_sni_parameter("disable") ->
+    disable;
+find_sni_parameter(Value) ->
     find_identity_parameter(Value).
 
 find_identity_parameter(Value) -> return(Value).

@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_authn_backend).
@@ -30,7 +30,7 @@
 %%     Something went wrong. Log and die.
 %% {refused, Msg, Args}
 %%     Client failed authentication. Log and die.
--callback user_login_authentication(rabbit_types:username(), [term()]) ->
+-callback user_login_authentication(rabbit_types:username(), [term()] | map()) ->
     {'ok', rabbit_types:auth_user()} |
     {'refused', string(), [any()]} |
     {'error', any()}.

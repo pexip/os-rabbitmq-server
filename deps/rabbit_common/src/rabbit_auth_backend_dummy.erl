@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_auth_backend_dummy).
@@ -22,7 +22,7 @@
 
 -export([user/0]).
 -export([user_login_authentication/2, user_login_authorization/1,
-         check_vhost_access/3, check_resource_access/3]).
+         check_vhost_access/3, check_resource_access/3, check_topic_access/4]).
 
 -spec user() -> rabbit_types:user().
 
@@ -42,3 +42,4 @@ user_login_authorization(_) ->
 
 check_vhost_access(#auth_user{}, _VHostPath, _Sock) -> true.
 check_resource_access(#auth_user{}, #resource{}, _Permission) -> true.
+check_topic_access(#auth_user{}, #resource{}, _Permission, _Context) -> true.

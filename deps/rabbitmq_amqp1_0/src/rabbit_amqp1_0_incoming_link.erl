@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_amqp1_0_incoming_link).
@@ -142,8 +142,8 @@ transfer(#'v1_0.transfer'{delivery_id     = DeliveryId0,
                         recv_settle_mode = RSM} = Link, BCh) ->
     MsgBin = iolist_to_binary(lists:reverse([MsgPart | MsgAcc])),
     ?DEBUG("Inbound content:~n  ~p~n",
-           [[rabbit_amqp1_0_framing:pprint(Section) ||
-                Section <- rabbit_amqp1_0_framing:decode_bin(MsgBin)]]),
+           [[amqp10_framing:pprint(Section) ||
+                Section <- amqp10_framing:decode_bin(MsgBin)]]),
     {MsgRKey, Msg} = rabbit_amqp1_0_message:assemble(MsgBin),
     RKey = case LinkRKey of
                undefined -> MsgRKey;

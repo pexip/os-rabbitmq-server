@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_access_control).
@@ -19,7 +19,7 @@
 -include("rabbit.hrl").
 
 -export([check_user_pass_login/2, check_user_login/2, check_user_loopback/2,
-         check_vhost_access/3, check_resource_access/3]).
+         check_vhost_access/3, check_resource_access/3, check_topic_access/4]).
 
 %%----------------------------------------------------------------------------
 
@@ -64,6 +64,7 @@ check_user_login(Username, AuthProps) ->
                   %% passwordless (i.e pre-authenticated) login with authZ.
                   case try_authenticate(ModN, Username, AuthProps) of
                       {ok, ModNUser = #auth_user{username = Username2}} ->
+                          rabbit_log:debug("User '~s' authenticated successfully by backend ~s", [Username2, ModN]),
                           user(ModNUser, try_authorize(ModZs, Username2));
                       Else ->
                           Else
@@ -72,7 +73,8 @@ check_user_login(Username, AuthProps) ->
                   %% Same module for authN and authZ. Just take the result
                   %% it gives us
                   case try_authenticate(Mod, Username, AuthProps) of
-                      {ok, ModNUser = #auth_user{impl = Impl}} ->
+                      {ok, ModNUser = #auth_user{username = Username2, impl = Impl}} ->
+                          rabbit_log:debug("User '~s' authenticated successfully by backend ~s", [Username2, Mod]),
                           user(ModNUser, {ok, [{Mod, Impl}], []});
                       Else ->
                           Else
@@ -161,22 +163,31 @@ check_resource_access(User = #user{username       = Username,
          (_, Else) -> Else
       end, ok, Modules).
 
+check_topic_access(User = #user{username = Username,
+                                authz_backends = Modules},
+                            Resource, Permission, Context) ->
+    lists:foldl(
+        fun({Module, Impl}, ok) ->
+            check_access(
+                fun() -> Module:check_topic_access(
+                    auth_user(User, Impl), Resource, Permission, Context) end,
+                Module, "access to topic '~s' in exchange ~s refused for user '~s'",
+                [maps:get(routing_key, Context), rabbit_misc:rs(Resource), Username]);
+            (_, Else) -> Else
+        end, ok, Modules).
 
 check_access(Fun, Module, ErrStr, ErrArgs) ->
     check_access(Fun, Module, ErrStr, ErrArgs, access_refused).
 
 check_access(Fun, Module, ErrStr, ErrArgs, ErrName) ->
-    Allow = case Fun() of
-                {error, E}  ->
-                    rabbit_log:error(ErrStr ++ " by ~s: ~p~n",
-                                     ErrArgs ++ [Module, E]),
-                    false;
-                Else ->
-                    Else
-            end,
-    case Allow of
+    case Fun() of
         true ->
             ok;
         false ->
-            rabbit_misc:protocol_error(ErrName, ErrStr, ErrArgs)
+            rabbit_misc:protocol_error(ErrName, ErrStr, ErrArgs);
+        {error, E}  ->
+            FullErrStr = ErrStr ++ ", backend ~s returned an error: ~p~n",
+            FullErrArgs = ErrArgs ++ [Module, E],
+            rabbit_log:error(FullErrStr, FullErrArgs),
+            rabbit_misc:protocol_error(ErrName, FullErrStr, FullErrArgs)
     end.

@@ -11,7 +11,7 @@
 %%  The Original Code is RabbitMQ.
 %%
 %%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%  Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_shovel_mgmt).
@@ -19,25 +19,25 @@
 -behaviour(rabbit_mgmt_extension).
 
 -export([dispatcher/0, web_ui/0]).
--export([init/1, to_json/2, resource_exists/2, content_types_provided/2,
+-export([init/2, to_json/2, resource_exists/2, content_types_provided/2,
          is_authorized/2]).
 
 -import(rabbit_misc, [pget/2]).
 
--include_lib("rabbitmq_management/include/rabbit_mgmt.hrl").
+-include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
--include_lib("webmachine/include/webmachine.hrl").
 
-dispatcher() -> [{["shovels"],        ?MODULE, []},
-                 {["shovels", vhost], ?MODULE, []}].
+dispatcher() -> [{"/shovels",        ?MODULE, []},
+                 {"/shovels/:vhost", ?MODULE, []}].
 web_ui()     -> [{javascript, <<"shovel.js">>}].
 
 %%--------------------------------------------------------------------
 
-init(_Config) -> {ok, #context{}}.
+init(Req, _Opts) ->
+    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
 
 content_types_provided(ReqData, Context) ->
-   {[{"application/json", to_json}], ReqData, Context}.
+   {[{<<"application/json">>, to_json}], ReqData, Context}.
 
 resource_exists(ReqData, Context) ->
     {case rabbit_mgmt_util:vhost(ReqData) of
@@ -87,7 +87,7 @@ status(Node) ->
 format(Node, {Name, Type, Info, TS}) ->
     [{node, Node}, {timestamp, format_ts(TS)}] ++
         format_name(Type, Name) ++
-        format_info(Info, Type, Name).
+        format_info(Info).
 
 format_name(static,  Name)          -> [{name,  Name},
                                         {type,  static}];
@@ -95,13 +95,13 @@ format_name(dynamic, {VHost, Name}) -> [{name,  Name},
                                         {vhost, VHost},
                                         {type,  dynamic}].
 
-format_info(starting, _Type, _Name) ->
+format_info(starting) ->
     [{state, starting}];
 
-format_info({running, Props}, Type, Name) ->
-    [{state, running}] ++ lookup_src_dest(Type, Name) ++ Props;
+format_info({running, Props}) ->
+    [{state, running}] ++ Props;
 
-format_info({terminated, Reason}, _Type, _Name) ->
+format_info({terminated, Reason}) ->
     [{state,  terminated},
      {reason, print("~p", [Reason])}].
 
@@ -110,21 +110,3 @@ format_ts({{Y, M, D}, {H, Min, S}}) ->
 
 print(Fmt, Val) ->
     list_to_binary(io_lib:format(Fmt, Val)).
-
-lookup_src_dest(static, _Name) ->
-    %% This is too messy to do, the config may be on another node and anyway
-    %% does not necessarily tell us the source and destination very clearly.
-    [];
-
-lookup_src_dest(dynamic, {VHost, Name}) ->
-    case rabbit_runtime_parameters:lookup(VHost, <<"shovel">>, Name) of
-        %% We might not find anything if the shovel has been deleted
-        %% before we got here
-        not_found ->
-            [];
-        Props ->
-            Def = pget(value, Props),
-            Ks = [<<"src-queue">>, <<"src-exchange">>, <<"src-exchange-key">>,
-                  <<"dest-queue">>,<<"dest-exchange">>,<<"dest-exchange-key">>],
-            [{definition, [{K, V} || {K, V} <- Def, lists:member(K, Ks)]}]
-    end.

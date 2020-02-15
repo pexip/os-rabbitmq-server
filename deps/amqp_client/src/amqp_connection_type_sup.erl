@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% @private
@@ -42,7 +42,7 @@ start_channels_manager(Sup, Conn, ConnName, Type) ->
                        Sup,
                        {channel_sup_sup, {amqp_channel_sup_sup, start_link,
                                           [Type, Conn, ConnName]},
-                        intrinsic, infinity, supervisor,
+                        intrinsic, ?SUPERVISOR_WAIT, supervisor,
                         [amqp_channel_sup_sup]}),
     {ok, _} = supervisor2:start_child(
                 Sup,

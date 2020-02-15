@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_upstream).
@@ -71,7 +71,7 @@ remove_credentials(URI) ->
     list_to_binary(amqp_uri:remove_credentials(binary_to_list(URI))).
 
 to_params(Upstream = #upstream{uris = URIs}, XorQ) ->
-    URI = lists:nth(rand_compat:uniform(length(URIs)), URIs),
+    URI = lists:nth(rand:uniform(length(URIs)), URIs),
     {ok, Params} = amqp_uri:parse(binary_to_list(URI), vhost(XorQ)),
     XorQ1 = with_name(Upstream, vhost(Params), XorQ),
     SafeURI = remove_credentials(URI),
@@ -87,8 +87,9 @@ from_set(SetName, XorQ) ->
     from_set_contents(set_contents(SetName, vhost(XorQ)), XorQ).
 
 set_contents(<<"all">>, VHost) ->
-    Upstreams = rabbit_runtime_parameters:list(
+    Upstreams0 = rabbit_runtime_parameters:list(
                     VHost, <<"federation-upstream">>),
+    Upstreams  = [rabbit_data_coercion:to_list(U) || U <- Upstreams0],
     [[{<<"upstream">>, pget(name, U)}] || U <- Upstreams];
 
 set_contents(SetName, VHost) ->
@@ -102,7 +103,8 @@ from_set_contents(Set, XorQ) ->
     Results = [from_set_element(P, XorQ) || P <- Set],
     [R || R <- Results, R =/= not_found].
 
-from_set_element(UpstreamSetElem, XorQ) ->
+from_set_element(UpstreamSetElem0, XorQ) ->
+    UpstreamSetElem = rabbit_data_coercion:to_proplist(UpstreamSetElem0),
     Name = bget(upstream, UpstreamSetElem, []),
     case rabbit_runtime_parameters:value(
            vhost(XorQ), <<"federation-upstream">>, Name) of
@@ -138,9 +140,12 @@ from_upstream_or_set(US, Name, U, XorQ) ->
 bget(K, L1, L2) -> bget(K, L1, L2, undefined).
 
 bget(K0, L1, L2, D) ->
-    K = a2b(K0),
-    case pget(K, L1, undefined) of
-        undefined -> pget(K, L2, D);
+    K   = a2b(K0),
+    %% coerce maps to proplists
+    PL1 = rabbit_data_coercion:to_list(L1),
+    PL2 = rabbit_data_coercion:to_list(L2),
+    case pget(K, PL1, undefined) of
+        undefined -> pget(K, PL2, D);
         Result    -> Result
     end.
 

@@ -11,13 +11,20 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_misc).
+
+-ignore_xref([{maps, get, 2}]).
+
 -include("rabbit.hrl").
 -include("rabbit_framing.hrl").
 -include("rabbit_misc.hrl").
+
+-ifdef(TEST).
+-export([decompose_pid/1, compose_pid/4]).
+-endif.
 
 -export([method_record_type/1, polite_pause/0, polite_pause/1]).
 -export([die/1, frame_error/2, amqp_error/4, quit/1,
@@ -33,7 +40,7 @@
 -export([confirm_to_sender/2]).
 -export([throw_on_error/2, with_exit_handler/2, is_abnormal_exit/1,
          filter_exit_map/2]).
--export([with_user/2, with_user_and_vhost/3]).
+-export([with_user/2]).
 -export([execute_mnesia_transaction/1]).
 -export([execute_mnesia_transaction/2]).
 -export([execute_mnesia_tx_with_tail/1]).
@@ -50,21 +57,20 @@
          pid_change_node/2, node_to_fake_pid/1]).
 -export([version_compare/2, version_compare/3]).
 -export([version_minor_equivalent/2]).
--export([dict_cons/3, orddict_cons/3, gb_trees_cons/3]).
+-export([dict_cons/3, orddict_cons/3, maps_cons/3, gb_trees_cons/3]).
 -export([gb_trees_fold/3, gb_trees_foreach/2]).
 -export([all_module_attributes/1, build_acyclic_graph/3]).
 -export([const/1]).
 -export([ntoa/1, ntoab/1]).
 -export([is_process_alive/1]).
--export([pget/2, pget/3, pget_or_die/2, pmerge/3, pset/3, plmerge/2]).
+-export([pget/2, pget/3, pupdate/3, pget_or_die/2, pmerge/3, pset/3, plmerge/2]).
 -export([format_message_queue/2]).
 -export([append_rpc_all_nodes/4]).
 -export([os_cmd/1]).
 -export([is_os_process_alive/1]).
 -export([gb_sets_difference/2]).
--export([version/0, otp_release/0, which_applications/0]).
+-export([version/0, otp_release/0, platform_and_version/0, otp_system_version/0, which_applications/0]).
 -export([sequence_error/1]).
--export([json_encode/1, json_decode/1, json_to_term/1, term_to_json/1]).
 -export([check_expiry/1]).
 -export([base64url/1]).
 -export([interval_operation/5]).
@@ -75,9 +81,10 @@
 -export([get_env/3]).
 -export([get_channel_operation_timeout/0]).
 -export([random/1]).
--export([rpc_call/4, rpc_call/5, rpc_call/7]).
+-export([rpc_call/4, rpc_call/5]).
 -export([report_default_thread_pool_size/0]).
 -export([get_gc_info/1]).
+-export([group_proplists_by/2]).
 
 %% Horrible macro to use in guards
 -define(IS_BENIGN_EXIT(R),
@@ -169,14 +176,12 @@
 -spec is_abnormal_exit(any()) -> boolean().
 -spec filter_exit_map(fun ((A) -> B), [A]) -> [B].
 -spec with_user(rabbit_types:username(), thunk(A)) -> A.
--spec with_user_and_vhost
-        (rabbit_types:username(), rabbit_types:vhost(), thunk(A)) -> A.
 -spec execute_mnesia_transaction(thunk(A)) -> A.
 -spec execute_mnesia_transaction(thunk(A), fun ((A, boolean()) -> B)) -> B.
 -spec execute_mnesia_tx_with_tail
         (thunk(fun ((boolean()) -> B))) -> B | (fun ((boolean()) -> B)).
 -spec ensure_ok(ok_or_error(), atom()) -> 'ok'.
--spec tcp_name(atom(), inet:ip_address(), rabbit_networking:ip_port()) ->
+-spec tcp_name(atom(), inet:ip_address(), rabbit_net:ip_port()) ->
           atom().
 -spec format_inet_error(atom()) -> string().
 -spec upmap(fun ((A) -> B), [A]) -> [B].
@@ -192,7 +197,7 @@
 -spec format_stderr(string(), [any()]) -> 'ok'.
 -spec unfold (fun ((A) -> ({'true', B, A} | 'false')), A) -> {[B], A}.
 -spec ceil(number()) -> integer().
--spec queue_fold(fun ((any(), B) -> B), B, ?QUEUE_TYPE()) -> B.
+-spec queue_fold(fun ((any(), B) -> B), B, queue:queue()) -> B.
 -spec sort_field_table(rabbit_framing:amqp_table()) ->
           rabbit_framing:amqp_table().
 -spec pid_to_string(pid()) -> string().
@@ -203,7 +208,7 @@
 -spec version_compare
         (string(), string(), ('lt' | 'lte' | 'eq' | 'gte' | 'gt')) -> boolean().
 -spec version_minor_equivalent(string(), string()) -> boolean().
--spec dict_cons(any(), any(), ?DICT_TYPE()) -> ?DICT_TYPE().
+-spec dict_cons(any(), any(), dict:dict()) -> dict:dict().
 -spec orddict_cons(any(), any(), orddict:orddict()) -> orddict:orddict().
 -spec gb_trees_cons(any(), any(), gb_trees:tree()) -> gb_trees:tree().
 -spec gb_trees_fold(fun ((any(), any(), A) -> A), A, gb_trees:tree()) -> A.
@@ -223,9 +228,7 @@
 -spec ntoa(inet:ip_address()) -> string().
 -spec ntoab(inet:ip_address()) -> string().
 -spec is_process_alive(pid()) -> boolean().
--spec pget(term(), [term()]) -> term().
--spec pget(term(), [term()], term()) -> term().
--spec pget_or_die(term(), [term()]) -> term() | no_return().
+
 -spec pmerge(term(), term(), [term()]) -> [term()].
 -spec plmerge([term()], [term()]) -> [term()].
 -spec pset(term(), term(), [term()]) -> [term()].
@@ -233,16 +236,14 @@
 -spec append_rpc_all_nodes([node()], atom(), atom(), [any()]) -> [any()].
 -spec os_cmd(string()) -> string().
 -spec is_os_process_alive(non_neg_integer()) -> boolean().
--spec gb_sets_difference(?GB_SET_TYPE(), ?GB_SET_TYPE()) -> ?GB_SET_TYPE().
+-spec gb_sets_difference(gb_sets:set(), gb_sets:set()) -> gb_sets:set().
 -spec version() -> string().
 -spec otp_release() -> string().
+-spec otp_system_version() -> string().
+-spec platform_and_version() -> string().
 -spec which_applications() -> [{atom(), string(), string()}].
 -spec sequence_error([({'error', any()} | any())]) ->
           {'error', any()} | any().
--spec json_encode(any()) -> {'ok', string()} | {'error', any()}.
--spec json_decode(string()) -> {'ok', any()} | 'error'.
--spec json_to_term(any()) -> any().
--spec term_to_json(any()) -> any().
 -spec check_expiry(integer()) -> rabbit_types:ok_or_error(any()).
 -spec base64url(binary()) -> string().
 -spec interval_operation
@@ -263,11 +264,12 @@
 -spec get_channel_operation_timeout() -> non_neg_integer().
 -spec random(non_neg_integer()) -> non_neg_integer().
 -spec rpc_call(node(), atom(), atom(), [any()]) -> any().
--spec rpc_call(node(), atom(), atom(), [any()], number()) -> any().
--spec rpc_call
-        (node(), atom(), atom(), [any()], reference(), pid(), number()) -> any().
--spec report_default_thread_pool_size() -> 'ok'.
--spec get_gc_info(pid()) -> integer().
+-spec rpc_call(node(), atom(), atom(), [any()], infinity | non_neg_integer()) -> any().
+-spec report_default_thread_pool_size() -> no_return().
+-spec get_gc_info(pid()) -> [any()].
+-spec group_proplists_by(fun((proplists:proplist()) -> any()),
+                         list(proplists:proplist())) -> list(list(proplists:proplist())).
+
 
 %%----------------------------------------------------------------------------
 
@@ -311,6 +313,10 @@ absent(#amqqueue{name = QueueName, pid = QPid, durable = true}, nodedown) ->
     protocol_error(not_found,
                    "home node '~s' of durable ~s is down or inaccessible",
                    [node(QPid), rs(QueueName)]);
+
+absent(#amqqueue{name = QueueName}, stopped) ->
+    protocol_error(not_found,
+                   "~s process is stopped by supervisor", [rs(QueueName)]);
 
 absent(#amqqueue{name = QueueName}, crashed) ->
     protocol_error(not_found,
@@ -415,6 +421,8 @@ r_arg(VHostPath, Kind, Table, Key) ->
         {Type, _}          -> {error, {invalid_type, Type}}
     end.
 
+rs(#resource{virtual_host = VHostPath, kind = topic, name = Name}) ->
+    format("'~s' in vhost '~s'", [Name, VHostPath]);
 rs(#resource{virtual_host = VHostPath, kind = Kind, name = Name}) ->
     format("~s '~s' in vhost '~s'", [Kind, Name, VHostPath]).
 
@@ -432,7 +440,7 @@ enable_cover(Dirs) ->
                 end, ok, Dirs).
 
 start_cover(NodesS) ->
-    {ok, _} = cover:start([rabbit_nodes:make(N) || N <- NodesS]),
+    {ok, _} = cover:start([rabbit_nodes_common:make(N) || N <- NodesS]),
     ok.
 
 report_cover() -> report_cover(["."]).
@@ -522,9 +530,6 @@ with_user(Username, Thunk) ->
                     Thunk()
             end
     end.
-
-with_user_and_vhost(Username, VHostPath, Thunk) ->
-    with_user(Username, rabbit_vhost:with(VHostPath, Thunk)).
 
 execute_mnesia_transaction(TxFun) ->
     %% Making this a sync_transaction allows us to use dirty_read
@@ -689,6 +694,8 @@ queue_fold(Fun, Init, Q) ->
     end.
 
 %% Sorts a list of AMQP table fields as per the AMQP spec
+sort_field_table([]) ->
+    [];
 sort_field_table(Arguments) ->
     lists:keysort(1, Arguments).
 
@@ -728,20 +735,22 @@ node_to_fake_pid(Node) ->
 decompose_pid(Pid) when is_pid(Pid) ->
     %% see http://erlang.org/doc/apps/erts/erl_ext_dist.html (8.10 and
     %% 8.7)
-    <<131,103,100,NodeLen:16,NodeBin:NodeLen/binary,Id:32,Ser:32,Cre:8>>
-        = term_to_binary(Pid),
-    Node = binary_to_term(<<131,100,NodeLen:16,NodeBin:NodeLen/binary>>),
+    Node = node(Pid),
+    BinPid = term_to_binary(Pid),
+    ByteSize = byte_size(BinPid),
+    NodeByteSize = (ByteSize - 11),
+    <<131, 103, _NodePrefix:NodeByteSize/binary, Id:32, Ser:32, Cre:8>> = BinPid,
     {Node, Cre, Id, Ser}.
 
 compose_pid(Node, Cre, Id, Ser) ->
     <<131,NodeEnc/binary>> = term_to_binary(Node),
     binary_to_term(<<131,103,NodeEnc/binary,Id:32,Ser:32,Cre:8>>).
 
-version_compare(A, B, eq)  -> ec_semver:eql(A, B);
-version_compare(A, B, lt)  -> ec_semver:lt(A, B);
-version_compare(A, B, lte) -> ec_semver:lte(A, B);
-version_compare(A, B, gt)  -> ec_semver:gt(A, B);
-version_compare(A, B, gte) -> ec_semver:gte(A, B).
+version_compare(A, B, eq)  -> rabbit_semver:eql(A, B);
+version_compare(A, B, lt)  -> rabbit_semver:lt(A, B);
+version_compare(A, B, lte) -> rabbit_semver:lte(A, B);
+version_compare(A, B, gt)  -> rabbit_semver:gt(A, B);
+version_compare(A, B, gte) -> rabbit_semver:gte(A, B).
 
 version_compare(A, B) ->
     case version_compare(A, B, lt) of
@@ -759,8 +768,8 @@ version_compare(A, B) ->
 %% e.g. 3.6.6 is not compatible with 3.6.5
 %% This special case can be removed once 3.6.x reaches EOL
 version_minor_equivalent(A, B) ->
-    {{MajA, MinA, PatchA, _}, _} = ec_semver:normalize(ec_semver:parse(A)),
-    {{MajB, MinB, PatchB, _}, _} = ec_semver:normalize(ec_semver:parse(B)),
+    {{MajA, MinA, PatchA, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(A)),
+    {{MajB, MinB, PatchB, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(B)),
 
     case {MajA, MinA, MajB, MinB} of
         {3, 6, 3, 6} -> if
@@ -776,6 +785,9 @@ dict_cons(Key, Value, Dict) ->
 
 orddict_cons(Key, Value, Dict) ->
     orddict:update(Key, fun (List) -> [Value | List] end, [Value], Dict).
+
+maps_cons(Key, Value, Map) ->
+    maps:update_with(Key, fun (List) -> [Value | List] end, [Value], Map).
 
 gb_trees_cons(Key, Value, Tree) ->
     case gb_trees:lookup(Key, Tree) of
@@ -795,15 +807,13 @@ gb_trees_foreach(Fun, Tree) ->
     gb_trees_fold(fun (Key, Val, Acc) -> Fun(Key, Val), Acc end, ok, Tree).
 
 module_attributes(Module) ->
-    case catch Module:module_info(attributes) of
-        {'EXIT', {undef, [{Module, module_info, _} | _]}} ->
+    try
+        Module:module_info(attributes)
+    catch
+        _:undef ->
             io:format("WARNING: module ~p not found, so not scanned for boot steps.~n",
                       [Module]),
-            [];
-        {'EXIT', Reason} ->
-            exit(Reason);
-        V ->
-            V
+            []
     end.
 
 all_module_attributes(Name) ->
@@ -825,11 +835,11 @@ all_module_attributes(Name) ->
 build_acyclic_graph(VertexFun, EdgeFun, Graph) ->
     G = digraph:new([acyclic]),
     try
-        [case digraph:vertex(G, Vertex) of
-             false -> digraph:add_vertex(G, Vertex, Label);
-             _     -> ok = throw({graph_error, {vertex, duplicate, Vertex}})
-         end || GraphElem       <- Graph,
-                {Vertex, Label} <- VertexFun(GraphElem)],
+        _ = [case digraph:vertex(G, Vertex) of
+                 false -> digraph:add_vertex(G, Vertex, Label);
+                 _     -> ok = throw({graph_error, {vertex, duplicate, Vertex}})
+             end || GraphElem       <- Graph,
+                    {Vertex, Label} <- VertexFun(GraphElem)],
         [case digraph:add_edge(G, From, To) of
              {error, E} -> throw({graph_error, {edge, E, From, To}});
              _          -> ok
@@ -864,10 +874,21 @@ ntoab(IP) ->
 %% See also rabbit_mnesia:is_process_alive/1 which also requires the
 %% process be in the same running cluster as us (i.e. not partitioned
 %% or some random node).
+is_process_alive(Pid) when node(Pid) =:= node() ->
+    erlang:is_process_alive(Pid);
 is_process_alive(Pid) ->
     Node = node(Pid),
-    lists:member(Node, [node() | nodes()]) andalso
+    lists:member(Node, [node() | nodes(connected)]) andalso
         rpc:call(Node, erlang, is_process_alive, [Pid]) =:= true.
+
+-spec pget(term(), list() | map()) -> term().
+pget(K, M) when is_map(M) ->
+    case maps:find(K, M) of
+        {ok, V} ->
+            V;
+        _ ->
+            undefined
+    end;
 
 pget(K, P) ->
     case lists:keyfind(K, 1, P) of
@@ -876,6 +897,16 @@ pget(K, P) ->
         _ ->
             undefined
     end.
+
+-spec pget(term(), list() | map(), term()) -> term().
+pget(K, M, D) when is_map(M) ->
+    case maps:find(K, M) of
+        {ok, V} ->
+            V;
+        _ ->
+            D
+    end;
+
 pget(K, P, D) ->
     case lists:keyfind(K, 1, P) of
         {K, V} ->
@@ -884,13 +915,28 @@ pget(K, P, D) ->
             D
     end.
 
+-spec pget_or_die(term(), list() | map()) -> term() | no_return().
+pget_or_die(K, M) when is_map(M) ->
+    case maps:find(K, M) of
+        error   -> exit({error, key_missing, K});
+        {ok, V} -> V
+    end;
+
 pget_or_die(K, P) ->
     case proplists:get_value(K, P) of
         undefined -> exit({error, key_missing, K});
         V         -> V
     end.
 
-%% property merge 
+pupdate(K, UpdateFun, P) ->
+    case lists:keyfind(K, 1, P) of
+        {K, V} ->
+            pset(K, UpdateFun(V), P);
+        _ ->
+            undefined
+    end.
+
+%% property merge
 pmerge(Key, Val, List) ->
       case proplists:is_defined(Key, List) of
               true -> List;
@@ -899,11 +945,21 @@ pmerge(Key, Val, List) ->
 
 %% proplists merge
 plmerge(P1, P2) ->
-    dict:to_list(dict:merge(fun(_, V, _) ->
-                                V 
-                            end, 
-                            dict:from_list(P1), 
-                            dict:from_list(P2))).
+    %% Value from P1 suppresses value from P2
+    maps:to_list(maps:merge(maps:from_list(P2),
+                            maps:from_list(P1))).
+
+%% groups a list of proplists by a key function
+group_proplists_by(KeyFun, ListOfPropLists) ->
+    Res = lists:foldl(fun(P, Agg) ->
+                        Key = KeyFun(P),
+                        Val = case maps:find(Key, Agg) of
+                            {ok, O} -> [P|O];
+                            error   -> [P]
+                        end,
+                        maps:put(Key, Val, Agg)
+                      end, #{}, ListOfPropLists),
+    [ X || {_, X} <- maps:to_list(Res)].
 
 pset(Key, Value, List) -> [{Key, Value} | proplists:delete(Key, List)].
 
@@ -913,12 +969,13 @@ format_message_queue(_Opt, MQ) ->
      case Len > 100 of
          false -> priority_queue:to_list(MQ);
          true  -> {summary,
-                   orddict:to_list(
+                   maps:to_list(
                      lists:foldl(
                        fun ({P, V}, Counts) ->
-                               orddict:update_counter(
-                                 {P, format_message_queue_entry(V)}, 1, Counts)
-                       end, orddict:new(), priority_queue:to_list(MQ)))}
+                               maps:update_with(
+                                 {P, format_message_queue_entry(V)},
+                                 fun(Old) -> Old + 1 end, 1, Counts)
+                       end, maps:new(), priority_queue:to_list(MQ)))}
      end}.
 
 format_message_queue_entry(V) when is_atom(V) ->
@@ -955,7 +1012,8 @@ is_os_process_alive(Pid) ->
                             run_ps(Pid) =:= 0
                     end},
              {win32, fun () ->
-                             Cmd = "tasklist /nh /fi \"pid eq " ++ Pid ++ "\" ",
+                             Cmd = "tasklist /nh /fi \"pid eq " ++
+                                 rabbit_data_coercion:to_list(Pid) ++ "\" ",
                              Res = os_cmd(Cmd ++ "2>&1"),
                              case re:run(Res, "erl\\.exe", [{capture, none}]) of
                                  match -> true;
@@ -971,7 +1029,8 @@ with_os(Handlers) ->
     end.
 
 run_ps(Pid) ->
-    Port = erlang:open_port({spawn, "ps -p " ++ Pid},
+    Cmd  = "ps -p " ++ rabbit_data_coercion:to_list(Pid),
+    Port = erlang:open_port({spawn, Cmd},
                             [exit_status, {line, 16384},
                              use_stdio, stderr_to_stdout]),
     exit_loop(Port).
@@ -1003,6 +1062,12 @@ otp_release() ->
             erlang:system_info(otp_release)
     end.
 
+platform_and_version() ->
+    string:join(["Erlang/OTP", otp_release()], " ").
+
+otp_system_version() ->
+    string:strip(erlang:system_info(system_version), both, $\n).
+
 %% application:which_applications(infinity) is dangerous, since it can
 %% cause deadlocks on shutdown. So we have to use a timeout variant,
 %% but w/o creating spurious timeout errors. The timeout value is twice
@@ -1017,42 +1082,6 @@ which_applications() ->
 sequence_error([T])                      -> T;
 sequence_error([{error, _} = Error | _]) -> Error;
 sequence_error([_ | Rest])               -> sequence_error(Rest).
-
-json_encode(Term) ->
-    try
-        {ok, mochijson2:encode(Term)}
-    catch
-        exit:{json_encode, E} ->
-            {error, E}
-    end.
-
-json_decode(Term) ->
-    try
-        {ok, mochijson2:decode(Term)}
-    catch
-        %% Sadly `mochijson2:decode/1' does not offer a nice way to catch
-        %% decoding errors...
-        error:_ -> error
-    end.
-
-json_to_term({struct, L}) ->
-    [{K, json_to_term(V)} || {K, V} <- L];
-json_to_term(L) when is_list(L) ->
-    [json_to_term(I) || I <- L];
-json_to_term(V) when is_binary(V) orelse is_number(V) orelse V =:= null orelse
-                     V =:= true orelse V =:= false ->
-    V.
-
-%% You can use the empty_struct value to represent empty JSON objects.
-term_to_json(empty_struct) ->
-    {struct, []};
-term_to_json([{_, _}|_] = L) ->
-    {struct, [{K, term_to_json(V)} || {K, V} <- L]};
-term_to_json(L) when is_list(L) ->
-    [term_to_json(I) || I <- L];
-term_to_json(V) when is_binary(V) orelse is_number(V) orelse V =:= null orelse
-                     V =:= true orelse V =:= false ->
-    V.
 
 check_expiry(N) when N < 0                 -> {error, {value_negative, N}};
 check_expiry(_N)                           -> ok.
@@ -1104,7 +1133,7 @@ send_after(Millis, Pid, Msg) when Millis > ?MAX_ERLANG_SEND_AFTER ->
 send_after(Millis, Pid, Msg) ->
     {erlang, erlang:send_after(Millis, Pid, Msg)}.
 
-cancel_timer({erlang, Ref}) -> erlang:cancel_timer(Ref),
+cancel_timer({erlang, Ref}) -> _ = erlang:cancel_timer(Ref),
                                ok;
 cancel_timer({timer, Ref})  -> {ok, cancel} = timer:cancel(Ref),
                                ok.
@@ -1154,7 +1183,7 @@ moving_average(Time,  HalfLife,  Next, Current) ->
     Next * (1 - Weight) + Current * Weight.
 
 random(N) ->
-    rand_compat:uniform(N).
+    rand:uniform(N).
 
 %% Moved from rabbit/src/rabbit_cli.erl
 %% If the server we are talking to has non-standard net_ticktime, and
@@ -1167,12 +1196,15 @@ rpc_call(Node, Mod, Fun, Args) ->
 rpc_call(Node, Mod, Fun, Args, Timeout) ->
     case rpc:call(Node, net_kernel, get_net_ticktime, [], Timeout) of
         {badrpc, _} = E -> E;
-        Time            -> net_kernel:set_net_ticktime(Time, 0),
-                           rpc:call(Node, Mod, Fun, Args, Timeout)
+        ignored ->
+            rpc:call(Node, Mod, Fun, Args, Timeout);
+        {ongoing_change_to, NewValue} ->
+            _ = net_kernel:set_net_ticktime(NewValue, 0),
+            rpc:call(Node, Mod, Fun, Args, Timeout);
+        Time            ->
+            _ = net_kernel:set_net_ticktime(Time, 0),
+            rpc:call(Node, Mod, Fun, Args, Timeout)
     end.
-
-rpc_call(Node, Mod, Fun, Args, Ref, Pid, Timeout) ->
-    rpc_call(Node, Mod, Fun, Args++[Ref, Pid], Timeout).
 
 guess_number_of_cpu_cores() ->
     case erlang:system_info(logical_processors_available) of
@@ -1189,8 +1221,7 @@ guess_default_thread_pool_size() ->
 
 report_default_thread_pool_size() ->
     io:format("~b", [guess_default_thread_pool_size()]),
-    erlang:halt(0),
-    ok.
+    erlang:halt(0).
 
 get_gc_info(Pid) ->
     {garbage_collection, GC} = erlang:process_info(Pid, garbage_collection),

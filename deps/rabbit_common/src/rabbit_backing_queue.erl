@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_backing_queue).
@@ -23,7 +23,8 @@
                     message_bytes, message_bytes_ready,
                     message_bytes_unacknowledged, message_bytes_ram,
                     message_bytes_persistent, head_message_timestamp,
-                    disk_reads, disk_writes, backing_queue_status]).
+                    disk_reads, disk_writes, backing_queue_status,
+                    messages_paged_out, message_bytes_paged_out]).
 
 %% We can't specify a per-queue ack/state with callback signatures
 -type ack()   :: any().
@@ -53,19 +54,19 @@
 
 -spec info_keys() -> rabbit_types:info_keys().
 
-%% Called on startup with a list of durable queue names. The queues
-%% aren't being started at this point, but this call allows the
+%% Called on startup with a vhost and a list of durable queue names on this vhost.
+%% The queues aren't being started at this point, but this call allows the
 %% backing queue to perform any checking necessary for the consistency
 %% of those queues, or initialise any other shared resources.
 %%
 %% The list of queue recovery terms returned as {ok, Terms} must be given
 %% in the same order as the list of queue names supplied.
--callback start([rabbit_amqqueue:name()]) -> rabbit_types:ok(recovery_terms()).
+-callback start(rabbit_types:vhost(), [rabbit_amqqueue:name()]) -> rabbit_types:ok(recovery_terms()).
 
-%% Called to tear down any state/resources. NB: Implementations should
+%% Called to tear down any state/resources for vhost. NB: Implementations should
 %% not depend on this function being called on shutdown and instead
 %% should hook into the rabbit supervision hierarchy.
--callback stop() -> 'ok'.
+-callback stop(rabbit_types:vhost()) -> 'ok'.
 
 %% Initialise the backing queue and its state.
 %%
@@ -263,5 +264,10 @@
 -callback zip_msgs_and_acks(delivered_publish(),
                             [ack()], Acc, state())
                            -> Acc.
+
+%% Called when rabbit_amqqueue_process receives a message via
+%% handle_info and it should be processed by the backing
+%% queue
+-callback handle_info(term(), state()) -> state().
 
 info_keys() -> ?INFO_KEYS.

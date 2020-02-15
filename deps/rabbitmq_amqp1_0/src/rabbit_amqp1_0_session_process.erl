@@ -11,10 +11,14 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_amqp1_0_session_process).
+
+%% Transitional step until we can require Erlang/OTP 21 and
+%% use the now recommended try/catch syntax for obtaining the stack trace.
+-compile(nowarn_deprecated_function).
 
 -behaviour(gen_server2).
 
@@ -22,6 +26,7 @@
          handle_call/3, handle_cast/2, handle_info/2]).
 
 -export([start_link/1]).
+-export([info/1]).
 
 -record(state, {backing_connection, backing_channel, frame_max,
                 reader_pid, writer_pid, buffer, session}).
@@ -37,6 +42,8 @@
 start_link(Args) ->
     gen_server2:start_link(?MODULE, Args, []).
 
+info(Pid) ->
+    gen_server2:call(Pid, info, infinity).
 %% ---------
 
 init({Channel, ReaderPid, WriterPid, #user{username = Username}, VHost,
@@ -63,6 +70,10 @@ terminate(_Reason, _State = #state{backing_connection = Conn}) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
+handle_call(info, _From, #state{reader_pid = ReaderPid,
+                                backing_connection = Conn} = State) ->
+    Info = [{reader, ReaderPid}, {connection, Conn}],
+    {reply, Info, State};
 handle_call(Msg, _From, State) ->
     {reply, {error, not_understood, Msg}, State}.
 
@@ -300,7 +311,7 @@ handle_control(Flow = #'v1_0.flow'{},
 handle_control(Frame, _State) ->
     protocol_error(?V_1_0_AMQP_ERROR_INTERNAL_ERROR,
                    "Unexpected frame ~p",
-                   [rabbit_amqp1_0_framing:pprint(Frame)]).
+                   [amqp10_framing:pprint(Frame)]).
 
 run_buffer(State = #state{ writer_pid = WriterPid,
                            session = Session,

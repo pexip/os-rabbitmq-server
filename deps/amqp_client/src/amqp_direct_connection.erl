@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% @private
@@ -43,7 +43,7 @@
 -define(CREATION_EVENT_KEYS, [pid, protocol, host, port, name,
                               peer_host, peer_port,
                               user, vhost, client_properties, type,
-                              connected_at]).
+                              connected_at, node, user_who_performed_action]).
 
 %%---------------------------------------------------------------------------
 
@@ -78,6 +78,8 @@ handle_message({'DOWN', _MRef, process, _ConnSup, shutdown}, State) ->
     {stop, {shutdown, node_down}, State};
 handle_message({'DOWN', _MRef, process, _ConnSup, Reason}, State) ->
     {stop, {remote_node_down, Reason}, State};
+handle_message({'EXIT', Pid, Reason}, State) ->
+    {stop, rabbit_misc:format("stopping because dependent process ~p died: ~p", [Pid, Reason]), State};
 handle_message(Msg, State) ->
     {stop, {unexpected_msg, Msg}, State}.
 
@@ -86,22 +88,36 @@ closing(_ChannelCloseType, Reason, State) ->
 
 channels_terminated(State = #state{closing_reason = Reason,
                                    collector = Collector}) ->
-    rabbit_queue_collector:delete_all(Collector),
+    rabbit_queue_collector_common:delete_all(Collector),
     {stop, {shutdown, Reason}, State}.
 
-terminate(_Reason, #state{node = Node}) ->
-    rpc:call(Node, rabbit_direct, disconnect, [self(), [{pid, self()}]]),
+terminate(_Reason, #state{node = Node} = State) ->
+    rpc:call(Node, rabbit_direct, disconnect,
+                   [self(), [{pid, self()},
+                             {node, Node},
+                             {name, i(name, State)}]]),
     ok.
 
 i(type, _State) -> direct;
 i(pid,  _State) -> self();
-%% AMQP Params
+
+%% Mandatory connection parameters
+
+i(node,              #state{node = N})   -> N;
 i(user,              #state{params = P}) -> P#amqp_params_direct.username;
+i(user_who_performed_action, St) -> i(user, St);
 i(vhost,             #state{params = P}) -> P#amqp_params_direct.virtual_host;
 i(client_properties, #state{params = P}) ->
     P#amqp_params_direct.client_properties;
 i(connected_at,      #state{connected_at = T}) -> T;
+
+%%
 %% Optional adapter info
+%%
+
+%% adapter_info can be undefined e.g. when we were
+%% not granted access to a vhost
+i(_Key,         #state{adapter_info = undefined}) -> unknown;
 i(protocol,     #state{adapter_info = I}) -> I#amqp_adapter_info.protocol;
 i(host,         #state{adapter_info = I}) -> I#amqp_adapter_info.host;
 i(port,         #state{adapter_info = I}) -> I#amqp_adapter_info.port;
@@ -109,7 +125,6 @@ i(peer_host,    #state{adapter_info = I}) -> I#amqp_adapter_info.peer_host;
 i(peer_port,    #state{adapter_info = I}) -> I#amqp_adapter_info.peer_port;
 i(name,         #state{adapter_info = I}) -> I#amqp_adapter_info.name;
 i(internal_user, #state{user = U}) -> U;
-
 i(Item, _State) -> throw({bad_argument, Item}).
 
 info_keys() ->
@@ -132,7 +147,7 @@ connect(Params = #amqp_params_direct{username     = Username,
                          params       = Params,
                          adapter_info = ensure_adapter_info(Info),
                          connected_at =
-                           time_compat:os_system_time(milli_seconds)},
+                           os:system_time(milli_seconds)},
     case rpc:call(Node, rabbit_direct, connect,
                   [{Username, Password}, VHost, ?PROTOCOL, self(),
                    connection_info(State1)]) of
@@ -186,8 +201,9 @@ socket_adapter_info(Sock, Protocol) ->
                        additional_info = maybe_ssl_info(Sock)}.
 
 maybe_ssl_info(Sock) ->
-    case rabbit_net:is_ssl(Sock) of
-        true  -> [{ssl, true}] ++ ssl_info(Sock) ++ ssl_cert_info(Sock);
+    RealSocket = rabbit_net:unwrap_socket(Sock),
+    case rabbit_net:is_ssl(RealSocket) of
+        true  -> [{ssl, true}] ++ ssl_info(RealSocket) ++ ssl_cert_info(RealSocket);
         false -> [{ssl, false}]
     end.
 
@@ -212,11 +228,11 @@ ssl_cert_info(Sock) ->
     case rabbit_net:peercert(Sock) of
         {ok, Cert} ->
             [{peer_cert_issuer,   list_to_binary(
-                                    rabbit_ssl:peer_cert_issuer(Cert))},
+                                    rabbit_cert_info:issuer(Cert))},
              {peer_cert_subject,  list_to_binary(
-                                    rabbit_ssl:peer_cert_subject(Cert))},
+                                    rabbit_cert_info:subject(Cert))},
              {peer_cert_validity, list_to_binary(
-                                    rabbit_ssl:peer_cert_validity(Cert))}];
+                                    rabbit_cert_info:validity(Cert))}];
         _ ->
             []
     end.

@@ -11,15 +11,14 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_vm).
 
 -export([memory/0, binary/0, ets_tables_memory/1]).
 
--define(MAGIC_PLUGINS, ["mochiweb", "webmachine", "cowboy", "sockjs",
-                        "rfc4627_jsonrpc"]).
+-define(MAGIC_PLUGINS, ["cowboy", "ranch", "sockjs"]).
 
 %%----------------------------------------------------------------------------
 
@@ -31,7 +30,6 @@
 
 %%----------------------------------------------------------------------------
 
-%% Like erlang:memory(), but with awareness of rabbit-y things
 memory() ->
     All = interesting_sups(),
     {Sums, _Other} = sum_processes(
@@ -42,11 +40,18 @@ memory() ->
         [aggregate(Names, Sums, memory, fun (X) -> X end)
          || Names <- distinguished_interesting_sups()],
 
-    Mnesia       = mnesia_memory(),
-    MsgIndexETS  = ets_memory([msg_store_persistent, msg_store_transient]),
-    MgmtDbETS    = ets_memory([rabbit_mgmt_event_collector]),
-
-    [{total,     Total},
+    MnesiaETS           = mnesia_memory(),
+    MsgIndexETS         = ets_memory(msg_stores()),
+    MetricsETS          = ets_memory([rabbit_metrics]),
+    MetricsProc  = try
+                       [{_, M}] = process_info(whereis(rabbit_metrics), [memory]),
+                       M
+                   catch
+                       error:badarg ->
+                           0
+                   end,
+    MgmtDbETS           = ets_memory([rabbit_mgmt_storage]),
+    [{total,     ErlangTotal},
      {processes, Processes},
      {ets,       ETS},
      {atom,      Atom},
@@ -55,28 +60,55 @@ memory() ->
      {system,    System}] =
         erlang:memory([total, processes, ets, atom, binary, code, system]),
 
+    Strategy = vm_memory_monitor:get_memory_calculation_strategy(),
+    Allocated = recon_alloc:memory(allocated),
+    Rss = vm_memory_monitor:get_rss_memory(),
+
+    AllocatedUnused = max(Allocated - ErlangTotal, 0),
+    OSReserved = max(Rss - Allocated, 0),
+
     OtherProc = Processes
         - ConnsReader - ConnsWriter - ConnsChannel - ConnsOther
-        - Qs - QsSlave - MsgIndexProc - Plugins - MgmtDbProc,
+        - Qs - QsSlave - MsgIndexProc - Plugins - MgmtDbProc - MetricsProc,
 
-    [{total,              Total},
-     {connection_readers,  ConnsReader},
-     {connection_writers,  ConnsWriter},
-     {connection_channels, ConnsChannel},
-     {connection_other,    ConnsOther},
-     {queue_procs,         Qs},
-     {queue_slave_procs,   QsSlave},
-     {plugins,             Plugins},
-     {other_proc,          lists:max([0, OtherProc])}, %% [1]
-     {mnesia,              Mnesia},
-     {mgmt_db,             MgmtDbETS + MgmtDbProc},
-     {msg_index,           MsgIndexETS + MsgIndexProc},
-     {other_ets,           ETS - Mnesia - MsgIndexETS - MgmtDbETS},
-     {binary,              Bin},
-     {code,                Code},
-     {atom,                Atom},
-     {other_system,        System - ETS - Atom - Bin - Code}].
+    [
+     %% Connections
+     {connection_readers,   ConnsReader},
+     {connection_writers,   ConnsWriter},
+     {connection_channels,  ConnsChannel},
+     {connection_other,     ConnsOther},
 
+     %% Queues
+     {queue_procs,          Qs},
+     {queue_slave_procs,    QsSlave},
+
+     %% Processes
+     {plugins,              Plugins},
+     {other_proc,           lists:max([0, OtherProc])}, %% [1]
+
+     %% Metrics
+     {metrics,              MetricsETS + MetricsProc},
+     {mgmt_db,              MgmtDbETS + MgmtDbProc},
+
+     %% ETS
+     {mnesia,               MnesiaETS},
+     {other_ets,            ETS - MnesiaETS - MetricsETS - MgmtDbETS - MsgIndexETS},
+
+     %% Messages (mostly, some binaries are not messages)
+     {binary,               Bin},
+     {msg_index,            MsgIndexETS + MsgIndexProc},
+
+     %% System
+     {code,                 Code},
+     {atom,                 Atom},
+     {other_system,         System - ETS - Bin - Code - Atom},
+     {allocated_unused,     AllocatedUnused},
+     {reserved_unallocated, OSReserved},
+     {strategy,             Strategy},
+     {total,                [{erlang, ErlangTotal},
+                             {rss, Rss},
+                             {allocated, Allocated}]}
+    ].
 %% [1] - erlang:memory(processes) can be less than the sum of its
 %% parts. Rather than display something nonsensical, just silence any
 %% claims about negative memory. See
@@ -116,8 +148,8 @@ mnesia_memory() ->
         _   -> 0
     end.
 
-ets_memory(OwnerNames) ->
-    lists:sum([V || {_K, V} <- ets_tables_memory(OwnerNames)]).
+ets_memory(Owners) ->
+    lists:sum([V || {_K, V} <- ets_tables_memory(Owners)]).
 
 ets_tables_memory(all) ->
     [{ets:info(T, name), bytes(ets:info(T, memory))}
@@ -125,11 +157,14 @@ ets_tables_memory(all) ->
         is_atom(T)];
 ets_tables_memory(OwnerName) when is_atom(OwnerName) ->
     ets_tables_memory([OwnerName]);
-ets_tables_memory(OwnerNames) when is_list(OwnerNames) ->
-    Owners = [whereis(N) || N <- OwnerNames],
+ets_tables_memory(Owners) when is_list(Owners) ->
+    OwnerPids = lists:map(fun(O) when is_pid(O) -> O;
+                             (O) when is_atom(O) -> whereis(O)
+                          end,
+                          Owners),
     [{ets:info(T, name), bytes(ets:info(T, memory))}
      || T <- ets:all(),
-        lists:member(ets:info(T, owner), Owners)].
+        lists:member(ets:info(T, owner), OwnerPids)].
 
 bytes(Words) ->  try
                      Words * erlang:system_info(wordsize)
@@ -138,10 +173,37 @@ bytes(Words) ->  try
                  end.
 
 interesting_sups() ->
-    [[rabbit_amqqueue_sup_sup], conn_sups() | interesting_sups0()].
+    [queue_sups(), conn_sups() | interesting_sups0()].
+
+queue_sups() ->
+    all_vhosts_children(rabbit_amqqueue_sup_sup).
+
+msg_stores() ->
+    all_vhosts_children(msg_store_transient)
+    ++
+    all_vhosts_children(msg_store_persistent).
+
+all_vhosts_children(Name) ->
+    case whereis(rabbit_vhost_sup_sup) of
+        undefined -> [];
+        Pid when is_pid(Pid) ->
+            lists:filtermap(
+                fun({_, VHostSupWrapper, _, _}) ->
+                    case supervisor2:find_child(VHostSupWrapper,
+                                                rabbit_vhost_sup) of
+                        []         -> false;
+                        [VHostSup] ->
+                            case supervisor2:find_child(VHostSup, Name) of
+                                [QSup] -> {true, QSup};
+                                []     -> false
+                            end
+                    end
+                end,
+                supervisor:which_children(rabbit_vhost_sup_sup))
+    end.
 
 interesting_sups0() ->
-    MsgIndexProcs = [msg_store_transient, msg_store_persistent],
+    MsgIndexProcs = msg_stores(),
     MgmtDbProcs   = [rabbit_mgmt_sup_sup],
     PluginProcs   = plugin_sups(),
     [MsgIndexProcs, MgmtDbProcs, PluginProcs].
@@ -158,18 +220,19 @@ ranch_server_sups() ->
         error:badarg  -> []
     end.
 
-conn_sups(With) -> [{Sup, With} || Sup <- conn_sups()].
+with(Sups, With) -> [{Sup, With} || Sup <- Sups].
 
-distinguishers() -> [{rabbit_amqqueue_sup_sup, fun queue_type/1} |
-                     conn_sups(fun conn_type/1)].
+distinguishers() -> with(queue_sups(), fun queue_type/1) ++
+                    with(conn_sups(), fun conn_type/1).
 
 distinguished_interesting_sups() ->
-    [[{rabbit_amqqueue_sup_sup, master}],
-     [{rabbit_amqqueue_sup_sup, slave}],
-     conn_sups(reader),
-     conn_sups(writer),
-     conn_sups(channel),
-     conn_sups(other)]
+    [
+     with(queue_sups(), master),
+     with(queue_sups(), slave),
+     with(conn_sups(), reader),
+     with(conn_sups(), writer),
+     with(conn_sups(), channel),
+     with(conn_sups(), other)]
         ++ interesting_sups0().
 
 plugin_sups() ->

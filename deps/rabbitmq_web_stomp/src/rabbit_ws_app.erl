@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_ws_app).
@@ -23,7 +23,7 @@
 
 -spec start(_, _) -> {ok, pid()}.
 start(_Type, _StartArgs) ->
-    ok = rabbit_ws_sockjs:init(),
+    ok = rabbit_ws_listener:init(),
     rabbit_ws_sup:start_link().
 
 -spec stop(_) -> ok.

@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_web_dispatch_util).
@@ -19,6 +19,7 @@
 -export([parse_auth_header/1]).
 -export([relativise/2, unrelativise/2]).
 
+%% @todo remove
 parse_auth_header(Header) ->
     case Header of
         "Basic " ++ Base64 ->

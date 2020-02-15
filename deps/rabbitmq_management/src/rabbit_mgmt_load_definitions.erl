@@ -11,10 +11,12 @@
 %%   The Original Code is RabbitMQ Management Plugin.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_load_definitions).
+
+-include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([maybe_load_definitions/0]).
 
@@ -37,7 +39,7 @@ maybe_load_definitions() ->
         none -> ok;
         _    -> case file:read_file(File) of
                     {ok, Body} -> rabbit_log:info(
-                                    "Applying definitions from: ~s~n", [File]),
+                                    "Applying definitions from: ~s", [File]),
                                   load_definitions(Body);
                     {error, E} -> {error, {could_not_read_defs, {File, E}}}
                 end
@@ -45,4 +47,4 @@ maybe_load_definitions() ->
 
 load_definitions(Body) ->
     rabbit_mgmt_wm_definitions:apply_defs(
-      Body, fun () -> ok end, fun (E) -> {error, E} end).
+      Body, ?INTERNAL_USER, fun () -> ok end, fun (E) -> {error, E} end).

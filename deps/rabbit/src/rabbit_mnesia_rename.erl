@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mnesia_rename).
@@ -70,13 +70,13 @@ rename(Node, NodeMapList) ->
         ok = rabbit_mnesia:copy_db(mnesia_copy_dir()),
 
         %% And make the actual changes
-        rabbit_control_main:become(FromNode),
+        become(FromNode),
         take_backup(before_backup_name()),
         convert_backup(NodeMap, before_backup_name(), after_backup_name()),
         ok = rabbit_file:write_term_file(rename_config_name(),
                                          [{FromNode, ToNode}]),
         convert_config_files(NodeMap),
-        rabbit_control_main:become(ToNode),
+        become(ToNode),
         restore_backup(after_backup_name()),
         ok
     after
@@ -124,7 +124,13 @@ prepare(Node, NodeMapList) ->
 
 take_backup(Backup) ->
     start_mnesia(),
-    ok = mnesia:backup(Backup),
+    %% We backup only local tables: in particular, this excludes the
+    %% connection tracking tables which have no local replica.
+    LocalTables = mnesia:system_info(local_tables),
+    {ok, Name, _Nodes} = mnesia:activate_checkpoint([
+        {max, LocalTables}
+      ]),
+    ok = mnesia:backup_checkpoint(Name, Backup),
     stop_mnesia().
 
 restore_backup(Backup) ->
@@ -187,7 +193,7 @@ delete_rename_files() -> ok = rabbit_file:recursive_delete([dir()]).
 
 start_mnesia() -> rabbit_misc:ensure_ok(mnesia:start(), cannot_start_mnesia),
                   rabbit_table:force_load(),
-                  rabbit_table:wait_for_replicated().
+                  rabbit_table:wait_for_replicated(_Retry = false).
 stop_mnesia()  -> stopped = mnesia:stop().
 
 convert_backup(NodeMap, FromBackup, ToBackup) ->
@@ -261,3 +267,19 @@ transform_table(Table, Map, Key) ->
     [Term] = mnesia:read(Table, Key, write),
     ok = mnesia:write(Table, update_term(Map, Term), write),
     transform_table(Table, Map, mnesia:next(Table, Key)).
+
+become(BecomeNode) ->
+    error_logger:tty(false),
+    case net_adm:ping(BecomeNode) of
+        pong -> exit({node_running, BecomeNode});
+        pang -> ok = net_kernel:stop(),
+                io:format("  * Impersonating node: ~s...", [BecomeNode]),
+                {ok, _} = start_distribution(BecomeNode),
+                io:format(" done~n", []),
+                Dir = mnesia:system_info(directory),
+                io:format("  * Mnesia directory  : ~s~n", [Dir])
+    end.
+
+start_distribution(Name) ->
+    rabbit_nodes:ensure_epmd(),
+    net_kernel:start([Name, rabbit_nodes:name_type()]).

@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_diagnostics).
@@ -64,7 +64,6 @@ maybe_stuck_stacktrace({prim_inet,        accept0,          _}) -> false;
 maybe_stuck_stacktrace({prim_inet,        recv0,            _}) -> false;
 maybe_stuck_stacktrace({rabbit_heartbeat, heartbeater,      _}) -> false;
 maybe_stuck_stacktrace({rabbit_net,       recv,             _}) -> false;
-maybe_stuck_stacktrace({mochiweb_http,    request,          _}) -> false;
 maybe_stuck_stacktrace({group,            _,                _}) -> false;
 maybe_stuck_stacktrace({shell,            _,                _}) -> false;
 maybe_stuck_stacktrace({io,               _,                _}) -> false;

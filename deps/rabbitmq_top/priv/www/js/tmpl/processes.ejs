@@ -24,12 +24,13 @@
 <table class="list updatable">
  <thead>
   <tr>
-    <th><%= fmt_sort('Process', 'pid') %></th>
+    <th><%= fmt_sort_desc_by_default('Process', 'pid') %></th>
     <th>Description</th>
     <th>Type</th>
-    <th><%= fmt_sort('Memory', 'memory') %></th>
-    <th><%= fmt_sort('Reductions / sec', 'reduction_delta') %></th>
-    <th>Message queue</th>
+    <th><%= fmt_sort_desc_by_default('Memory', 'memory') %></th>
+    <th><%= fmt_sort_desc_by_default('Reductions / sec', 'reduction_delta') %></th>
+    <th><%= fmt_sort_desc_by_default('Erlang mailbox', 'message_queue_len') %></th>
+    <th><%= fmt_sort_desc_by_default('gen_server2 buffer', 'buffer_len') %><span class="help" id="gen-server2-buffer"></span></th>
     <th>Status</th>
   </tr>
  </thead>
@@ -43,8 +44,9 @@
     <td><%= fmt_process_name(process) %></td>
     <td><%= fmt_remove_rabbit_prefix(process.name.type) %></td>
     <td><%= fmt_bytes(process.memory * 1.0) %></td>
-    <td class="r"><%= fmt_reduction_delta(process.reduction_delta) %></td>
-    <td class="r"><%= process.message_queue_len %></td>
+    <td><%= fmt_reduction_delta(process.reduction_delta) %></td>
+    <td><%= process.message_queue_len %></td>
+    <td><%= process.buffer_len %></td>
     <td><%= process.status %></td>
   </tr>
 <% } %>

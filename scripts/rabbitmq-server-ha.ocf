@@ -42,6 +42,7 @@ OCF_RESKEY_mnesia_base_default="/var/lib/rabbitmq/mnesia"
 OCF_RESKEY_mnesia_schema_base_default="/var/lib/rabbitmq"
 OCF_RESKEY_host_ip_default="127.0.0.1"
 OCF_RESKEY_node_port_default=5672
+OCF_RESKEY_default_vhost_default="/"
 OCF_RESKEY_erlang_cookie_default=false
 OCF_RESKEY_erlang_cookie_file_default="/var/lib/rabbitmq/.erlang.cookie"
 OCF_RESKEY_use_fqdn_default=false
@@ -50,6 +51,7 @@ OCF_RESKEY_max_rabbitmqctl_timeouts_default=3
 OCF_RESKEY_policy_file_default="/usr/local/sbin/set_rabbitmq_policy"
 OCF_RESKEY_rmq_feature_health_check_default=true
 OCF_RESKEY_rmq_feature_local_list_queues_default=true
+OCF_RESKEY_limit_nofile_default=65535
 
 : ${HA_LOGTAG="lrmd"}
 : ${HA_LOGFACILITY="daemon"}
@@ -66,6 +68,7 @@ OCF_RESKEY_rmq_feature_local_list_queues_default=true
 : ${OCF_RESKEY_mnesia_schema_base=${OCF_RESKEY_mnesia_schema_base_default}}
 : ${OCF_RESKEY_pid_file=${OCF_RESKEY_pid_file_default}}
 : ${OCF_RESKEY_node_port=${OCF_RESKEY_node_port_default}}
+: ${OCF_RESKEY_default_vhost=${OCF_RESKEY_default_vhost_default}}
 : ${OCF_RESKEY_erlang_cookie=${OCF_RESKEY_erlang_cookie_default}}
 : ${OCF_RESKEY_erlang_cookie_file=${OCF_RESKEY_erlang_cookie_file_default}}
 : ${OCF_RESKEY_use_fqdn=${OCF_RESKEY_use_fqdn_default}}
@@ -74,6 +77,7 @@ OCF_RESKEY_rmq_feature_local_list_queues_default=true
 : ${OCF_RESKEY_policy_file=${OCF_RESKEY_policy_file_default}}
 : ${OCF_RESKEY_rmq_feature_health_check=${OCF_RESKEY_rmq_feature_health_check_default}}
 : ${OCF_RESKEY_rmq_feature_local_list_queues=${OCF_RESKEY_rmq_feature_local_list_queues_default}}
+: ${OCF_RESKEY_limit_nofile=${OCF_RESKEY_limit_nofile_default}}
 
 #######################################################################
 
@@ -85,6 +89,7 @@ OCF_RESKEY_command_timeout_default=""
 : ${OCF_RESKEY_command_timeout=${OCF_RESKEY_command_timeout_default}}
 TIMEOUT_ARG=$((OCF_RESKEY_CRM_meta_timeout / 6000 + 30))
 COMMAND_TIMEOUT="/usr/bin/timeout ${OCF_RESKEY_command_timeout} ${TIMEOUT_ARG}"
+RESOURCE_NAME=`echo $OCF_RESOURCE_INSTANCE | cut -d ":" -f 1`
 
 #######################################################################
 
@@ -260,6 +265,18 @@ ${OCF_RESKEY_binary} should listen on this port
 <content type="boolean" default="${OCF_RESKEY_node_port_default}" />
 </parameter>
 
+<parameter name="default_vhost" unique="0" required="0">
+<longdesc lang="en">
+Default virtual host used for monitoring if a node is fully synchronized with
+the rest of the cluster. In normal operation, the resource agent will wait for
+queues from this virtual host on this node to be synchronized elsewhere before
+stopping RabbitMQ. This also means queues in other virtual hosts may not be
+fully synchronized on stop operations.
+</longdesc>
+<shortdesc lang="en">Default virtual host used for waiting for synchronization</shortdesc>
+<content type="string" default="${OCF_RESKEY_default_vhost_default}" />
+</parameter>
+
 <parameter name="erlang_cookie" unique="0" required="0">
 <longdesc lang="en">
 Erlang cookie for clustering. If specified, will be updated at the mnesia reset
@@ -330,6 +347,14 @@ stopped/demoted.
 </longdesc>
 <shortdesc lang="en">Use --local option for list_queues</shortdesc>
 <content type="boolean" default="${OCF_RESKEY_rmq_feature_local_list_queues_default}" />
+</parameter>
+
+<parameter name="limit_nofile" unique="0" required="0">
+<longdesc lang="en">
+Soft and hard limit for NOFILE
+</longdesc>
+<shortdesc lang="en">NOFILE limit</shortdesc>
+<content type="string" default="${OCF_RESKEY_limit_nofile_default}" />
 </parameter>
 
 $EXTENDED_OCF_PARAMS
@@ -556,6 +581,13 @@ now() {
     date -u +%s
 }
 
+set_limits() {
+    local current_limit=$(su $OCF_RESKEY_username -s /bin/sh -c "ulimit -n")
+    if [ ! -z $OCF_RESKEY_limit_nofile -a $OCF_RESKEY_limit_nofile -gt $current_limit ] ; then
+        ulimit -n $OCF_RESKEY_limit_nofile
+    fi
+}
+
 master_score() {
     local LH="${LL} master_score():"
     local score=$1
@@ -623,7 +655,7 @@ get_node_start_time() {
 }
 
 get_node_master_score() {
-    get_integer_node_attr $1 'master-p_rabbitmq-server'
+    get_integer_node_attr $1 "master-${RESOURCE_NAME}"
 }
 
 # Return either rabbit node name as FQDN or shortname, depends on the OCF_RESKEY_use_fqdn.
@@ -838,8 +870,8 @@ is_clustered_with()
     rc=$?
     if [ "$rc" -ne 0 ]; then
         ocf_log err "${LH} Failed to check whether '$node_name' is considered running by us"
-        # XXX Or should we give remote node benefit of a doubt?
-        return 1
+        # We had a transient local error; that doesn't mean the remote node is
+        # not part of the cluster, so ignore this
     elif [ "$seen_as_running" != true ]; then
         ocf_log info "${LH} Node $node_name is not running, considering it not clustered with us"
         return 1
@@ -850,8 +882,8 @@ is_clustered_with()
     rc=$?
     if [ "$rc" -ne 0 ]; then
         ocf_log err "${LH} Failed to check whether '$node_name' is partitioned with us"
-        # XXX Or should we give remote node benefit of a doubt?
-        return 1
+        # We had a transient local error; that doesn't mean the remote node is
+        # partitioned with us, so ignore this
     elif [ "$seen_as_partitioned" != false ]; then
         ocf_log info "${LH} Node $node_name is partitioned from us"
         return 1
@@ -1166,6 +1198,9 @@ start_beam_process() {
 
     [ -f /etc/default/rabbitmq-server ] && . /etc/default/rabbitmq-server
 
+    # RabbitMQ requires high soft and hard limits for NOFILE
+    set_limits
+
     # run beam process
     command="${OCF_RESKEY_binary} >> \"${OCF_RESKEY_log_dir}/startup_log\" 2>/dev/null"
     RABBITMQ_NODE_ONLY=1 su rabbitmq -s /bin/sh -c "${command}"&
@@ -1471,7 +1506,7 @@ wait_sync() {
         opt_arg="--local"
     fi
 
-    queues="${COMMAND_TIMEOUT} ${OCF_RESKEY_ctl} list_queues $opt_arg name state"
+    queues="${COMMAND_TIMEOUT} ${OCF_RESKEY_ctl} -p ${OCF_RESKEY_default_vhost} list_queues $opt_arg name state"
 
     su_rabbit_cmd -t "${wait_time}" "sh -c \"while ${queues} | grep -q 'syncing,'; \
           do sleep 2; done\""
@@ -1573,6 +1608,11 @@ get_monitor() {
             ocf_log info "${LH} comparing us (start time: $our_start_time, score: $new_score) with $node (start time: $node_start_time, score: $node_score)"
             if [ $node_start_time -ne 0 -a $node_score -ne 0 -a $node_start_time -lt $our_start_time ]; then
                 new_score=$((node_score - 10 < new_score ? node_score - 10 : new_score ))
+            elif [ $node_start_time -ne 0 -a $node_score -ne 0 -a $node_start_time -eq $our_start_time ]; then
+                # Do not get promoted if the other node is already master and we have the same start time
+                if is_master $node; then
+                    new_score=$((node_score - 10 < new_score ? node_score - 10 : new_score ))
+                fi
             fi
         done
     fi
@@ -1773,7 +1813,7 @@ node_health_check_legacy() {
     local queues
     local rc_queues
     local timeout_queues
-    queues=`su_rabbit_cmd "${OCF_RESKEY_ctl} -q list_queues memory messages consumer_utilisation"`
+    queues=`su_rabbit_cmd "${OCF_RESKEY_ctl} -q -p ${OCF_RESKEY_default_vhost} list_queues memory messages consumer_utilisation"`
     rc_queues=$?
     check_timeouts $rc_queues "rabbit_list_queues_timeouts" "list_queues"
     timeout_queues=$?
@@ -2147,16 +2187,15 @@ action_notify() {
                 ;;
             start)
                 ocf_log info "${LH} post-start begin."
-                local nodes_list="${OCF_RESKEY_CRM_meta_notify_start_uname} ${OCF_RESKEY_CRM_meta_notify_active_uname}"
                 # Do nothing, if the list of nodes being started or running reported empty
                 # Delegate recovery, if needed, to the "running out of the cluster" monitor's logic
-                if [ -z "${nodes_list}" ] ; then
+                if [ -z "${OCF_RESKEY_CRM_meta_notify_start_uname}" -a -z "${OCF_RESKEY_CRM_meta_notify_active_uname}" ] ; then
                   ocf_log warn "${LH} I'm a last man standing and I must survive!"
                   ocf_log info "${LH} post-start end."
                   return $OCF_SUCCESS
                 fi
                 # check did this event from this host
-                my_host "${nodes_list}"
+                my_host "${OCF_RESKEY_CRM_meta_notify_start_uname}"
                 rc=$?
                 # Do nothing, if there is no master reported
                 # Delegate recovery, if needed, to the "running out of the cluster" monitor's logic
@@ -2183,7 +2222,6 @@ action_notify() {
                       rc2=$?
                       update_rabbit_start_time_if_rc $rc2
                     fi
-                    ocf_log info "${LH} post-start end."
                     if [ -s "${OCF_RESKEY_definitions_dump_file}" ] ; then
                         ocf_log info "File ${OCF_RESKEY_definitions_dump_file} exists"
                         ocf_run curl --silent --show-error --request POST --user $OCF_RESKEY_admin_user:$OCF_RESKEY_admin_password $OCF_RESKEY_host_ip:15672/api/definitions --header "Content-Type:application/json" --data @$OCF_RESKEY_definitions_dump_file
@@ -2200,6 +2238,7 @@ action_notify() {
                         return $OCF_ERR_GENERIC
                     fi
                 fi
+                ocf_log info "${LH} post-start end."
                 ;;
             stop)
                 # if rabbitmq-server stops on any another node, we should remove it from cluster (as ordinary operation)
