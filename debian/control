@@ -23,7 +23,7 @@ Standards-Version: 3.9.8
 Vcs-Browser: https://anonscm.debian.org/cgit/openstack/rabbitmq-server.git/
 Vcs-Git: https://anonscm.debian.org/git/openstack/rabbitmq-server.git
 Homepage: http://www.rabbitmq.com/
-XS-Pexip-Upstream: http://ftp.debian.org/debian/ stretch
+XS-Pexip-Upstream: http://ftp.debian.org/debian/ buster
 
 Package: rabbitmq-server
 Architecture: all
