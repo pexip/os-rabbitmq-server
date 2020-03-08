@@ -1,3 +1,13 @@
+rabbitmq-server (3.7.8-4pexip1) pexip; urgency=medium
+
+  * Migrate to Buster
+  * Refresh:
+    logging.patch
+  * Remove:
+    datetime.patch
+
+ -- Vincent Sanders <vince@pexip.com>  Sun, 08 Mar 2020 14:14:58 +0000
+
 rabbitmq-server (3.7.8-4) unstable; urgency=medium
 
   * Remove Elixir version patch.
