@@ -11,30 +11,25 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_net).
 -include("rabbit.hrl").
 
--ifdef(define_tls_atom_version).
-%% In Erlang R16B03, tls_atom_version() is defined in ssl_internal.hrl,
-%% which is not included by ssl_api.hrl. Instead of including it here,
-%% we redefine it to avoid too much pollution.
--type tls_atom_version() :: sslv3 | tlsv1 | 'tlsv1.1' | 'tlsv1.2'.
--endif.
-
+-include_lib("kernel/include/inet.hrl").
 -include_lib("ssl/src/ssl_api.hrl").
 
 -export([is_ssl/1, ssl_info/1, controlling_process/2, getstat/2,
          recv/1, sync_recv/2, async_recv/3, port_command/2, getopts/2,
          setopts/2, send/2, close/1, fast_close/1, sockname/1, peername/1,
          peercert/1, connection_string/2, socket_ends/2, is_loopback/1,
-         accept_ack/2]).
+         tcp_host/1, unwrap_socket/1, maybe_get_proxy_socket/1,
+         hostname/0]).
 
 %%---------------------------------------------------------------------------
 
--export_type([socket/0]).
+-export_type([socket/0, ip_port/0, hostname/0]).
 
 -type stat_option() ::
         'recv_cnt' | 'recv_max' | 'recv_avg' | 'recv_oct' | 'recv_dvi' |
@@ -44,7 +39,9 @@
 -type socket() :: port() | ssl:sslsocket().
 -type opts() :: [{atom(), any()} |
                  {raw, non_neg_integer(), non_neg_integer(), binary()}].
--type host_or_ip() :: binary() | inet:ip_address().
+-type hostname() :: inet:hostname().
+-type ip_port() :: inet:port_number().
+% -type host_or_ip() :: binary() | inet:ip_address().
 -spec is_ssl(socket()) -> boolean().
 -spec ssl_info(socket()) -> 'nossl' | ok_val_or_error([{atom(), any()}]).
 -spec controlling_process(socket(), pid()) -> ok_or_any_error().
@@ -72,18 +69,21 @@
 -spec close(socket()) -> ok_or_any_error().
 -spec fast_close(socket()) -> ok_or_any_error().
 -spec sockname(socket()) ->
-          ok_val_or_error({inet:ip_address(), rabbit_networking:ip_port()}).
+          ok_val_or_error({inet:ip_address(), ip_port()}).
 -spec peername(socket()) ->
-          ok_val_or_error({inet:ip_address(), rabbit_networking:ip_port()}).
+          ok_val_or_error({inet:ip_address(), ip_port()}).
 -spec peercert(socket()) ->
           'nossl' | ok_val_or_error(rabbit_ssl:certificate()).
 -spec connection_string(socket(), 'inbound' | 'outbound') ->
           ok_val_or_error(string()).
--spec socket_ends(socket(), 'inbound' | 'outbound') ->
-          ok_val_or_error({host_or_ip(), rabbit_networking:ip_port(),
-                           host_or_ip(), rabbit_networking:ip_port()}).
+% -spec socket_ends(socket() | ranch_proxy:proxy_socket() | ranch_proxy_ssl:ssl_socket(),
+%                   'inbound' | 'outbound') ->
+%           ok_val_or_error({host_or_ip(), ip_port(),
+%                            host_or_ip(), ip_port()}).
 -spec is_loopback(socket() | inet:ip_address()) -> boolean().
--spec accept_ack(any(), socket()) -> ok.
+% -spec unwrap_socket(socket() | ranch_proxy:proxy_socket() | ranch_proxy_ssl:ssl_socket()) -> socket().
+
+-dialyzer({nowarn_function, [socket_ends/2, unwrap_socket/1]}).
 
 %%---------------------------------------------------------------------------
 
@@ -102,7 +102,7 @@ ssl_get_socket(Sock) ->
     element(2, element(2, Sock)).
 
 ssl_info(Sock) when ?IS_SSL(Sock) ->
-    ssl_compat:connection_information(Sock);
+    ssl:connection_information(Sock);
 ssl_info(_Sock) ->
     nossl.
 
@@ -219,24 +219,60 @@ connection_string(Sock, Direction) ->
             Error
     end.
 
-socket_ends(Sock, Direction) ->
+socket_ends(Sock, Direction) when ?IS_SSL(Sock);
+    is_port(Sock) ->
     {From, To} = sock_funs(Direction),
     case {From(Sock), To(Sock)} of
         {{ok, {FromAddress, FromPort}}, {ok, {ToAddress, ToPort}}} ->
             {ok, {rdns(FromAddress), FromPort,
-                  rdns(ToAddress),   ToPort}};
+                rdns(ToAddress),   ToPort}};
         {{error, _Reason} = Error, _} ->
             Error;
         {_, {error, _Reason} = Error} ->
+            Error
+    end;
+socket_ends(Sock, Direction = inbound) when is_tuple(Sock) ->
+    %% proxy protocol support
+    %% hack: we have to check the record type
+    {ok, {{FromAddress, FromPort}, {_, _}}} = case element(1, Sock) of
+        proxy_socket -> ranch_proxy_protocol:proxyname(undefined, Sock);
+        ssl_socket   -> ranch_proxy_ssl:proxyname(Sock)
+    end,
+    {_From, To} = sock_funs(Direction),
+    CSocket = unwrap_socket(Sock),
+    case To(CSocket) of
+        {ok, {ToAddress, ToPort}} ->
+            {ok, {rdns(FromAddress), FromPort,
+                rdns(ToAddress),   ToPort}};
+        {error, _Reason} = Error ->
             Error
     end.
 
 maybe_ntoab(Addr) when is_tuple(Addr) -> rabbit_misc:ntoab(Addr);
 maybe_ntoab(Host)                     -> Host.
 
+tcp_host({0,0,0,0}) ->
+    hostname();
+
+tcp_host({0,0,0,0,0,0,0,0}) ->
+    hostname();
+
+tcp_host(IPAddress) ->
+    case inet:gethostbyaddr(IPAddress) of
+        {ok, #hostent{h_name = Name}} -> Name;
+        {error, _Reason} -> rabbit_misc:ntoa(IPAddress)
+    end.
+
+hostname() ->
+    {ok, Hostname} = inet:gethostname(),
+    case inet:gethostbyname(Hostname) of
+        {ok,    #hostent{h_name = Name}} -> Name;
+        {error, _Reason}                 -> Hostname
+    end.
+
 rdns(Addr) ->
     case application:get_env(rabbit, reverse_dns_lookups) of
-        {ok, true} -> list_to_binary(rabbit_networking:tcp_host(Addr));
+        {ok, true} -> list_to_binary(tcp_host(Addr));
         _          -> Addr
     end.
 
@@ -257,18 +293,34 @@ is_loopback(_)                       -> false.
 
 ipv4(AB, CD) -> {AB bsr 8, AB band 255, CD bsr 8, CD band 255}.
 
-accept_ack(Ref, Sock) ->
-    ok = ranch:accept_ack(Ref),
-    case tune_buffer_size(Sock) of
-        ok         -> ok;
-        {error, _} -> rabbit_net:fast_close(Sock),
-                      exit(normal)
-    end,
-    ok = file_handle_cache:obtain().
+unwrap_socket(Sock) when ?IS_SSL(Sock);
+                         is_port(Sock) ->
+    Sock;
+unwrap_socket(Sock) when is_tuple(Sock) ->
+    %% proxy protocol support
+    %% hack: we have to check the record type
+    case element(1, Sock) of
+        proxy_socket ->
+            ranch_proxy_protocol:get_csocket(Sock);
+        ssl_socket   ->
+            ranch_proxy_ssl:get_csocket(Sock)
+    end;
+unwrap_socket(Sock) ->
+    Sock.
 
-tune_buffer_size(Sock) ->
-    case getopts(Sock, [sndbuf, recbuf, buffer]) of
-        {ok, BufSizes} -> BufSz = lists:max([Sz || {_Opt, Sz} <- BufSizes]),
-                          setopts(Sock, [{buffer, BufSz}]);
-        Error          -> Error
-    end.
+maybe_get_proxy_socket(Sock) when ?IS_SSL(Sock);
+                                  is_port(Sock) ->
+    undefined;
+maybe_get_proxy_socket(Sock) when is_tuple(Sock) ->
+    %% proxy protocol support
+    %% hack: we have to check the record type
+    case element(1, Sock) of
+        proxy_socket ->
+            Sock;
+        ssl_socket   ->
+            Sock;
+        _            ->
+            undefined
+    end;
+maybe_get_proxy_socket(_Sock) ->
+    undefined.

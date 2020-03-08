@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_queue_link).
@@ -77,6 +77,7 @@ init({Upstream, Queue = #amqqueue{name = QName}}) ->
                               upstream        = Upstream,
                               upstream_params = UParams}};
         {error, not_found} ->
+            rabbit_federation_link_util:log_warning(QName, "not found, stopping link~n", []),
             {stop, gone}
     end.
 

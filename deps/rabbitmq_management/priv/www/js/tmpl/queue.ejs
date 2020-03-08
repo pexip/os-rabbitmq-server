@@ -16,22 +16,24 @@
       </tr>
       <tr>
         <th>Policy</th>
-        <td><%= fmt_string(queue.policy, '') %></td>
+        <td><%= link_policy(queue.vhost, queue.policy) %></td>
       </tr>
-      <% if (queue.owner_pid_details != undefined) { %>
       <tr>
-        <th>Exclusive owner</th>
-        <td><%= link_conn(queue.owner_pid_details.name) %></td>
+        <th>Operator policy</th>
+        <td><%= fmt_string(queue.operator_policy, '') %></td>
       </tr>
-<% } %>
+      <tr>
+        <th>Effective policy definition</th>
+        <td><%= fmt_table_short(queue.effective_policy_definition) %></td>
+      </tr>
 <% if (nodes_interesting) { %>
       <tr>
         <th>Node</th>
         <td><%= fmt_node(queue.node) %></td>
       </tr>
-  <% if (queue.owner_pid_details == undefined) { %>
+  <% if (!queue.exclusive) { %>
       <tr>
-        <th>Slaves</th>
+        <th>Mirrors</th>
         <td>
           <%
              var has_unsynced_node = false;
@@ -101,6 +103,7 @@
         <th class="horizontal">Unacked</th>
         <th class="horizontal">In memory</th>
         <th class="horizontal">Persistent</th>
+        <th class="horizontal">Transient, Paged Out</th>
       </tr>
       <tr>
         <th>
@@ -122,6 +125,9 @@
         <td class="r">
           <%= fmt_num_thousands(queue.messages_persistent) %>
         </td>
+        <td class="r">
+          <%= fmt_num_thousands(queue.messages_paged_out) %>
+        </td>
       </tr>
       <tr>
         <th>
@@ -142,6 +148,9 @@
         </td>
         <td class="r">
           <%= fmt_bytes(queue.message_bytes_persistent) %>
+        </td>
+        <td class="r">
+          <%= fmt_bytes(queue.message_bytes_paged_out) %>
         </td>
       </tr>
       <tr>
@@ -214,11 +223,13 @@
       <input type="hidden" name="truncate" value="50000"/>
       <table class="form">
         <tr>
-          <th><label>Requeue:</label></th>
+          <th><label>Ack Mode:</label></th>
           <td>
-            <select name="requeue">
-              <option value="true">Yes</option>
-              <option value="false">No</option>
+            <select name="ackmode">
+                <option value="ack_requeue_true" selected>Nack message requeue true</option>
+                <option value="ack_requeue_false">Ack message requeue false</option>
+                <option value="reject_requeue_true">Reject requeue true</option>
+                <option value="reject_requeue_false">Reject requeue false</option>
             </select>
           </td>
         </tr>
@@ -261,18 +272,19 @@
       For more options <a href="#/dynamic-shovels">see the shovel
       interface</a>.
     </p>
-    <form action="#/shovel-parameters" method="put">
+    <form action="#/shovel-parameters-move-messages" method="put">
       <input type="hidden" name="component" value="shovel"/>
       <input type="hidden" name="vhost" value="<%= fmt_string(queue.vhost) %>"/>
       <input type="hidden" name="name" value="Move from <%= fmt_string(queue.name) %>"/>
       <input type="hidden" name="src-uri" value="amqp:///<%= esc(queue.vhost) %>"/>
       <input type="hidden" name="src-queue" value="<%= fmt_string(queue.name) %>"/>
-
+      <input type="hidden" name="src-protocol" value="amqp091"/>
+      <input type="hidden" name="src-prefetch-count" value="1000"/>
+      <input type="hidden" name="src-delete-after" value="queue-length"/>
+      <input type="hidden" name="dest-protocol" value="amqp091"/>
       <input type="hidden" name="dest-uri" value="amqp:///<%= esc(queue.vhost) %>"/>
-      <input type="hidden" name="prefetch-count" value="1000"/>
-      <input type="hidden" name="add-forward-headers" value="false"/>
+      <input type="hidden" name="dest-add-forward-headers" value="false"/>
       <input type="hidden" name="ack-mode" value="on-confirm"/>
-      <input type="hidden" name="delete-after" value="queue-length"/>
       <input type="hidden" name="redirect" value="#/queues"/>
 
       <table class="form">
@@ -289,20 +301,25 @@
 <% } %>
 
 <div class="section-hidden">
-  <h2>Delete / purge</h2>
+  <h2>Delete</h2>
   <div class="hider">
-    <form action="#/queues" method="delete" class="confirm inline-form">
+    <form action="#/queues" method="delete" class="confirm-queue inline-form">
       <input type="hidden" name="vhost" value="<%= fmt_string(queue.vhost) %>"/>
       <input type="hidden" name="name" value="<%= fmt_string(queue.name) %>"/>
       <input type="hidden" name="mode" value="delete"/>
-      <input type="submit" value="Delete" />
+      <input type="submit" value="Delete Queue" />
     </form>
+  </div>
+</div>
 
-    <form action="#/queues" method="delete" class="inline-form-right">
+<div class="section-hidden">
+  <h2>Purge</h2>
+  <div class="hider">
+    <form action="#/queues" method="delete" class="confirm-purge-queue inline-form">
       <input type="hidden" name="vhost" value="<%= fmt_string(queue.vhost) %>"/>
       <input type="hidden" name="name" value="<%= fmt_string(queue.name) %>"/>
       <input type="hidden" name="mode" value="purge"/>
-      <input type="submit" value="Purge" />
+      <input type="submit" value="Purge Messages" />
     </form>
   </div>
 </div>

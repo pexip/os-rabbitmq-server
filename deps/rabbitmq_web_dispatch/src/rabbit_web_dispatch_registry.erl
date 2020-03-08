@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_web_dispatch_registry).
@@ -22,6 +22,9 @@
 -export([add/5, remove/1, set_fallback/2, lookup/2, list_all/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
          code_change/3]).
+-export([list/1]).
+
+-import(rabbit_misc, [pget/2]).
 
 -define(ETS, rabbitmq_web_dispatch).
 
@@ -38,6 +41,8 @@ add(Name, Listener, Selector, Handler, Link) ->
 remove(Name) ->
     gen_server:call(?MODULE, {remove, Name}, infinity).
 
+%% @todo This needs to be dispatch instead of a fun too.
+%% But I'm not sure what code is using this.
 set_fallback(Listener, FallbackHandler) ->
     gen_server:call(?MODULE, {set_fallback, Listener, FallbackHandler},
                     infinity).
@@ -46,9 +51,9 @@ lookup(Listener, Req) ->
     case lookup_dispatch(Listener) of
         {ok, {Selectors, Fallback}} ->
             case catch match_request(Selectors, Req) of
-                {'EXIT', Reason} -> {lookup_failure, Reason};
-                no_handler       -> {handler, Fallback};
-                Handler          -> {handler, Handler}
+                {'EXIT', Reason} -> {error, {lookup_failure, Reason}};
+                not_found        -> {ok, Fallback};
+                Dispatch         -> {ok, Dispatch}
             end;
         Err ->
             Err
@@ -71,6 +76,7 @@ handle_call({add, Name, Listener, Selector, Handler, Link = {_, Desc}}, _From,
                    new      -> set_dispatch(
                                  Listener, [],
                                  listing_fallback_handler(Listener)),
+                               listener_started(Listener),
                                true;
                    existing -> true;
                    ignore   -> false
@@ -97,7 +103,8 @@ handle_call({remove, Name}, _From,
     Selectors1 = lists:keydelete(Name, 1, Selectors),
     set_dispatch(Listener, Selectors1, Fallback),
     case Selectors1 of
-        [] -> rabbit_web_dispatch_sup:stop_listener(Listener);
+        [] -> rabbit_web_dispatch_sup:stop_listener(Listener),
+              listener_stopped(Listener);
         _  -> ok
     end,
     {reply, ok, undefined};
@@ -116,26 +123,44 @@ handle_call(Req, _From, State) ->
     {stop, unknown_request, State}.
 
 handle_cast(_, State) ->
-	{noreply, State}.
+    {noreply, State}.
 
 handle_info(_, State) ->
-	{noreply, State}.
+    {noreply, State}.
 
 terminate(_, _) ->
     true = ets:delete(?ETS),
     ok.
 
 code_change(_, State, _) ->
-	{ok, State}.
+    {ok, State}.
 
 %%---------------------------------------------------------------------------
 
 %% Internal Methods
 
-port(Listener) -> proplists:get_value(port, Listener).
+listener_started(Listener) ->
+    [rabbit_networking:tcp_listener_started(Protocol, Listener, IPAddress, Port)
+     || {Protocol, IPAddress, Port} <- listener_info(Listener)],
+    ok.
+
+listener_stopped(Listener) ->
+    [rabbit_networking:tcp_listener_stopped(Protocol, Listener, IPAddress, Port)
+     || {Protocol, IPAddress, Port} <- listener_info(Listener)],
+    ok.
+
+listener_info(Listener) ->
+    Protocol = case pget(ssl, Listener) of
+        true -> https;
+        _    -> http
+    end,
+    Port = pget(port, Listener),
+    [{Protocol, IPAddress, Port}
+     || {IPAddress, _Port, _Family}
+        <- rabbit_networking:tcp_listener_addresses(Port)].
 
 lookup_dispatch(Lsnr) ->
-    case ets:lookup(?ETS, port(Lsnr)) of
+    case ets:lookup(?ETS, pget(port, Lsnr)) of
         [{_, Lsnr, S, F}]   -> {ok, {S, F}};
         [{_, Lsnr2, S, _F}] -> {error, {different, first_desc(S), Lsnr2}};
         []                  -> {error, {no_record_for_listener, Lsnr}}
@@ -144,13 +169,13 @@ lookup_dispatch(Lsnr) ->
 first_desc([{_N, _S, _H, {_, Desc}} | _]) -> Desc.
 
 set_dispatch(Listener, Selectors, Fallback) ->
-    ets:insert(?ETS, {port(Listener), Listener, Selectors, Fallback}).
+    ets:insert(?ETS, {pget(port, Listener), Listener, Selectors, Fallback}).
 
 match_request([], _) ->
-    no_handler;
-match_request([{_Name, Selector, Handler, _Link}|Rest], Req) ->
+    not_found;
+match_request([{_Name, Selector, Dispatch, _Link}|Rest], Req) ->
     case Selector(Req) of
-        true  -> Handler;
+        true  -> Dispatch;
         false -> match_request(Rest, Req)
     end.
 
@@ -175,25 +200,6 @@ list(Listener) ->
 %%---------------------------------------------------------------------------
 
 listing_fallback_handler(Listener) ->
-    fun(Req) ->
-            HTMLPrefix =
-                "<html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\">"
-                "<head><title>RabbitMQ Web Server</title></head>"
-                "<body><h1>RabbitMQ Web Server</h1><p>Contexts available:</p><ul>",
-            HTMLSuffix = "</ul></body></html>",
-            {ReqPath, _, _} = mochiweb_util:urlsplit_path(Req:get(raw_path)),
-            List =
-                case list(Listener) of
-                    [] ->
-                        "<li>No contexts installed</li>";
-                    Contexts ->
-                        [handler_listing(Path, ReqPath, Desc)
-                         || {Path, Desc} <- Contexts]
-                end,
-            Req:respond({200, [], HTMLPrefix ++ List ++ HTMLSuffix})
-    end.
-
-handler_listing(Path, ReqPath, Desc) ->
-    io_lib:format(
-      "<li><a href=\"~s\">~s</a></li>",
-      [rabbit_web_dispatch_util:relativise(ReqPath, "/" ++ Path), Desc]).
+    cowboy_router:compile([{'_', [
+        {"/", rabbit_web_dispatch_listing_handler, Listener}
+    ]}]).

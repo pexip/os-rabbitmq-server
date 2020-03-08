@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_variable_queue).
@@ -26,12 +26,23 @@
          set_ram_duration_target/2, ram_duration/1, needs_timeout/1, timeout/1,
          handle_pre_hibernate/1, resume/1, msg_rates/1,
          info/2, invoke/3, is_duplicate/2, set_queue_mode/2,
-         zip_msgs_and_acks/4,  multiple_routing_keys/0]).
+         zip_msgs_and_acks/4,  multiple_routing_keys/0, handle_info/2]).
 
--export([start/1, stop/0]).
+-export([start/2, stop/1]).
 
 %% exported for testing only
--export([start_msg_store/2, stop_msg_store/0, init/6]).
+-export([start_msg_store/3, stop_msg_store/1, init/6]).
+
+-export([move_messages_to_vhost_store/0]).
+
+-export([migrate_queue/3, migrate_message/3, get_per_vhost_store_client/2,
+         get_global_store_client/1, log_upgrade_verbose/1,
+         log_upgrade_verbose/2]).
+
+-include_lib("stdlib/include/qlc.hrl").
+
+-define(QUEUE_MIGRATION_BATCH_SIZE, 100).
+-define(EMPTY_START_FUN_STATE, {fun (ok) -> finished end, ok}).
 
 %%----------------------------------------------------------------------------
 %% Messages, and their position in the queue, can be in memory or on
@@ -178,12 +189,12 @@
 %% (betas+gammas+delta)/(target_ram_count+betas+gammas+delta). I.e. as
 %% the target_ram_count shrinks to 0, so must betas and gammas.
 %%
-%% The conversion of betas to gammas is done in batches of at least
-%% ?IO_BATCH_SIZE. This value should not be too small, otherwise the
-%% frequent operations on the queues of q2 and q3 will not be
-%% effectively amortised (switching the direction of queue access
-%% defeats amortisation). Note that there is a natural upper bound due
-%% to credit_flow limits on the alpha to beta conversion.
+%% The conversion of betas to deltas is done if there are at least
+%% ?IO_BATCH_SIZE betas in q2 & q3. This value should not be too small,
+%% otherwise the frequent operations on the queues of q2 and q3 will not be
+%% effectively amortised (switching the direction of queue access defeats
+%% amortisation). Note that there is a natural upper bound due to credit_flow
+%% limits on the alpha to beta conversion.
 %%
 %% The conversion from alphas to betas is chunked due to the
 %% credit_flow limits of the msg_store. This further smooths the
@@ -283,6 +294,7 @@
           unacked_bytes,
           persistent_count,   %% w   unacked
           persistent_bytes,   %% w   unacked
+          delta_transient_bytes,        %%
 
           target_ram_count,
           ram_msg_count,      %% w/o unacked
@@ -310,7 +322,11 @@
           %% number of reduce_memory_usage executions, once it
           %% reaches a threshold the queue will manually trigger a runtime GC
 	        %% see: maybe_execute_gc/1
-          memory_reduction_run_count
+          memory_reduction_run_count,
+          %% Queue data is grouped by VHost. We need to store it
+          %% to work with queue index.
+          virtual_host,
+          waiting_bump = false
         }).
 
 -record(rates, { in, out, ack_in, ack_out, timestamp }).
@@ -330,12 +346,14 @@
 -record(delta,
         { start_seq_id, %% start_seq_id is inclusive
           count,
+          transient,
           end_seq_id    %% end_seq_id is exclusive
         }).
 
 -define(HEADER_GUESS_SIZE, 100). %% see determine_persist_to/2
 -define(PERSISTENT_MSG_STORE, msg_store_persistent).
 -define(TRANSIENT_MSG_STORE,  msg_store_transient).
+
 -define(QUEUE, lqueue).
 
 -include("rabbit.hrl").
@@ -344,6 +362,7 @@
 %%----------------------------------------------------------------------------
 
 -rabbit_upgrade({multiple_routing_keys, local, []}).
+-rabbit_upgrade({move_messages_to_vhost_store, message_store, []}).
 
 -type seq_id()  :: non_neg_integer().
 
@@ -396,10 +415,10 @@
              out_counter           :: non_neg_integer(),
              in_counter            :: non_neg_integer(),
              rates                 :: rates(),
-             msgs_on_disk          :: ?GB_SET_TYPE(),
-             msg_indices_on_disk   :: ?GB_SET_TYPE(),
-             unconfirmed           :: ?GB_SET_TYPE(),
-             confirmed             :: ?GB_SET_TYPE(),
+             msgs_on_disk          :: gb_sets:set(),
+             msg_indices_on_disk   :: gb_sets:set(),
+             unconfirmed           :: gb_sets:set(),
+             confirmed             :: gb_sets:set(),
              ack_out_counter       :: non_neg_integer(),
              ack_in_counter        :: non_neg_integer(),
              disk_read_count       :: non_neg_integer(),
@@ -415,9 +434,11 @@
 
 -define(BLANK_DELTA, #delta { start_seq_id = undefined,
                               count        = 0,
+                              transient    = 0,
                               end_seq_id   = undefined }).
 -define(BLANK_DELTA_PATTERN(Z), #delta { start_seq_id = Z,
                                          count        = 0,
+                                         transient    = 0,
                                          end_seq_id   = Z }).
 
 -define(MICROS_PER_SECOND, 1000000.0).
@@ -432,52 +453,75 @@
 %% rabbit_amqqueue_process need fairly fresh rates.
 -define(MSGS_PER_RATE_CALC, 100).
 
-
 %% we define the garbage collector threshold
-%% it needs to tune the GC calls inside `reduce_memory_use`
-%% see: rabbitmq-server-973 and `maybe_execute_gc` function
--define(DEFAULT_EXPLICIT_GC_RUN_OP_THRESHOLD, 250).
--define(EXPLICIT_GC_RUN_OP_THRESHOLD,
+%% it needs to tune the `reduce_memory_use` calls. Thus, the garbage collection.
+%% see: rabbitmq-server-973 and rabbitmq-server-964
+-define(DEFAULT_EXPLICIT_GC_RUN_OP_THRESHOLD, 1000).
+-define(EXPLICIT_GC_RUN_OP_THRESHOLD(Mode),
     case get(explicit_gc_run_operation_threshold) of
         undefined ->
-            Val = rabbit_misc:get_env(rabbit, lazy_queue_explicit_gc_run_operation_threshold,
-                ?DEFAULT_EXPLICIT_GC_RUN_OP_THRESHOLD),
+            Val = explicit_gc_run_operation_threshold_for_mode(Mode),
             put(explicit_gc_run_operation_threshold, Val),
             Val;
         Val       -> Val
     end).
 
+explicit_gc_run_operation_threshold_for_mode(Mode) ->
+    {Key, Fallback} = case Mode of
+        lazy -> {lazy_queue_explicit_gc_run_operation_threshold,
+                 ?DEFAULT_EXPLICIT_GC_RUN_OP_THRESHOLD};
+        _    -> {queue_explicit_gc_run_operation_threshold,
+                 ?DEFAULT_EXPLICIT_GC_RUN_OP_THRESHOLD}
+    end,
+    rabbit_misc:get_env(rabbit, Key, Fallback).
+
 %%----------------------------------------------------------------------------
 %% Public API
 %%----------------------------------------------------------------------------
 
-start(DurableQueues) ->
-    {AllTerms, StartFunState} = rabbit_queue_index:start(DurableQueues),
-    start_msg_store(
-      [Ref || Terms <- AllTerms,
-              Terms /= non_clean_shutdown,
-              begin
-                  Ref = proplists:get_value(persistent_ref, Terms),
-                  Ref =/= undefined
-              end],
-      StartFunState),
+start(VHost, DurableQueues) ->
+    {AllTerms, StartFunState} = rabbit_queue_index:start(VHost, DurableQueues),
+    %% Group recovery terms by vhost.
+    ClientRefs = [Ref || Terms <- AllTerms,
+                      Terms /= non_clean_shutdown,
+                      begin
+                          Ref = proplists:get_value(persistent_ref, Terms),
+                          Ref =/= undefined
+                      end],
+    start_msg_store(VHost, ClientRefs, StartFunState),
     {ok, AllTerms}.
 
-stop() ->
-    ok = stop_msg_store(),
-    ok = rabbit_queue_index:stop().
+stop(VHost) ->
+    ok = stop_msg_store(VHost),
+    ok = rabbit_queue_index:stop(VHost).
 
-start_msg_store(Refs, StartFunState) ->
-    ok = rabbit_sup:start_child(?TRANSIENT_MSG_STORE, rabbit_msg_store,
-                                [?TRANSIENT_MSG_STORE, rabbit_mnesia:dir(),
-                                 undefined,  {fun (ok) -> finished end, ok}]),
-    ok = rabbit_sup:start_child(?PERSISTENT_MSG_STORE, rabbit_msg_store,
-                                [?PERSISTENT_MSG_STORE, rabbit_mnesia:dir(),
-                                 Refs, StartFunState]).
+start_msg_store(VHost, Refs, StartFunState) when is_list(Refs); Refs == undefined ->
+    rabbit_log:info("Starting message stores for vhost '~s'~n", [VHost]),
+    do_start_msg_store(VHost, ?TRANSIENT_MSG_STORE, undefined, ?EMPTY_START_FUN_STATE),
+    do_start_msg_store(VHost, ?PERSISTENT_MSG_STORE, Refs, StartFunState),
+    ok.
 
-stop_msg_store() ->
-    ok = rabbit_sup:stop_child(?PERSISTENT_MSG_STORE),
-    ok = rabbit_sup:stop_child(?TRANSIENT_MSG_STORE).
+do_start_msg_store(VHost, Type, Refs, StartFunState) ->
+    case rabbit_vhost_msg_store:start(VHost, Type, Refs, StartFunState) of
+        {ok, _} ->
+            rabbit_log:info("Started message store of type ~s for vhost '~s'~n", [abbreviated_type(Type), VHost]);
+        {error, {no_such_vhost, VHost}} = Err ->
+            rabbit_log:error("Failed to start message store of type ~s for vhost '~s': the vhost no longer exists!~n",
+                             [Type, VHost]),
+            exit(Err);
+        {error, Error} ->
+            rabbit_log:error("Failed to start message store of type ~s for vhost '~s': ~p~n",
+                             [Type, VHost, Error]),
+            exit({error, Error})
+    end.
+
+abbreviated_type(?TRANSIENT_MSG_STORE)  -> transient;
+abbreviated_type(?PERSISTENT_MSG_STORE) -> persistent.
+
+stop_msg_store(VHost) ->
+    rabbit_vhost_msg_store:stop(VHost, ?TRANSIENT_MSG_STORE),
+    rabbit_vhost_msg_store:stop(VHost, ?PERSISTENT_MSG_STORE),
+    ok.
 
 init(Queue, Recover, Callback) ->
     init(
@@ -492,22 +536,26 @@ init(#amqqueue { name = QueueName, durable = IsDurable }, new,
      AsyncCallback, MsgOnDiskFun, MsgIdxOnDiskFun, MsgAndIdxOnDiskFun) ->
     IndexState = rabbit_queue_index:init(QueueName,
                                          MsgIdxOnDiskFun, MsgAndIdxOnDiskFun),
+    VHost = QueueName#resource.virtual_host,
     init(IsDurable, IndexState, 0, 0, [],
          case IsDurable of
              true  -> msg_store_client_init(?PERSISTENT_MSG_STORE,
-                                            MsgOnDiskFun, AsyncCallback);
+                                            MsgOnDiskFun, AsyncCallback, VHost);
              false -> undefined
          end,
-         msg_store_client_init(?TRANSIENT_MSG_STORE, undefined, AsyncCallback));
+         msg_store_client_init(?TRANSIENT_MSG_STORE, undefined,
+                               AsyncCallback, VHost), VHost);
 
 %% We can be recovering a transient queue if it crashed
 init(#amqqueue { name = QueueName, durable = IsDurable }, Terms,
      AsyncCallback, MsgOnDiskFun, MsgIdxOnDiskFun, MsgAndIdxOnDiskFun) ->
     {PRef, RecoveryTerms} = process_recovery_terms(Terms),
+    VHost = QueueName#resource.virtual_host,
     {PersistentClient, ContainsCheckFun} =
         case IsDurable of
             true  -> C = msg_store_client_init(?PERSISTENT_MSG_STORE, PRef,
-                                               MsgOnDiskFun, AsyncCallback),
+                                               MsgOnDiskFun, AsyncCallback,
+                                               VHost),
                      {C, fun (MsgId) when is_binary(MsgId) ->
                                  rabbit_msg_store:contains(MsgId, C);
                              (#basic_message{is_persistent = Persistent}) ->
@@ -516,14 +564,17 @@ init(#amqqueue { name = QueueName, durable = IsDurable }, Terms,
             false -> {undefined, fun(_MsgId) -> false end}
         end,
     TransientClient  = msg_store_client_init(?TRANSIENT_MSG_STORE,
-                                             undefined, AsyncCallback),
+                                             undefined, AsyncCallback,
+                                             VHost),
     {DeltaCount, DeltaBytes, IndexState} =
         rabbit_queue_index:recover(
           QueueName, RecoveryTerms,
-          rabbit_msg_store:successfully_recovered_state(?PERSISTENT_MSG_STORE),
+          rabbit_vhost_msg_store:successfully_recovered_state(
+              VHost,
+              ?PERSISTENT_MSG_STORE),
           ContainsCheckFun, MsgIdxOnDiskFun, MsgAndIdxOnDiskFun),
     init(IsDurable, IndexState, DeltaCount, DeltaBytes, RecoveryTerms,
-         PersistentClient, TransientClient).
+         PersistentClient, TransientClient, VHost).
 
 process_recovery_terms(Terms=non_clean_shutdown) ->
     {rabbit_guid:gen(), Terms};
@@ -534,23 +585,24 @@ process_recovery_terms(Terms) ->
     end.
 
 terminate(_Reason, State) ->
-    State1 = #vqstate { persistent_count  = PCount,
+    State1 = #vqstate { virtual_host      = VHost,
+                        persistent_count  = PCount,
                         persistent_bytes  = PBytes,
                         index_state       = IndexState,
                         msg_store_clients = {MSCStateP, MSCStateT} } =
         purge_pending_ack(true, State),
     PRef = case MSCStateP of
                undefined -> undefined;
-               _         -> ok = rabbit_msg_store:client_terminate(MSCStateP),
+               _         -> ok = maybe_client_terminate(MSCStateP),
                             rabbit_msg_store:client_ref(MSCStateP)
            end,
     ok = rabbit_msg_store:client_delete_and_terminate(MSCStateT),
     Terms = [{persistent_ref,   PRef},
              {persistent_count, PCount},
              {persistent_bytes, PBytes}],
-    a(State1 #vqstate { index_state       = rabbit_queue_index:terminate(
-                                              Terms, IndexState),
-                        msg_store_clients = undefined }).
+    a(State1#vqstate {
+        index_state = rabbit_queue_index:terminate(VHost, Terms, IndexState),
+        msg_store_clients = undefined }).
 
 %% the only difference between purge and delete is that delete also
 %% needs to delete everything that's been delivered and not ack'd.
@@ -586,27 +638,27 @@ publish(Msg, MsgProps, IsDelivered, ChPid, Flow, State) ->
         publish1(Msg, MsgProps, IsDelivered, ChPid, Flow,
                  fun maybe_write_to_disk/4,
                  State),
-    a(reduce_memory_use(maybe_update_rates(State1))).
+    a(maybe_reduce_memory_use(maybe_update_rates(State1))).
 
 batch_publish(Publishes, ChPid, Flow, State) ->
     {ChPid, Flow, State1} =
         lists:foldl(fun batch_publish1/2, {ChPid, Flow, State}, Publishes),
     State2 = ui(State1),
-    a(reduce_memory_use(maybe_update_rates(State2))).
+    a(maybe_reduce_memory_use(maybe_update_rates(State2))).
 
 publish_delivered(Msg, MsgProps, ChPid, Flow, State) ->
     {SeqId, State1} =
         publish_delivered1(Msg, MsgProps, ChPid, Flow,
                            fun maybe_write_to_disk/4,
                            State),
-    {SeqId, a(reduce_memory_use(maybe_update_rates(State1)))}.
+    {SeqId, a(maybe_reduce_memory_use(maybe_update_rates(State1)))}.
 
 batch_publish_delivered(Publishes, ChPid, Flow, State) ->
     {ChPid, Flow, SeqIds, State1} =
         lists:foldl(fun batch_publish_delivered1/2,
                     {ChPid, Flow, [], State}, Publishes),
     State2 = ui(State1),
-    {lists:reverse(SeqIds), a(reduce_memory_use(maybe_update_rates(State2)))}.
+    {lists:reverse(SeqIds), a(maybe_reduce_memory_use(maybe_update_rates(State2)))}.
 
 discard(_MsgId, _ChPid, _Flow, State) -> State.
 
@@ -710,7 +762,7 @@ requeue(AckTags, #vqstate { mode       = default,
     {Delta1, MsgIds2, State3}       = delta_merge(SeqIds1, Delta, MsgIds1,
                                                   State2),
     MsgCount = length(MsgIds2),
-    {MsgIds2, a(reduce_memory_use(
+    {MsgIds2, a(maybe_reduce_memory_use(
                   maybe_update_rates(ui(
                     State3 #vqstate { delta      = Delta1,
                                       q3         = Q3a,
@@ -728,7 +780,7 @@ requeue(AckTags, #vqstate { mode       = lazy,
     {Delta1, MsgIds1, State2}     = delta_merge(SeqIds, Delta, MsgIds,
                                                 State1),
     MsgCount = length(MsgIds1),
-    {MsgIds1, a(reduce_memory_use(
+    {MsgIds1, a(maybe_reduce_memory_use(
                   maybe_update_rates(ui(
                     State2 #vqstate { delta      = Delta1,
                                       q3         = Q3a,
@@ -797,7 +849,7 @@ update_rates(State = #vqstate{ in_counter      =     InCount,
                                                ack_in    =  AckInRate,
                                                ack_out   = AckOutRate,
                                                timestamp = TS }}) ->
-    Now = time_compat:monotonic_time(),
+    Now = erlang:monotonic_time(),
 
     Rates = #rates { in        = update_rate(Now, TS,     InCount,     InRate),
                      out       = update_rate(Now, TS,    OutCount,    OutRate),
@@ -812,7 +864,7 @@ update_rates(State = #vqstate{ in_counter      =     InCount,
                    rates           = Rates }.
 
 update_rate(Now, TS, Count, Rate) ->
-    Time = time_compat:convert_time_unit(Now - TS, native, micro_seconds) /
+    Time = erlang:convert_time_unit(Now - TS, native, micro_seconds) /
         ?MICROS_PER_SECOND,
     if
         Time == 0 -> Rate;
@@ -860,6 +912,11 @@ timeout(State = #vqstate { index_state = IndexState }) ->
 handle_pre_hibernate(State = #vqstate { index_state = IndexState }) ->
     State #vqstate { index_state = rabbit_queue_index:flush(IndexState) }.
 
+handle_info(bump_reduce_memory_use, State = #vqstate{ waiting_bump = true }) ->
+    State#vqstate{ waiting_bump = false };
+handle_info(bump_reduce_memory_use, State) ->
+    State.
+
 resume(State) -> a(reduce_memory_use(State)).
 
 msg_rates(#vqstate { rates = #rates { in  = AvgIngressRate,
@@ -875,6 +932,8 @@ info(messages_ram, State) ->
     info(messages_ready_ram, State) + info(messages_unacknowledged_ram, State);
 info(messages_persistent, #vqstate{persistent_count = PersistentCount}) ->
     PersistentCount;
+info(messages_paged_out, #vqstate{delta = #delta{transient = Count}}) ->
+    Count;
 info(message_bytes, #vqstate{bytes         = Bytes,
                              unacked_bytes = UBytes}) ->
     Bytes + UBytes;
@@ -886,6 +945,8 @@ info(message_bytes_ram, #vqstate{ram_bytes = RamBytes}) ->
     RamBytes;
 info(message_bytes_persistent, #vqstate{persistent_bytes = PersistentBytes}) ->
     PersistentBytes;
+info(message_bytes_paged_out, #vqstate{delta_transient_bytes = PagedOutBytes}) ->
+    PagedOutBytes;
 info(head_message_timestamp, #vqstate{
           q3               = Q3,
           q4               = Q4,
@@ -1195,14 +1256,17 @@ with_immutable_msg_store_state(MSCState, IsPersistent, Fun) ->
                                            end),
     Res.
 
-msg_store_client_init(MsgStore, MsgOnDiskFun, Callback) ->
+msg_store_client_init(MsgStore, MsgOnDiskFun, Callback, VHost) ->
     msg_store_client_init(MsgStore, rabbit_guid:gen(), MsgOnDiskFun,
-                          Callback).
+                          Callback, VHost).
 
-msg_store_client_init(MsgStore, Ref, MsgOnDiskFun, Callback) ->
+msg_store_client_init(MsgStore, Ref, MsgOnDiskFun, Callback, VHost) ->
     CloseFDsFun = msg_store_close_fds_fun(MsgStore =:= ?PERSISTENT_MSG_STORE),
-    rabbit_msg_store:client_init(MsgStore, Ref, MsgOnDiskFun,
-                                 fun () -> Callback(?MODULE, CloseFDsFun) end).
+    rabbit_vhost_msg_store:client_init(VHost, MsgStore,
+                                       Ref, MsgOnDiskFun,
+                                       fun () ->
+                                           Callback(?MODULE, CloseFDsFun)
+                                       end).
 
 msg_store_write(MSCState, IsPersistent, MsgId, Msg) ->
     with_immutable_msg_store_state(
@@ -1242,14 +1306,14 @@ maybe_write_delivered(true, SeqId, IndexState) ->
     rabbit_queue_index:deliver([SeqId], IndexState).
 
 betas_from_index_entries(List, TransientThreshold, DelsAndAcksFun, State) ->
-    {Filtered, Delivers, Acks, RamReadyCount, RamBytes} =
+    {Filtered, Delivers, Acks, RamReadyCount, RamBytes, TransientCount, TransientBytes} =
         lists:foldr(
           fun ({_MsgOrId, SeqId, _MsgProps, IsPersistent, IsDelivered} = M,
-               {Filtered1, Delivers1, Acks1, RRC, RB} = Acc) ->
+               {Filtered1, Delivers1, Acks1, RRC, RB, TC, TB} = Acc) ->
                   case SeqId < TransientThreshold andalso not IsPersistent of
                       true  -> {Filtered1,
                                 cons_if(not IsDelivered, SeqId, Delivers1),
-                                [SeqId | Acks1], RRC, RB};
+                                [SeqId | Acks1], RRC, RB, TC, TB};
                       false -> MsgStatus = m(beta_msg_status(M)),
                                HaveMsg = msg_in_ram(MsgStatus),
                                Size = msg_size(MsgStatus),
@@ -1257,12 +1321,15 @@ betas_from_index_entries(List, TransientThreshold, DelsAndAcksFun, State) ->
                                    false -> {?QUEUE:in_r(MsgStatus, Filtered1),
                                              Delivers1, Acks1,
                                              RRC + one_if(HaveMsg),
-                                             RB + one_if(HaveMsg) * Size};
+                                             RB + one_if(HaveMsg) * Size,
+                                             TC + one_if(not IsPersistent),
+                                             TB + one_if(not IsPersistent) * Size};
                                    true  -> Acc %% [0]
                                end
                   end
-          end, {?QUEUE:new(), [], [], 0, 0}, List),
-    {Filtered, RamReadyCount, RamBytes, DelsAndAcksFun(Delivers, Acks, State)}.
+          end, {?QUEUE:new(), [], [], 0, 0, 0, 0}, List),
+    {Filtered, RamReadyCount, RamBytes, DelsAndAcksFun(Delivers, Acks, State),
+     TransientCount, TransientBytes}.
 %% [0] We don't increase RamBytes here, even though it pertains to
 %% unacked messages too, since if HaveMsg then the message must have
 %% been stored in the QI, thus the message must have been in
@@ -1275,25 +1342,35 @@ is_msg_in_pending_acks(SeqId, #vqstate { ram_pending_ack  = RPA,
      gb_trees:is_defined(SeqId, DPA) orelse
      gb_trees:is_defined(SeqId, QPA)).
 
-expand_delta(SeqId, ?BLANK_DELTA_PATTERN(X)) ->
-    d(#delta { start_seq_id = SeqId, count = 1, end_seq_id = SeqId + 1 });
+expand_delta(SeqId, ?BLANK_DELTA_PATTERN(X), IsPersistent) ->
+    d(#delta { start_seq_id = SeqId, count = 1, end_seq_id = SeqId + 1,
+               transient = one_if(not IsPersistent)});
 expand_delta(SeqId, #delta { start_seq_id = StartSeqId,
-                             count        = Count } = Delta)
+                             count        = Count,
+                             transient    = Transient } = Delta,
+             IsPersistent )
   when SeqId < StartSeqId ->
-    d(Delta #delta { start_seq_id = SeqId, count = Count + 1 });
+    d(Delta #delta { start_seq_id = SeqId, count = Count + 1,
+                     transient = Transient + one_if(not IsPersistent)});
 expand_delta(SeqId, #delta { count        = Count,
-                             end_seq_id   = EndSeqId } = Delta)
+                             end_seq_id   = EndSeqId,
+                             transient    = Transient } = Delta,
+             IsPersistent)
   when SeqId >= EndSeqId ->
-    d(Delta #delta { count = Count + 1, end_seq_id = SeqId + 1 });
-expand_delta(_SeqId, #delta { count       = Count } = Delta) ->
-    d(Delta #delta { count = Count + 1 }).
+    d(Delta #delta { count = Count + 1, end_seq_id = SeqId + 1,
+                     transient = Transient + one_if(not IsPersistent)});
+expand_delta(_SeqId, #delta { count       = Count,
+                              transient   = Transient } = Delta,
+             IsPersistent ) ->
+    d(Delta #delta { count = Count + 1,
+                     transient = Transient + one_if(not IsPersistent) }).
 
 %%----------------------------------------------------------------------------
 %% Internal major helpers for Public API
 %%----------------------------------------------------------------------------
 
 init(IsDurable, IndexState, DeltaCount, DeltaBytes, Terms,
-     PersistentClient, TransientClient) ->
+     PersistentClient, TransientClient, VHost) ->
     {LowSeqId, NextSeqId, IndexState1} = rabbit_queue_index:bounds(IndexState),
 
     {DeltaCount1, DeltaBytes1} =
@@ -1308,9 +1385,10 @@ init(IsDurable, IndexState, DeltaCount, DeltaBytes, Terms,
                 true  -> ?BLANK_DELTA;
                 false -> d(#delta { start_seq_id = LowSeqId,
                                     count        = DeltaCount1,
+                                    transient    = 0,
                                     end_seq_id   = NextSeqId })
             end,
-    Now = time_compat:monotonic_time(),
+    Now = erlang:monotonic_time(),
     IoBatchSize = rabbit_misc:get_env(rabbit, msg_store_io_batch_size,
                                       ?IO_BATCH_SIZE),
 
@@ -1336,6 +1414,7 @@ init(IsDurable, IndexState, DeltaCount, DeltaBytes, Terms,
       persistent_count    = DeltaCount1,
       bytes               = DeltaBytes1,
       persistent_bytes    = DeltaBytes1,
+      delta_transient_bytes = 0,
 
       target_ram_count    = infinity,
       ram_msg_count       = 0,
@@ -1358,7 +1437,8 @@ init(IsDurable, IndexState, DeltaCount, DeltaBytes, Terms,
       io_batch_size       = IoBatchSize,
 
       mode                = default,
-      memory_reduction_run_count = 0},
+      memory_reduction_run_count = 0,
+      virtual_host        = VHost},
     a(maybe_deltas_to_betas(State)).
 
 blank_rates(Now) ->
@@ -1375,22 +1455,22 @@ in_r(MsgStatus = #msg_status { msg = undefined },
         false -> {Msg, State1 = #vqstate { q4 = Q4a }} =
                      read_msg(MsgStatus, State),
                  MsgStatus1 = MsgStatus#msg_status{msg = Msg},
-                 stats(ready0, {MsgStatus, MsgStatus1},
+                 stats(ready0, {MsgStatus, MsgStatus1}, 0,
                        State1 #vqstate { q4 = ?QUEUE:in_r(MsgStatus1, Q4a) })
     end;
 in_r(MsgStatus,
      State = #vqstate { mode = default, q4 = Q4 }) ->
     State #vqstate { q4 = ?QUEUE:in_r(MsgStatus, Q4) };
 %% lazy queues
-in_r(MsgStatus = #msg_status { seq_id = SeqId },
+in_r(MsgStatus = #msg_status { seq_id = SeqId, is_persistent = IsPersistent },
      State = #vqstate { mode = lazy, q3 = Q3, delta = Delta}) ->
     case ?QUEUE:is_empty(Q3) of
         true  ->
             {_MsgStatus1, State1} =
                 maybe_write_to_disk(true, true, MsgStatus, State),
-            State2 = stats(ready0, {MsgStatus, none}, State1),
-            Delta1 = expand_delta(SeqId, Delta),
-            State2 #vqstate{ delta = Delta1 };
+            State2 = stats(ready0, {MsgStatus, none}, 1, State1),
+            Delta1 = expand_delta(SeqId, Delta, IsPersistent),
+            State2 #vqstate{ delta = Delta1};
         false ->
             State #vqstate { q3 = ?QUEUE:in_r(MsgStatus, Q3) }
     end.
@@ -1426,8 +1506,8 @@ read_msg(MsgId, IsPersistent, State = #vqstate{msg_store_clients = MSCState,
     {Msg, State #vqstate {msg_store_clients = MSCState1,
                           disk_read_count   = Count + 1}}.
 
-stats(Signs, Statuses, State) ->
-    stats0(expand_signs(Signs), expand_statuses(Statuses), State).
+stats(Signs, Statuses, DeltaPaged, State) ->
+    stats0(expand_signs(Signs), expand_statuses(Statuses), DeltaPaged, State).
 
 expand_signs(ready0)        -> {0, 0, true};
 expand_signs(lazy_pub)      -> {1, 0, true};
@@ -1442,13 +1522,14 @@ expand_statuses({B,    A})    -> {msg_in_ram(B), msg_in_ram(A), B}.
 %% contains "Ready" or "Unacked" iff that is what it counts. If
 %% neither is present it counts both.
 stats0({DeltaReady, DeltaUnacked, ReadyMsgPaged},
-       {InRamBefore, InRamAfter, MsgStatus},
+       {InRamBefore, InRamAfter, MsgStatus}, DeltaPaged,
        State = #vqstate{len              = ReadyCount,
                         bytes            = ReadyBytes,
                         ram_msg_count    = RamReadyCount,
                         persistent_count = PersistentCount,
                         unacked_bytes    = UnackedBytes,
                         ram_bytes        = RamBytes,
+                        delta_transient_bytes = DeltaBytes,
                         persistent_bytes = PersistentBytes}) ->
     S = msg_size(MsgStatus),
     DeltaTotal = DeltaReady + DeltaUnacked,
@@ -1471,7 +1552,8 @@ stats0({DeltaReady, DeltaUnacked, ReadyMsgPaged},
                   bytes             = ReadyBytes      + DeltaReady       * S,
                   unacked_bytes     = UnackedBytes    + DeltaUnacked     * S,
                   ram_bytes         = RamBytes        + DeltaRam         * S,
-                  persistent_bytes  = PersistentBytes + DeltaPersistent  * S}.
+                  persistent_bytes  = PersistentBytes + DeltaPersistent  * S,
+                  delta_transient_bytes = DeltaBytes  + DeltaPaged * one_if(not MsgStatus#msg_status.is_persistent) * S}.
 
 msg_size(#msg_status{msg_props = #message_properties{size = Size}}) -> Size.
 
@@ -1493,7 +1575,7 @@ remove(true, MsgStatus = #msg_status {
                MsgStatus #msg_status {
                  is_delivered = true }, State),
 
-    State2 = stats({-1, 1}, {MsgStatus, MsgStatus}, State1),
+    State2 = stats({-1, 1}, {MsgStatus, MsgStatus}, 0, State1),
 
     {SeqId, maybe_update_rates(
               State2 #vqstate {out_counter = OutCount + 1,
@@ -1529,7 +1611,7 @@ remove(false, MsgStatus = #msg_status {
             false -> IndexState1
         end,
 
-    State1 = stats({-1, 0}, {MsgStatus, none}, State),
+    State1 = stats({-1, 0}, {MsgStatus, none}, 0, State),
 
     {undefined, maybe_update_rates(
                   State1 #vqstate {out_counter = OutCount + 1,
@@ -1613,7 +1695,7 @@ process_queue_entries1(
                  is_delivered = true }, State1),
     {cons_if(IndexOnDisk andalso not IsDelivered, SeqId, Delivers),
      Fun(Msg, SeqId, FetchAcc),
-     stats({-1, 1}, {MsgStatus, MsgStatus}, State2)}.
+     stats({-1, 1}, {MsgStatus, MsgStatus}, 0, State2)}.
 
 collect_by_predicate(Pred, QAcc, State) ->
     case queue_out(State) of
@@ -1700,7 +1782,7 @@ remove_queue_entries(Q, DelsAndAcksFun,
                      State = #vqstate{msg_store_clients = MSCState}) ->
     {MsgIdsByStore, Delivers, Acks, State1} =
         ?QUEUE:foldl(fun remove_queue_entries1/2,
-                     {orddict:new(), [], [], State}, Q),
+                     {maps:new(), [], [], State}, Q),
     remove_msgs_by_id(MsgIdsByStore, MSCState),
     DelsAndAcksFun(Delivers, Acks, State1).
 
@@ -1710,12 +1792,12 @@ remove_queue_entries1(
                 is_persistent = IsPersistent} = MsgStatus,
   {MsgIdsByStore, Delivers, Acks, State}) ->
     {case MsgInStore of
-         true  -> rabbit_misc:orddict_cons(IsPersistent, MsgId, MsgIdsByStore);
+         true  -> rabbit_misc:maps_cons(IsPersistent, MsgId, MsgIdsByStore);
          false -> MsgIdsByStore
      end,
      cons_if(IndexOnDisk andalso not IsDelivered, SeqId, Delivers),
      cons_if(IndexOnDisk, SeqId, Acks),
-     stats({-1, 0}, {MsgStatus, none}, State)}.
+     stats({-1, 0}, {MsgStatus, none}, 0, State)}.
 
 process_delivers_and_acks_fun(deliver_and_ack) ->
     fun (Delivers, Acks, State = #vqstate { index_state = IndexState }) ->
@@ -1752,7 +1834,7 @@ publish1(Msg = #basic_message { is_persistent = IsPersistent, id = MsgId },
              end,
     InCount1 = InCount + 1,
     UC1 = gb_sets_maybe_insert(NeedsConfirming, MsgId, UC),
-    stats({1, 0}, {none, MsgStatus1},
+    stats({1, 0}, {none, MsgStatus1}, 0,
           State2#vqstate{ next_seq_id = SeqId + 1,
                           in_counter  = InCount1,
                           unconfirmed = UC1 });
@@ -1765,17 +1847,17 @@ publish1(Msg = #basic_message { is_persistent = IsPersistent, id = MsgId },
                                 in_counter          = InCount,
                                 durable             = IsDurable,
                                 unconfirmed         = UC,
-                                delta               = Delta }) ->
+                                delta               = Delta}) ->
     IsPersistent1 = IsDurable andalso IsPersistent,
     MsgStatus = msg_status(IsPersistent1, IsDelivered, SeqId, Msg, MsgProps, IndexMaxSize),
     {MsgStatus1, State1} = PersistFun(true, true, MsgStatus, State),
-    Delta1 = expand_delta(SeqId, Delta),
+    Delta1 = expand_delta(SeqId, Delta, IsPersistent),
     UC1 = gb_sets_maybe_insert(NeedsConfirming, MsgId, UC),
-    stats(lazy_pub, {lazy, m(MsgStatus1)},
+    stats(lazy_pub, {lazy, m(MsgStatus1)}, 1,
           State1#vqstate{ delta       = Delta1,
                           next_seq_id = SeqId + 1,
                           in_counter  = InCount + 1,
-                          unconfirmed = UC1 }).
+                          unconfirmed = UC1}).
 
 batch_publish1({Msg, MsgProps, IsDelivered}, {ChPid, Flow, State}) ->
     {ChPid, Flow, publish1(Msg, MsgProps, IsDelivered, ChPid, Flow,
@@ -1798,7 +1880,7 @@ publish_delivered1(Msg = #basic_message { is_persistent = IsPersistent,
     {MsgStatus1, State1} = PersistFun(false, false, MsgStatus, State),
     State2 = record_pending_ack(m(MsgStatus1), State1),
     UC1 = gb_sets_maybe_insert(NeedsConfirming, MsgId, UC),
-    State3 = stats({0, 1}, {none, MsgStatus1},
+    State3 = stats({0, 1}, {none, MsgStatus1}, 0,
                    State2 #vqstate { next_seq_id      = SeqId    + 1,
                                      out_counter      = OutCount + 1,
                                      in_counter       = InCount  + 1,
@@ -1821,7 +1903,7 @@ publish_delivered1(Msg = #basic_message { is_persistent = IsPersistent,
     {MsgStatus1, State1} = PersistFun(true, true, MsgStatus, State),
     State2 = record_pending_ack(m(MsgStatus1), State1),
     UC1 = gb_sets_maybe_insert(NeedsConfirming, MsgId, UC),
-    State3 = stats({0, 1}, {none, MsgStatus1},
+    State3 = stats({0, 1}, {none, MsgStatus1}, 0,
                    State2 #vqstate { next_seq_id      = SeqId    + 1,
                                      out_counter      = OutCount + 1,
                                      in_counter       = InCount  + 1,
@@ -2009,7 +2091,7 @@ remove_pending_ack(true, SeqId, State) ->
         {none, _} ->
             {none, State};
         {MsgStatus, State1} ->
-            {MsgStatus, stats({0, -1}, {MsgStatus, none}, State1)}
+            {MsgStatus, stats({0, -1}, {MsgStatus, none}, 0, State1)}
     end;
 remove_pending_ack(false, SeqId, State = #vqstate{ram_pending_ack  = RPA,
                                                   disk_pending_ack = DPA,
@@ -2067,27 +2149,27 @@ purge_pending_ack1(State = #vqstate { ram_pending_ack   = RPA,
                               qi_pending_ack   = gb_trees:empty()},
     {IndexOnDiskSeqIds, MsgIdsByStore, State1}.
 
-%% MsgIdsByStore is an orddict with two keys:
+%% MsgIdsByStore is an map with two keys:
 %%
 %% true: holds a list of Persistent Message Ids.
 %% false: holds a list of Transient Message Ids.
 %%
-%% When we call orddict:to_list/1 we get two sets of msg ids, where
+%% When we call maps:to_list/1 we get two sets of msg ids, where
 %% IsPersistent is either true for persistent messages or false for
 %% transient ones. The msg_store_remove/3 function takes this boolean
 %% flag to determine from which store the messages should be removed
 %% from.
 remove_msgs_by_id(MsgIdsByStore, MSCState) ->
     [ok = msg_store_remove(MSCState, IsPersistent, MsgIds)
-     || {IsPersistent, MsgIds} <- orddict:to_list(MsgIdsByStore)].
+     || {IsPersistent, MsgIds} <- maps:to_list(MsgIdsByStore)].
 
 remove_transient_msgs_by_id(MsgIdsByStore, MSCState) ->
-    case orddict:find(false, MsgIdsByStore) of
+    case maps:find(false, MsgIdsByStore) of
         error        -> ok;
         {ok, MsgIds} -> ok = msg_store_remove(MSCState, false, MsgIds)
     end.
 
-accumulate_ack_init() -> {[], orddict:new(), []}.
+accumulate_ack_init() -> {[], maps:new(), []}.
 
 accumulate_ack(#msg_status { seq_id        = SeqId,
                              msg_id        = MsgId,
@@ -2097,7 +2179,7 @@ accumulate_ack(#msg_status { seq_id        = SeqId,
                {IndexOnDiskSeqIdsAcc, MsgIdsByStore, AllMsgIds}) ->
     {cons_if(IndexOnDisk, SeqId, IndexOnDiskSeqIdsAcc),
      case MsgInStore of
-         true  -> rabbit_misc:orddict_cons(IsPersistent, MsgId, MsgIdsByStore);
+         true  -> rabbit_misc:maps_cons(IsPersistent, MsgId, MsgIdsByStore);
          false -> MsgIdsByStore
      end,
      [MsgId | AllMsgIds]}.
@@ -2154,14 +2236,14 @@ msgs_and_indices_written_to_disk(Callback, MsgIdSet) ->
 publish_alpha(#msg_status { msg = undefined } = MsgStatus, State) ->
     {Msg, State1} = read_msg(MsgStatus, State),
     MsgStatus1 = MsgStatus#msg_status { msg = Msg },
-    {MsgStatus1, stats({1, -1}, {MsgStatus, MsgStatus1}, State1)};
+    {MsgStatus1, stats({1, -1}, {MsgStatus, MsgStatus1}, 0, State1)};
 publish_alpha(MsgStatus, State) ->
-    {MsgStatus, stats({1, -1}, {MsgStatus, MsgStatus}, State)}.
+    {MsgStatus, stats({1, -1}, {MsgStatus, MsgStatus}, 0, State)}.
 
 publish_beta(MsgStatus, State) ->
     {MsgStatus1, State1} = maybe_prepare_write_to_disk(true, false, MsgStatus, State),
     MsgStatus2 = m(trim_msg_status(MsgStatus1)),
-    {MsgStatus2, stats({1, -1}, {MsgStatus, MsgStatus2}, State1)}.
+    {MsgStatus2, stats({1, -1}, {MsgStatus, MsgStatus2}, 0, State1)}.
 
 %% Rebuild queue, inserting sequence ids to maintain ordering
 queue_merge(SeqIds, Q, MsgIds, Limit, PubFun, State) ->
@@ -2200,11 +2282,12 @@ delta_merge(SeqIds, Delta, MsgIds, State) ->
                         case msg_from_pending_ack(SeqId, State0) of
                             {none, _} ->
                                 Acc;
-                        {#msg_status { msg_id = MsgId } = MsgStatus, State1} ->
+                        {#msg_status { msg_id = MsgId,
+                                       is_persistent = IsPersistent } = MsgStatus, State1} ->
                                 {_MsgStatus, State2} =
                                     maybe_prepare_write_to_disk(true, true, MsgStatus, State1),
-                                {expand_delta(SeqId, Delta0), [MsgId | MsgIds0],
-                                 stats({1, -1}, {MsgStatus, none}, State2)}
+                                {expand_delta(SeqId, Delta0, IsPersistent), [MsgId | MsgIds0],
+                                 stats({1, -1}, {MsgStatus, none}, 1, State2)}
                         end
                 end, {Delta, MsgIds, State}, SeqIds).
 
@@ -2310,12 +2393,12 @@ ifold(Fun, Acc, Its, State) ->
 %% Phase changes
 %%----------------------------------------------------------------------------
 
-maybe_execute_gc(State = #vqstate {memory_reduction_run_count = MRedRunCount}) ->
-    case MRedRunCount >= ?EXPLICIT_GC_RUN_OP_THRESHOLD of
-	true -> garbage_collect(),
-		 State#vqstate{memory_reduction_run_count =  0};
-        false ->    State#vqstate{memory_reduction_run_count =  MRedRunCount + 1}
-
+maybe_reduce_memory_use(State = #vqstate {memory_reduction_run_count = MRedRunCount,
+                                          mode = Mode}) ->
+    case MRedRunCount >= ?EXPLICIT_GC_RUN_OP_THRESHOLD(Mode) of
+	true -> State1 = reduce_memory_use(State),
+                State1#vqstate{memory_reduction_run_count =  0};
+        false -> State#vqstate{memory_reduction_run_count =  MRedRunCount + 1}
     end.
 
 reduce_memory_use(State = #vqstate { target_ram_count = infinity }) ->
@@ -2330,44 +2413,75 @@ reduce_memory_use(State = #vqstate {
                                                 out     = AvgEgress,
                                                 ack_in  = AvgAckIngress,
                                                 ack_out = AvgAckEgress } }) ->
-
-    State1 = #vqstate { q2 = Q2, q3 = Q3 } =
+    {CreditDiscBound, _} =rabbit_misc:get_env(rabbit,
+                                              msg_store_credit_disc_bound,
+                                              ?CREDIT_DISC_BOUND),
+    {NeedResumeA2B, State1} = {_, #vqstate { q2 = Q2, q3 = Q3 }} =
         case chunk_size(RamMsgCount + gb_trees:size(RPA), TargetRamCount) of
-            0  -> State;
+            0  -> {false, State};
             %% Reduce memory of pending acks and alphas. The order is
             %% determined based on which is growing faster. Whichever
             %% comes second may very well get a quota of 0 if the
             %% first manages to push out the max number of messages.
-            S1 -> Funs = case ((AvgAckIngress - AvgAckEgress) >
+            A2BChunk ->
+                %% In case there are few messages to be sent to a message store
+                %% and many messages to be embedded to the queue index,
+                %% we should limit the number of messages to be flushed
+                %% to avoid blocking the process.
+                A2BChunkActual = case A2BChunk > CreditDiscBound * 2 of
+                    true  -> CreditDiscBound * 2;
+                    false -> A2BChunk
+                end,
+                Funs = case ((AvgAckIngress - AvgAckEgress) >
                                    (AvgIngress - AvgEgress)) of
                              true  -> [fun limit_ram_acks/2,
                                        fun push_alphas_to_betas/2];
                              false -> [fun push_alphas_to_betas/2,
                                        fun limit_ram_acks/2]
                          end,
-                  {_, State2} = lists:foldl(fun (ReduceFun, {QuotaN, StateN}) ->
+                {Quota, State2} = lists:foldl(fun (ReduceFun, {QuotaN, StateN}) ->
                                                     ReduceFun(QuotaN, StateN)
-                                            end, {S1, State}, Funs),
-                  State2
+                                              end, {A2BChunkActual, State}, Funs),
+                {(Quota == 0) andalso (A2BChunk > A2BChunkActual), State2}
         end,
-
-    State3 =
+    Permitted = permitted_beta_count(State1),
+    {NeedResumeB2D, State3} =
+        %% If there are more messages with their queue position held in RAM,
+        %% a.k.a. betas, in Q2 & Q3 than IoBatchSize,
+        %% write their queue position to disk, a.k.a. push_betas_to_deltas
         case chunk_size(?QUEUE:len(Q2) + ?QUEUE:len(Q3),
-                        permitted_beta_count(State1)) of
-            S2 when S2 >= IoBatchSize ->
-                %% There is an implicit, but subtle, upper bound here. We
-                %% may shuffle a lot of messages from Q2/3 into delta, but
-                %% the number of these that require any disk operation,
-                %% namely index writing, i.e. messages that are genuine
-                %% betas and not gammas, is bounded by the credit_flow
-                %% limiting of the alpha->beta conversion above.
-                push_betas_to_deltas(S2, State1);
+                        Permitted) of
+            B2DChunk when B2DChunk >= IoBatchSize ->
+                %% Same as for alphas to betas. Limit a number of messages
+                %% to be flushed to disk at once to avoid blocking the process.
+                B2DChunkActual = case B2DChunk > CreditDiscBound * 2 of
+                    true -> CreditDiscBound * 2;
+                    false -> B2DChunk
+                end,
+                StateBD = push_betas_to_deltas(B2DChunkActual, State1),
+                {B2DChunk > B2DChunkActual, StateBD};
             _  ->
-                State1
+                {false, State1}
         end,
-    %% See rabbitmq-server-290 for the reasons behind this GC call.
-    garbage_collect(),
-    State3;
+    %% We can be blocked by the credit flow, or limited by a batch size,
+    %% or finished with flushing.
+    %% If blocked by the credit flow - the credit grant will resume processing,
+    %% if limited by a batch - the batch continuation message should be sent.
+    %% The continuation message will be prioritised over publishes,
+    %% but not consumptions, so the queue can make progess.
+    Blocked = credit_flow:blocked(),
+    case {Blocked, NeedResumeA2B orelse NeedResumeB2D} of
+        %% Credit bump will continue paging
+        {true, _}      -> State3;
+        %% Finished with paging
+        {false, false} -> State3;
+        %% Planning next batch
+        {false, true}  ->
+            %% We don't want to use self-credit-flow, because it's harder to
+            %% reason about. So the process sends a (prioritised) message to
+            %% itself and sets a waiting_bump value to keep the message box clean
+            maybe_bump_reduce_memory_use(State3)
+    end;
 %% When using lazy queues, there are no alphas, so we don't need to
 %% call push_alphas_to_betas/2.
 reduce_memory_use(State = #vqstate {
@@ -2390,7 +2504,14 @@ reduce_memory_use(State = #vqstate {
             S2 ->
                 push_betas_to_deltas(S2, State1)
         end,
-    maybe_execute_gc(State3).
+    garbage_collect(),
+    State3.
+
+maybe_bump_reduce_memory_use(State = #vqstate{ waiting_bump = true }) ->
+    State;
+maybe_bump_reduce_memory_use(State) ->
+    self() ! bump_reduce_memory_use,
+    State#vqstate{ waiting_bump = true }.
 
 limit_ram_acks(0, State) ->
     {0, ui(State)};
@@ -2406,7 +2527,7 @@ limit_ram_acks(Quota, State = #vqstate { ram_pending_ack  = RPA,
             MsgStatus2 = m(trim_msg_status(MsgStatus1)),
             DPA1 = gb_trees:insert(SeqId, MsgStatus2, DPA),
             limit_ram_acks(Quota - 1,
-                           stats({0, 0}, {MsgStatus, MsgStatus2},
+                           stats({0, 0}, {MsgStatus, MsgStatus2}, 0,
                                  State1 #vqstate { ram_pending_ack  = RPA1,
                                                    disk_pending_ack = DPA1 }))
     end.
@@ -2495,16 +2616,18 @@ maybe_deltas_to_betas(DelsAndAcksFun,
                         ram_msg_count        = RamMsgCount,
                         ram_bytes            = RamBytes,
                         disk_read_count      = DiskReadCount,
+                        delta_transient_bytes = DeltaTransientBytes,
                         transient_threshold  = TransientThreshold }) ->
     #delta { start_seq_id = DeltaSeqId,
              count        = DeltaCount,
+             transient    = Transient,
              end_seq_id   = DeltaSeqIdEnd } = Delta,
     DeltaSeqId1 =
         lists:min([rabbit_queue_index:next_segment_boundary(DeltaSeqId),
                    DeltaSeqIdEnd]),
     {List, IndexState1} = rabbit_queue_index:read(DeltaSeqId, DeltaSeqId1,
                                                   IndexState),
-    {Q3a, RamCountsInc, RamBytesInc, State1} =
+    {Q3a, RamCountsInc, RamBytesInc, State1, TransientCount, TransientBytes} =
         betas_from_index_entries(List, TransientThreshold,
                                  DelsAndAcksFun,
                                  State #vqstate { index_state = IndexState1 }),
@@ -2527,13 +2650,16 @@ maybe_deltas_to_betas(DelsAndAcksFun,
                     %% can now join q2 onto q3
                     State2 #vqstate { q2    = ?QUEUE:new(),
                                       delta = ?BLANK_DELTA,
-                                      q3    = ?QUEUE:join(Q3b, Q2) };
+                                      q3    = ?QUEUE:join(Q3b, Q2),
+                                      delta_transient_bytes = 0};
                 N when N > 0 ->
                     Delta1 = d(#delta { start_seq_id = DeltaSeqId1,
                                         count        = N,
+                                        transient    = Transient - TransientCount,
                                         end_seq_id   = DeltaSeqIdEnd }),
                     State2 #vqstate { delta = Delta1,
-                                      q3    = Q3b }
+                                      q3    = Q3b,
+                                      delta_transient_bytes = DeltaTransientBytes - TransientBytes }
             end
     end.
 
@@ -2542,7 +2668,8 @@ push_alphas_to_betas(Quota, State) ->
         push_alphas_to_betas(
           fun ?QUEUE:out/1,
           fun (MsgStatus, Q1a,
-               State0 = #vqstate { q3 = Q3, delta = #delta { count = 0 } }) ->
+               State0 = #vqstate { q3 = Q3, delta = #delta { count = 0,
+                                                             transient = 0 } }) ->
                   State0 #vqstate { q1 = Q1a, q3 = ?QUEUE:in(MsgStatus, Q3) };
               (MsgStatus, Q1a, State0 = #vqstate { q2 = Q2 }) ->
                   State0 #vqstate { q1 = Q1a, q2 = ?QUEUE:in(MsgStatus, Q2) }
@@ -2578,7 +2705,7 @@ push_alphas_to_betas(Generator, Consumer, Quota, Q, State) ->
                                                          State),
                          MsgStatus2 = m(trim_msg_status(MsgStatus1)),
                          State2 = stats(
-                                    ready0, {MsgStatus, MsgStatus2}, State1),
+                                    ready0, {MsgStatus, MsgStatus2}, 0, State1),
                          State3 = Consumer(MsgStatus2, Qa, State2),
                          push_alphas_to_betas(Generator, Consumer, Quota - 1,
                                               Qa, State3)
@@ -2641,10 +2768,11 @@ push_betas_to_deltas1(Generator, Limit, Q, {Quota, Delta, State}) ->
           when SeqId < Limit ->
             {Q, {Quota, Delta, ui(State)}};
         {{value, MsgStatus = #msg_status { seq_id = SeqId }}, Qa} ->
-            {#msg_status { index_on_disk = true }, State1} =
+            {#msg_status { index_on_disk = true,
+                           is_persistent = IsPersistent }, State1} =
                 maybe_batch_write_index_to_disk(true, MsgStatus, State),
-            State2 = stats(ready0, {MsgStatus, none}, State1),
-            Delta1 = expand_delta(SeqId, Delta),
+            State2 = stats(ready0, {MsgStatus, none}, 1, State1),
+            Delta1 = expand_delta(SeqId, Delta, IsPersistent),
             push_betas_to_deltas1(Generator, Limit, Qa,
                                   {Quota - 1, Delta1, State2})
     end.
@@ -2679,3 +2807,212 @@ transform_storage(TransformFun) ->
 transform_store(Store, TransformFun) ->
     rabbit_msg_store:force_recovery(rabbit_mnesia:dir(), Store),
     rabbit_msg_store:transform_dir(rabbit_mnesia:dir(), Store, TransformFun).
+
+move_messages_to_vhost_store() ->
+    case list_persistent_queues() of
+        []     ->
+            log_upgrade("No durable queues found."
+                        " Skipping message store migration"),
+            ok;
+        Queues ->
+            move_messages_to_vhost_store(Queues)
+    end,
+    ok = delete_old_store(),
+    ok = rabbit_queue_index:cleanup_global_recovery_terms().
+
+move_messages_to_vhost_store(Queues) ->
+    log_upgrade("Moving messages to per-vhost message store"),
+    %% Move the queue index for each persistent queue to the new store
+    lists:foreach(
+        fun(Queue) ->
+            #amqqueue{name = QueueName} = Queue,
+            rabbit_queue_index:move_to_per_vhost_stores(QueueName)
+        end,
+        Queues),
+    %% Legacy (global) msg_store may require recovery.
+    %% This upgrade step should only be started
+    %% if we are upgrading from a pre-3.7.0 version.
+    {QueuesWithTerms, RecoveryRefs, StartFunState} = read_old_recovery_terms(Queues),
+
+    OldStore = run_old_persistent_store(RecoveryRefs, StartFunState),
+
+    VHosts = rabbit_vhost:list(),
+
+    %% New store should not be recovered.
+    NewMsgStore = start_new_store(VHosts),
+    %% Recovery terms should be started for all vhosts for new store.
+    [{ok, _} = rabbit_recovery_terms:open_table(VHost) || VHost <- VHosts],
+
+    MigrationBatchSize = application:get_env(rabbit, queue_migration_batch_size,
+                                             ?QUEUE_MIGRATION_BATCH_SIZE),
+    in_batches(MigrationBatchSize,
+        {rabbit_variable_queue, migrate_queue, [OldStore, NewMsgStore]},
+        QueuesWithTerms,
+        "message_store upgrades: Migrating batch ~p of ~p queues. Out of total ~p ~n",
+        "message_store upgrades: Batch ~p of ~p queues migrated ~n. ~p total left"),
+
+    log_upgrade("Message store migration finished"),
+    ok = rabbit_sup:stop_child(OldStore),
+    [ok= rabbit_recovery_terms:close_table(VHost) || VHost <- VHosts],
+    ok = stop_new_store(NewMsgStore).
+
+in_batches(Size, MFA, List, MessageStart, MessageEnd) ->
+    in_batches(Size, 1, MFA, List, MessageStart, MessageEnd).
+
+in_batches(_, _, _, [], _, _) -> ok;
+in_batches(Size, BatchNum, MFA, List, MessageStart, MessageEnd) ->
+    Length = length(List),
+    {Batch, Tail} = case Size > Length of
+        true  -> {List, []};
+        false -> lists:split(Size, List)
+    end,
+    ProcessedLength = (BatchNum - 1) * Size,
+    rabbit_log:info(MessageStart, [BatchNum, Size, ProcessedLength + Length]),
+    {M, F, A} = MFA,
+    Keys = [ rpc:async_call(node(), M, F, [El | A]) || El <- Batch ],
+    lists:foreach(fun(Key) ->
+        case rpc:yield(Key) of
+            {badrpc, Err} -> throw(Err);
+            _             -> ok
+        end
+    end,
+    Keys),
+    rabbit_log:info(MessageEnd, [BatchNum, Size, length(Tail)]),
+    in_batches(Size, BatchNum + 1, MFA, Tail, MessageStart, MessageEnd).
+
+migrate_queue({QueueName = #resource{virtual_host = VHost, name = Name},
+               RecoveryTerm},
+              OldStore, NewStore) ->
+    log_upgrade_verbose(
+        "Migrating messages in queue ~s in vhost ~s to per-vhost message store~n",
+        [Name, VHost]),
+    OldStoreClient = get_global_store_client(OldStore),
+    NewStoreClient = get_per_vhost_store_client(QueueName, NewStore),
+    %% WARNING: During scan_queue_segments queue index state is being recovered
+    %% and terminated. This can cause side effects!
+    rabbit_queue_index:scan_queue_segments(
+        %% We migrate only persistent messages which are found in message store
+        %% and are not acked yet
+        fun (_SeqId, MsgId, _MsgProps, true, _IsDelivered, no_ack, OldC)
+            when is_binary(MsgId) ->
+                migrate_message(MsgId, OldC, NewStoreClient);
+            (_SeqId, _MsgId, _MsgProps,
+             _IsPersistent, _IsDelivered, _IsAcked, OldC) ->
+                OldC
+        end,
+        OldStoreClient,
+        QueueName),
+    rabbit_msg_store:client_terminate(OldStoreClient),
+    rabbit_msg_store:client_terminate(NewStoreClient),
+    NewClientRef = rabbit_msg_store:client_ref(NewStoreClient),
+    case RecoveryTerm of
+        non_clean_shutdown -> ok;
+        Term when is_list(Term) ->
+            NewRecoveryTerm = lists:keyreplace(persistent_ref, 1, RecoveryTerm,
+                                               {persistent_ref, NewClientRef}),
+            rabbit_queue_index:update_recovery_term(QueueName, NewRecoveryTerm)
+    end,
+    log_upgrade_verbose("Finished migrating queue ~s in vhost ~s", [Name, VHost]),
+    {QueueName, NewClientRef}.
+
+migrate_message(MsgId, OldC, NewC) ->
+    case rabbit_msg_store:read(MsgId, OldC) of
+        {{ok, Msg}, OldC1} ->
+            ok = rabbit_msg_store:write(MsgId, Msg, NewC),
+            OldC1;
+        _ -> OldC
+    end.
+
+get_per_vhost_store_client(#resource{virtual_host = VHost}, NewStore) ->
+    {VHost, StorePid} = lists:keyfind(VHost, 1, NewStore),
+    rabbit_msg_store:client_init(StorePid, rabbit_guid:gen(),
+                                 fun(_,_) -> ok end, fun() -> ok end).
+
+get_global_store_client(OldStore) ->
+    rabbit_msg_store:client_init(OldStore,
+                                 rabbit_guid:gen(),
+                                 fun(_,_) -> ok end,
+                                 fun() -> ok end).
+
+list_persistent_queues() ->
+    Node = node(),
+    mnesia:async_dirty(
+      fun () ->
+              qlc:e(qlc:q([Q || Q = #amqqueue{name = Name,
+                                              pid  = Pid}
+                                    <- mnesia:table(rabbit_durable_queue),
+                                node(Pid) == Node,
+                                mnesia:read(rabbit_queue, Name, read) =:= []]))
+      end).
+
+read_old_recovery_terms([]) ->
+    {[], [], ?EMPTY_START_FUN_STATE};
+read_old_recovery_terms(Queues) ->
+    QueueNames = [Name || #amqqueue{name = Name} <- Queues],
+    {AllTerms, StartFunState} = rabbit_queue_index:read_global_recovery_terms(QueueNames),
+    Refs = [Ref || Terms <- AllTerms,
+                   Terms /= non_clean_shutdown,
+                   begin
+                       Ref = proplists:get_value(persistent_ref, Terms),
+                       Ref =/= undefined
+                   end],
+    {lists:zip(QueueNames, AllTerms), Refs, StartFunState}.
+
+run_old_persistent_store(Refs, StartFunState) ->
+    OldStoreName = ?PERSISTENT_MSG_STORE,
+    ok = rabbit_sup:start_child(OldStoreName, rabbit_msg_store, start_global_store_link,
+                                [OldStoreName, rabbit_mnesia:dir(),
+                                 Refs, StartFunState]),
+    OldStoreName.
+
+start_new_store(VHosts) ->
+    %% Ensure vhost supervisor is started, so we can add vhosts to it.
+    lists:map(fun(VHost) ->
+        VHostDir = rabbit_vhost:msg_store_dir_path(VHost),
+        {ok, Pid} = rabbit_msg_store:start_link(?PERSISTENT_MSG_STORE,
+                                                VHostDir,
+                                                undefined,
+                                                ?EMPTY_START_FUN_STATE),
+        {VHost, Pid}
+    end,
+    VHosts).
+
+stop_new_store(NewStore) ->
+    lists:foreach(fun({_VHost, StorePid}) ->
+        unlink(StorePid),
+        exit(StorePid, shutdown)
+    end,
+    NewStore),
+    ok.
+
+delete_old_store() ->
+    log_upgrade("Removing the old message store data"),
+    rabbit_file:recursive_delete(
+        [filename:join([rabbit_mnesia:dir(), ?PERSISTENT_MSG_STORE])]),
+    %% Delete old transient store as well
+    rabbit_file:recursive_delete(
+        [filename:join([rabbit_mnesia:dir(), ?TRANSIENT_MSG_STORE])]),
+    ok.
+
+log_upgrade(Msg) ->
+    log_upgrade(Msg, []).
+
+log_upgrade(Msg, Args) ->
+    rabbit_log:info("message_store upgrades: " ++ Msg, Args).
+
+log_upgrade_verbose(Msg) ->
+    log_upgrade_verbose(Msg, []).
+
+log_upgrade_verbose(Msg, Args) ->
+    rabbit_log_upgrade:info(Msg, Args).
+
+maybe_client_terminate(MSCStateP) ->
+    %% Queue might have been asked to stop by the supervisor, it needs a clean
+    %% shutdown in order for the supervising strategy to work - if it reaches max
+    %% restarts might bring the vhost down.
+    try
+        rabbit_msg_store:client_terminate(MSCStateP)
+    catch
+        _:_ ->
+            ok
+    end.

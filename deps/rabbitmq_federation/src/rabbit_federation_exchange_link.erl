@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_exchange_link).
@@ -42,11 +42,13 @@
                 internal_exchange,
                 waiting_cmds = gb_trees:empty(),
                 next_serial,
-                bindings = dict:new(),
+                bindings = #{},
                 downstream_connection,
                 downstream_channel,
                 downstream_exchange,
-                unacked}).
+                unacked,
+                internal_exchange_timer,
+                internal_exchange_interval}).
 
 %%----------------------------------------------------------------------------
 
@@ -80,11 +82,12 @@ init({Upstream, XName}) ->
             gen_server2:cast(self(), maybe_go),
             {ok, {not_started, {Upstream, UParams, XName}}};
         {error, not_found} ->
+            rabbit_federation_link_util:log_warning(XName, "not found, stopping link~n", []),
             {stop, gone}
     end.
 
 handle_call(list_routing_keys, _From, State = #state{bindings = Bindings}) ->
-    {reply, lists:sort([K || {K, _} <- dict:fetch_keys(Bindings)]), State};
+    {reply, lists:sort([K || {K, _} <- maps:keys(Bindings)]), State};
 
 handle_call(Msg, _From, State) ->
     {stop, {unexpected_call, Msg}, State}.
@@ -106,9 +109,17 @@ handle_cast(go, State) ->
 handle_cast({enqueue, _, _}, State = {not_started, _}) ->
     {noreply, State};
 
-handle_cast({enqueue, Serial, Cmd}, State = #state{waiting_cmds = Waiting}) ->
+handle_cast({enqueue, Serial, Cmd},
+            State = #state{waiting_cmds = Waiting,
+                           downstream_exchange = XName}) ->
     Waiting1 = gb_trees:insert(Serial, Cmd, Waiting),
-    {noreply, play_back_commands(State#state{waiting_cmds = Waiting1})};
+    try
+        {noreply, play_back_commands(State#state{waiting_cmds = Waiting1})}
+    catch exit:{{shutdown, {server_initiated_close, 404, Text}}, _} ->
+            rabbit_federation_link_util:log_warning(
+              XName, "detected upstream changes, restarting link: ~p~n", [Text]),
+            {stop, {shutdown, restart}, State}
+    end;
 
 handle_cast(Msg, State) ->
     {stop, {unexpected_cast, Msg}, State}.
@@ -166,6 +177,16 @@ handle_info({'DOWN', _Ref, process, Pid, Reason},
     rabbit_federation_link_util:handle_down(
       Pid, Reason, Ch, DCh, {Upstream, UParams, XName}, State);
 
+handle_info(check_internal_exchange, State = #state{internal_exchange = IntXNameBin,
+                                                    internal_exchange_interval = Int}) ->
+    case check_internal_exchange(IntXNameBin, State) of
+        upstream_not_found ->
+            {stop, {shutdown, restart}, State};
+        _ ->
+            TRef = erlang:send_after(Int, self(), check_internal_exchange),
+            {noreply, State#state{internal_exchange_timer = TRef}}
+    end;
+
 handle_info(Msg, State) ->
     {stop, {unexpected_info, Msg}, State}.
 
@@ -176,8 +197,19 @@ terminate(Reason, #state{downstream_connection = DConn,
                          connection            = Conn,
                          upstream              = Upstream,
                          upstream_params       = UParams,
-                         downstream_exchange   = XName}) ->
+                         downstream_exchange   = XName,
+                         internal_exchange_timer = TRef,
+                         internal_exchange     = IntExchange,
+                         queue                 = Queue}) ->
+    timer:cancel(TRef),
+
+    %% Terminate the direct connection
     rabbit_federation_link_util:ensure_connection_closed(DConn),
+
+    %% Cleanup of internal queue and exchange
+    delete_upstream_queue(Conn, Queue),
+    delete_upstream_exchange(Conn, IntExchange),
+
     rabbit_federation_link_util:ensure_connection_closed(Conn),
     rabbit_federation_link_util:log_terminate(Reason, Upstream, UParams, XName),
     ok.
@@ -243,19 +275,19 @@ remove_binding(B, State) ->
 
 record_binding(B = #binding{destination = Dest},
                State = #state{bindings = Bs}) ->
-    {DoIt, Set} = case dict:find(key(B), Bs) of
+    {DoIt, Set} = case maps:find(key(B), Bs) of
                       error       -> {true,  sets:from_list([Dest])};
                       {ok, Dests} -> {false, sets:add_element(
                                                Dest, Dests)}
                   end,
-    {DoIt, State#state{bindings = dict:store(key(B), Set, Bs)}}.
+    {DoIt, State#state{bindings = maps:put(key(B), Set, Bs)}}.
 
 forget_binding(B = #binding{destination = Dest},
                State = #state{bindings = Bs}) ->
-    Dests = sets:del_element(Dest, dict:fetch(key(B), Bs)),
+    Dests = sets:del_element(Dest, maps:get(key(B), Bs)),
     {DoIt, Bs1} = case sets:size(Dests) of
-                      0 -> {true,  dict:erase(key(B), Bs)};
-                      _ -> {false, dict:store(key(B), Dests, Bs)}
+                      0 -> {true,  maps:remove(key(B), Bs)};
+                      _ -> {false, maps:put(key(B), Dests, Bs)}
                   end,
     {DoIt, State#state{bindings = Bs1}}.
 
@@ -345,8 +377,7 @@ update_binding(Args, #state{downstream_exchange = X,
     Hops = case rabbit_misc:table_lookup(Args, ?BINDING_HEADER) of
                undefined    -> MaxHops;
                {array, All} -> [{table, Prev} | _] = All,
-                               {short, PrevHops} =
-                                   rabbit_misc:table_lookup(Prev, <<"hops">>),
+                               PrevHops = get_hops(Prev),
                                case rabbit_federation_util:already_seen(
                                       UName, All) of
                                    true  -> 0;
@@ -366,6 +397,8 @@ update_binding(Args, #state{downstream_exchange = X,
                      {<<"hops">>,         short,   Hops}],
              rabbit_basic:prepend_table_header(?BINDING_HEADER, Info, Args)
     end.
+
+
 
 key(#binding{key = Key, args = Args}) -> {Key, Args}.
 
@@ -394,6 +427,8 @@ go(S0 = {not_started, {Upstream, UParams, DownXName}}) ->
               %% serial we will process. Since it compares larger than
               %% any number we never process any commands. And we will
               %% soon get told to stop anyway.
+              {ok, Interval} = application:get_env(rabbitmq_federation,
+                                                   internal_exchange_check_interval),
               State = ensure_upstream_bindings(
                         consume_from_upstream_queue(
                           #state{upstream              = Upstream,
@@ -405,9 +440,11 @@ go(S0 = {not_started, {Upstream, UParams, DownXName}}) ->
                                  downstream_connection = DConn,
                                  downstream_channel    = DCh,
                                  downstream_exchange   = DownXName,
-                                 unacked               = Unacked}),
+                                 unacked               = Unacked,
+                                 internal_exchange_interval = Interval}),
                         Bindings),
-              {noreply, State}
+              TRef = erlang:send_after(Interval, self(), check_internal_exchange),
+              {noreply, State#state{internal_exchange_timer = TRef}}
       end, Upstream, UParams, DownXName, S0).
 
 consume_from_upstream_queue(
@@ -443,28 +480,24 @@ consume_from_upstream_queue(
                 queue        = Q}.
 
 ensure_upstream_bindings(State = #state{upstream            = Upstream,
-                                        upstream_params     = UParams,
                                         connection          = Conn,
                                         channel             = Ch,
                                         downstream_exchange = DownXName,
                                         queue               = Q}, Bindings) ->
-    #upstream_params{x_or_q = X, params = Params} = UParams,
     OldSuffix = rabbit_federation_db:get_active_suffix(
                   DownXName, Upstream, <<"A">>),
     Suffix = case OldSuffix of
                  <<"A">> -> <<"B">>;
                  <<"B">> -> <<"A">>
              end,
-    IntXNameBin = upstream_exchange_name(name(X), vhost(Params),
-                                         DownXName, Suffix),
+    IntXNameBin = upstream_exchange_name(Q, Suffix),
     ensure_upstream_exchange(State),
     ensure_internal_exchange(IntXNameBin, State),
     amqp_channel:call(Ch, #'queue.bind'{exchange = IntXNameBin, queue = Q}),
     State1 = State#state{internal_exchange = IntXNameBin},
     rabbit_federation_db:set_active_suffix(DownXName, Upstream, Suffix),
     State2 = lists:foldl(fun add_binding/2, State1, Bindings),
-    OldIntXNameBin = upstream_exchange_name(
-                       name(X), vhost(Params), DownXName, OldSuffix),
+    OldIntXNameBin = upstream_exchange_name(Q, OldSuffix),
     delete_upstream_exchange(Conn, OldIntXNameBin),
     State2.
 
@@ -513,6 +546,35 @@ ensure_internal_exchange(IntXNameBin,
                            amqp_channel:call(Ch, Fan)
                    end).
 
+check_internal_exchange(IntXNameBin,
+                         #state{upstream        = #upstream{max_hops = MaxHops},
+                                upstream_params = UParams,
+                                downstream_exchange = XName}) ->
+    #upstream_params{params = Params} = UParams,
+    Base = #'exchange.declare'{exchange    = IntXNameBin,
+                               passive     = true,
+                               durable     = true,
+                               internal    = true,
+                               auto_delete = true},
+    Purpose = [{<<"x-internal-purpose">>, longstr, <<"federation">>}],
+    XFUArgs = [{?MAX_HOPS_ARG,  long,    MaxHops},
+               {?NODE_NAME_ARG, longstr, rabbit_nodes:cluster_name()}
+               | Purpose],
+    XFU = Base#'exchange.declare'{type      = <<"x-federation-upstream">>,
+                                  arguments = XFUArgs},
+    rabbit_federation_link_util:disposable_connection_call(
+      Params, XFU, fun(404, Text) ->
+                           rabbit_federation_link_util:log_warning(
+                             XName, "detected internal upstream exchange changes,"
+                             " restarting link: ~p~n", [Text]),
+                           upstream_not_found;
+                      (Code, Text) ->
+                           rabbit_federation_link_util:log_warning(
+                             XName, "internal upstream exchange check failed: ~p ~p~n",
+                             [Code, Text]),
+                           error
+                   end).
+
 upstream_queue_name(XNameBin, VHost, #resource{name         = DownXNameBin,
                                                virtual_host = DownVHost}) ->
     Node = rabbit_nodes:cluster_name(),
@@ -526,13 +588,16 @@ upstream_queue_name(XNameBin, VHost, #resource{name         = DownXNameBin,
                end,
     <<"federation: ", XNameBin/binary, " -> ", Node/binary, DownPart/binary>>.
 
-upstream_exchange_name(XNameBin, VHost, DownXName, Suffix) ->
-    Name = upstream_queue_name(XNameBin, VHost, DownXName),
-    <<Name/binary, " ", Suffix/binary>>.
+upstream_exchange_name(UpstreamQName, Suffix) ->
+    <<UpstreamQName/binary, " ", Suffix/binary>>.
 
 delete_upstream_exchange(Conn, XNameBin) ->
     rabbit_federation_link_util:disposable_channel_call(
       Conn, #'exchange.delete'{exchange = XNameBin}).
+
+delete_upstream_queue(Conn, Queue) ->
+    rabbit_federation_link_util:disposable_channel_call(
+      Conn, #'queue.delete'{queue = Queue}).
 
 update_headers(#upstream_params{table = Table}, UName, Redelivered, Headers) ->
     rabbit_basic:prepend_table_header(
@@ -542,3 +607,16 @@ update_headers(#upstream_params{table = Table}, UName, Redelivered, Headers) ->
 
 header_for_name(unknown) -> [];
 header_for_name(Name)    -> [{<<"cluster-name">>, longstr, Name}].
+
+get_hops(Table) ->
+  case rabbit_misc:table_lookup(Table, <<"hops">>) of
+    %% see rabbit_binary_generator
+    {short, N}         -> N;
+    {long, N}          -> N;
+    {byte, N}          -> N;
+    {signedint, N}     -> N;
+    {unsignedbyte, N}  -> N;
+    {unsignedshort, N} -> N;
+    {unsignedint, N}   -> N;
+    {_, N} when is_integer(N) andalso N >= 0 -> N
+  end.

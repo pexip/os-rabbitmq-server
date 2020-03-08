@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_auth_backend_ldap_app).
@@ -25,7 +25,7 @@
 
 -rabbit_boot_step({ldap_pool,
                    [{description, "LDAP pool"},
-                    {mfa, {?MODULE, create_ldap_pool, []}}, 
+                    {mfa, {?MODULE, create_ldap_pool, []}},
                     {requires, kernel_ready}]}).
 
 create_ldap_pool() ->
@@ -43,7 +43,9 @@ start(_Type, _StartArgs) ->
     {ok, SSL} = application:get_env(rabbitmq_auth_backend_ldap, use_ssl),
     {ok, TLS} = application:get_env(rabbitmq_auth_backend_ldap, use_starttls),
     case SSL orelse TLS of
-        true  -> rabbit_networking:ensure_ssl();
+        true  ->
+            rabbit_networking:ensure_ssl(),
+            ok;
         false -> ok
     end,
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).

@@ -11,37 +11,49 @@
 %%   The Original Code is RabbitMQ.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 
 -module(rabbit_tracing_wm_file).
 
--export([init/1, resource_exists/2, serve/2, content_types_provided/2,
+-export([init/2, resource_exists/2, serve/2, content_types_provided/2,
          is_authorized/2, allowed_methods/2, delete_resource/2]).
+-export([serve/1]).
 
--include_lib("rabbitmq_management/include/rabbit_mgmt.hrl").
--include_lib("webmachine/include/webmachine.hrl").
+-include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 
 %%--------------------------------------------------------------------
-init(_Config) -> {ok, #context{}}.
+init(Req, _State) ->
+    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
+
 
 content_types_provided(ReqData, Context) ->
-   {[{"text/plain", serve}], ReqData, Context}.
+   {[{<<"text/plain">>, serve}], ReqData, Context}.
 
 allowed_methods(ReqData, Context) ->
-    {['HEAD', 'GET', 'DELETE'], ReqData, Context}.
+    {[<<"HEAD">>, <<"GET">>, <<"DELETE">>], ReqData, Context}.
 
 resource_exists(ReqData, Context) ->
     Name = rabbit_mgmt_util:id(name, ReqData),
-    {rabbit_tracing_files:exists(Name), ReqData, Context}.
+    Exists = rabbit_tracing_util:apply_on_node(ReqData, Context, rabbit_tracing_files,
+                                               exists, [Name]),
+    {Exists, ReqData, Context}.
 
 serve(ReqData, Context) ->
     Name = rabbit_mgmt_util:id(name, ReqData),
-    {ok, Content} = file:read_file(rabbit_tracing_files:full_path(Name)),
+    Content = rabbit_tracing_util:apply_on_node(ReqData, Context,
+                                                rabbit_tracing_wm_file,
+                                                serve, [Name]),
     {Content, ReqData, Context}.
+
+serve(Name) ->
+    Path = rabbit_tracing_files:full_path(Name),
+    {ok, Content} = file:read_file(Path),
+    Content.
 
 delete_resource(ReqData, Context) ->
     Name = rabbit_mgmt_util:id(name, ReqData),
-    ok = rabbit_tracing_files:delete(Name),
+    ok = rabbit_tracing_util:apply_on_node(ReqData, Context, rabbit_tracing_files,
+                                           delete, [Name]),
     {true, ReqData, Context}.
 
 is_authorized(ReqData, Context) ->

@@ -91,8 +91,9 @@
 %% call/3, i.e. a pid, global name, local name, or local name on a
 %% particular node.
 %%
+%% 11) Internal buffer length is emitted as a core [RabbitMQ] metric.
 
-%% All modifications are (C) 2009-2013 GoPivotal, Inc.
+%% All modifications are (C) 2009-2017 Pivotal Software, Inc.
 
 %% ``The contents of this file are subject to the Erlang Public License,
 %% Version 1.1, (the "License"); you may not use this file except in
@@ -218,7 +219,8 @@
 
 %% State record
 -record(gs2_state, {parent, name, state, mod, time,
-                    timeout_state, queue, debug, prioritisers}).
+                    timeout_state, queue, debug, prioritisers,
+                    timer, emit_stats_fun, stop_stats_fun}).
 
 %%%=========================================================================
 %%%  Specs. These exist only to shut up dialyzer's warnings
@@ -232,6 +234,8 @@
 -spec system_terminate(_, _, _, gs2_state()) -> no_return().
 
 -type millis() :: non_neg_integer().
+
+-dialyzer({nowarn_function, do_multi_call/4}).
 
 %%%=========================================================================
 %%%  API
@@ -329,20 +333,14 @@ call(Name, Request, Timeout) ->
 %% Make a cast to a generic server.
 %% -----------------------------------------------------------------
 cast({global,Name}, Request) ->
-    catch global:send(Name, cast_msg(Request)),
+    catch global:send(Name, {'$gen_cast', Request}),
     ok;
 cast({Name,Node}=Dest, Request) when is_atom(Name), is_atom(Node) ->
-    do_cast(Dest, Request);
-cast(Dest, Request) when is_atom(Dest) ->
-    do_cast(Dest, Request);
-cast(Dest, Request) when is_pid(Dest) ->
-    do_cast(Dest, Request).
-
-do_cast(Dest, Request) ->
-    do_send(Dest, cast_msg(Request)),
+    catch (Dest ! {'$gen_cast', Request}),
+    ok;
+cast(Dest, Request) when is_atom(Dest); is_pid(Dest) ->
+    catch (Dest ! {'$gen_cast', Request}),
     ok.
-
-cast_msg(Request) -> {'$gen_cast',Request}.
 
 %% -----------------------------------------------------------------
 %% Send a reply to the client.
@@ -354,13 +352,13 @@ reply({To, Tag}, Reply) ->
 %% Asyncronous broadcast, returns nothing, it's just send'n pray
 %% -----------------------------------------------------------------
 abcast(Name, Request) when is_atom(Name) ->
-    do_abcast([node() | nodes()], Name, cast_msg(Request)).
+    do_abcast([node() | nodes()], Name, {'$gen_cast', Request}).
 
 abcast(Nodes, Name, Request) when is_list(Nodes), is_atom(Name) ->
-    do_abcast(Nodes, Name, cast_msg(Request)).
+    do_abcast(Nodes, Name, {'$gen_cast', Request}).
 
 do_abcast([Node|Nodes], Name, Msg) when is_atom(Node) ->
-    do_send({Name,Node},Msg),
+    catch ({Name, Node} ! Msg),
     do_abcast(Nodes, Name, Msg);
 do_abcast([], _,_) -> abcast.
 
@@ -513,10 +511,13 @@ enter_loop(Mod, Options, State, ServerName, Timeout, Backoff) ->
     Debug = debug_options(Name, Options),
     Queue = priority_queue:new(),
     Backoff1 = extend_backoff(Backoff),
-    loop(find_prioritisers(
+    {EmitStatsFun, StopStatsFun} = stats_funs(),
+    loop(init_stats(find_prioritisers(
            #gs2_state { parent = Parent, name = Name, state = State,
                         mod = Mod, time = Timeout, timeout_state = Backoff1,
-                        queue = Queue, debug = Debug })).
+                        queue = Queue, debug = Debug,
+                        emit_stats_fun = EmitStatsFun,
+                        stop_stats_fun = StopStatsFun }))).
 
 %%%========================================================================
 %%% Gen-callback functions
@@ -535,37 +536,41 @@ init_it(Starter, Parent, Name0, Mod, Args, Options) ->
     Name = name(Name0),
     Debug = debug_options(Name, Options),
     Queue = priority_queue:new(),
+    {EmitStatsFun, StopStatsFun} = stats_funs(),
     GS2State = find_prioritisers(
                  #gs2_state { parent  = Parent,
                               name    = Name,
                               mod     = Mod,
                               queue   = Queue,
-                              debug   = Debug }),
+                              debug   = Debug,
+                              emit_stats_fun = EmitStatsFun,
+                              stop_stats_fun = StopStatsFun }),
     case catch Mod:init(Args) of
         {ok, State} ->
             proc_lib:init_ack(Starter, {ok, self()}),
-            loop(GS2State #gs2_state { state         = State,
-                                       time          = infinity,
-                                       timeout_state = undefined });
+            loop(init_stats(GS2State#gs2_state { state         = State,
+                                                   time          = infinity,
+                                                   timeout_state = undefined }));
         {ok, State, Timeout} ->
             proc_lib:init_ack(Starter, {ok, self()}),
-            loop(GS2State #gs2_state { state         = State,
-                                       time          = Timeout,
-                                       timeout_state = undefined });
+            loop(init_stats(
+                   GS2State#gs2_state { state         = State,
+                                        time          = Timeout,
+                                        timeout_state = undefined }));
         {ok, State, Timeout, Backoff = {backoff, _, _, _}} ->
             Backoff1 = extend_backoff(Backoff),
             proc_lib:init_ack(Starter, {ok, self()}),
-            loop(GS2State #gs2_state { state         = State,
-                                       time          = Timeout,
-                                       timeout_state = Backoff1 });
+            loop(init_stats(GS2State#gs2_state { state         = State,
+                                                   time          = Timeout,
+                                                   timeout_state = Backoff1 }));
         {ok, State, Timeout, Backoff = {backoff, _, _, _}, Mod1} ->
             Backoff1 = extend_backoff(Backoff),
             proc_lib:init_ack(Starter, {ok, self()}),
-            loop(find_prioritisers(
-                  GS2State #gs2_state { mod           = Mod1,
-                                        state         = State,
-                                        time          = Timeout,
-                                        timeout_state = Backoff1 }));
+            loop(init_stats(find_prioritisers(
+                                GS2State#gs2_state { mod           = Mod1,
+                                                     state         = State,
+                                                     time          = Timeout,
+                                                     timeout_state = Backoff1 })));
         {stop, Reason} ->
             %% For consistency, we must make sure that the
             %% registered name (if any) is unregistered before
@@ -610,7 +615,7 @@ extend_backoff(undefined) ->
     undefined;
 extend_backoff({backoff, InitialTimeout, MinimumTimeout, DesiredHibPeriod}) ->
     {backoff, InitialTimeout, MinimumTimeout, DesiredHibPeriod,
-      rand_compat:seed(exsplus)}.
+      rand:seed(exsplus)}.
 
 %%%========================================================================
 %%% Internal functions
@@ -637,17 +642,18 @@ drain(GS2State) ->
     after 0 -> GS2State
     end.
 
-process_next_msg(GS2State = #gs2_state { time          = Time,
+process_next_msg(GS2State0 = #gs2_state { time          = Time,
                                          timeout_state = TimeoutState,
                                          queue         = Queue }) ->
     case priority_queue:out(Queue) of
         {{value, Msg}, Queue1} ->
-            process_msg(Msg, GS2State #gs2_state { queue = Queue1 });
+            GS2State = ensure_stats_timer(GS2State0),
+            process_msg(Msg, GS2State#gs2_state { queue = Queue1 });
         {empty, Queue1} ->
-            {Time1, HibOnTimeout}
+            {Time1, HibOnTimeout, GS2State}
                 = case {Time, TimeoutState} of
                       {hibernate, {backoff, Current, _Min, _Desired, _RSt}} ->
-                          {Current, true};
+                          {Current, true, stop_stats_timer(GS2State0)};
                       {hibernate, _} ->
                           %% wake_hib/7 will set Time to hibernate. If
                           %% we were woken and didn't receive a msg
@@ -656,8 +662,8 @@ process_next_msg(GS2State = #gs2_state { time          = Time,
                           %% R13B1 always waits infinitely when waking
                           %% from hibernation, so that's what we do
                           %% here too.
-                          {infinity, false};
-                      _ -> {Time, false}
+                          {infinity, false, GS2State0};
+                      _ -> {Time, false, GS2State0}
                   end,
             receive
                 Input ->
@@ -682,7 +688,7 @@ wake_hib(GS2State = #gs2_state { timeout_state = TS }) ->
                             undefined;
                         {SleptAt, TimeoutState} ->
                             adjust_timeout_state(SleptAt,
-                                                 time_compat:monotonic_time(),
+                                                 erlang:monotonic_time(),
                                                  TimeoutState)
                     end,
     post_hibernate(
@@ -691,14 +697,16 @@ wake_hib(GS2State = #gs2_state { timeout_state = TS }) ->
 hibernate(GS2State = #gs2_state { timeout_state = TimeoutState }) ->
     TS = case TimeoutState of
              undefined             -> undefined;
-             {backoff, _, _, _, _} -> {time_compat:monotonic_time(),
+             {backoff, _, _, _, _} -> {erlang:monotonic_time(),
                                        TimeoutState}
          end,
     proc_lib:hibernate(?MODULE, wake_hib,
                        [GS2State #gs2_state { timeout_state = TS }]).
 
-pre_hibernate(GS2State = #gs2_state { state   = State,
-                                      mod     = Mod }) ->
+pre_hibernate(GS2State0 = #gs2_state { state          = State,
+                                       mod            = Mod,
+                                       emit_stats_fun = EmitStatsFun }) ->
+    GS2State = EmitStatsFun(stop_stats_timer(GS2State0)),
     case erlang:function_exported(Mod, handle_pre_hibernate, 1) of
         true ->
             case catch Mod:handle_pre_hibernate(State) of
@@ -711,8 +719,9 @@ pre_hibernate(GS2State = #gs2_state { state   = State,
             hibernate(GS2State)
     end.
 
-post_hibernate(GS2State = #gs2_state { state = State,
-                                       mod   = Mod }) ->
+post_hibernate(GS2State0 = #gs2_state { state = State,
+                                        mod   = Mod }) ->
+    GS2State = ensure_stats_timer(GS2State0),
     case erlang:function_exported(Mod, handle_post_hibernate, 1) of
         true ->
             case catch Mod:handle_post_hibernate(State) of
@@ -737,7 +746,7 @@ post_hibernate(GS2State = #gs2_state { state = State,
 
 adjust_timeout_state(SleptAt, AwokeAt, {backoff, CurrentTO, MinimumTO,
                                         DesiredHibPeriod, RandomState}) ->
-    NapLengthMicros = time_compat:convert_time_unit(AwokeAt - SleptAt,
+    NapLengthMicros = erlang:convert_time_unit(AwokeAt - SleptAt,
                                                     native, micro_seconds),
     CurrentMicros = CurrentTO * 1000,
     MinimumMicros = MinimumTO * 1000,
@@ -750,7 +759,7 @@ adjust_timeout_state(SleptAt, AwokeAt, {backoff, CurrentTO, MinimumTO,
             true -> lists:max([MinimumTO, CurrentTO div 2]);
             false -> CurrentTO
         end,
-    {Extra, RandomState1} = rand_compat:uniform_s(Base, RandomState),
+    {Extra, RandomState1} = rand:uniform_s(Base, RandomState),
     CurrentTO1 = Base + Extra,
     {backoff, CurrentTO1, MinimumTO, DesiredHibPeriod, RandomState1}.
 
@@ -766,6 +775,8 @@ in({'EXIT', Parent, _R} = Input, GS2State = #gs2_state { parent = Parent }) ->
     in(Input, infinity, GS2State);
 in({system, _From, _Req} = Input, GS2State) ->
     in(Input, infinity, GS2State);
+in(emit_gen_server2_stats, GS2State = #gs2_state{ emit_stats_fun = EmitStatsFun}) ->
+    next_stats_timer(EmitStatsFun(GS2State));
 in(Input, GS2State = #gs2_state { prioritisers = {_, _, F} }) ->
     in(Input, F(Input, GS2State), GS2State).
 
@@ -777,9 +788,18 @@ in(Input, Priority, GS2State = #gs2_state { queue = Queue }) ->
 
 process_msg({system, From, Req},
             GS2State = #gs2_state { parent = Parent, debug  = Debug }) ->
-    %% gen_server puts Hib on the end as the 7th arg, but that version
-    %% of the fun seems not to be documented so leaving out for now.
-    sys:handle_system_msg(Req, From, Parent, ?MODULE, Debug, GS2State);
+    case Req of
+        %% This clause will match only in R16B03.
+        %% Since 17.0 replace_state is not a system message.
+        {replace_state, StateFun} ->
+            GS2State1 = StateFun(GS2State),
+            _ = gen:reply(From, GS2State1),
+            system_continue(Parent, Debug, GS2State1);
+        _ ->
+            %% gen_server puts Hib on the end as the 7th arg, but that version
+            %% of the fun seems not to be documented so leaving out for now.
+            sys:handle_system_msg(Req, From, Parent, ?MODULE, Debug, GS2State)
+    end;
 process_msg({'$with_state', From, Fun},
            GS2State = #gs2_state{state = State}) ->
     reply(From, catch Fun(State)),
@@ -796,8 +816,6 @@ process_msg(Msg, GS2State = #gs2_state { name = Name, debug  = Debug }) ->
 %%% ---------------------------------------------------
 %%% Send/recive functions
 %%% ---------------------------------------------------
-do_send(Dest, Msg) ->
-    catch erlang:send(Dest, Msg).
 
 do_multi_call(Nodes, Name, Req, infinity) ->
     Tag = make_ref(),
@@ -1023,7 +1041,7 @@ handle_msg({'$gen_call', From, Msg}, GS2State = #gs2_state { mod = Mod,
             {'EXIT', R} =
                 (catch terminate(Reason, Msg,
                                  GS2State #gs2_state { state = NState })),
-            common_reply(Name, From, Reply, NState, Debug),
+            _ = common_reply(Name, From, Reply, NState, Debug),
             exit(R);
         Other ->
             handle_common_reply(Other, Msg, GS2State)
@@ -1122,10 +1140,15 @@ print_event(Dev, Event, Name) ->
 %%% Terminate the server.
 %%% ---------------------------------------------------
 
+-spec terminate(_, _, _) -> no_return().
+
 terminate(Reason, Msg, #gs2_state { name  = Name,
                                     mod   = Mod,
                                     state = State,
-                                    debug = Debug }) ->
+                                    debug = Debug,
+                                    stop_stats_fun = StopStatsFun
+                                    } = GS2State) ->
+    StopStatsFun(stop_stats_timer(GS2State)),
     case catch Mod:terminate(Reason, State) of
         {'EXIT', R} ->
             error_info(R, Reason, Name, Msg, State, Debug),
@@ -1345,3 +1368,35 @@ callback(Mod, FunName, Args, DefaultThunk) ->
                  end;
         false -> DefaultThunk()
     end.
+
+stats_funs() ->
+    case ets:info(gen_server2_metrics) of
+        undefined ->
+            {fun(GS2State) -> GS2State end,
+             fun(GS2State) -> GS2State end};
+        _ ->
+            {fun emit_stats/1, fun stop_stats/1}
+    end.
+
+init_stats(State = #gs2_state{ emit_stats_fun = EmitStatsFun }) ->
+    StateWithInitTimer = rabbit_event:init_stats_timer(State, #gs2_state.timer),
+    next_stats_timer(EmitStatsFun(StateWithInitTimer)).
+
+next_stats_timer(State) ->
+    ensure_stats_timer(rabbit_event:reset_stats_timer(State, #gs2_state.timer)).
+
+ensure_stats_timer(State) ->
+    rabbit_event:ensure_stats_timer(State,
+                                    #gs2_state.timer,
+                                    emit_gen_server2_stats).
+
+stop_stats_timer(State) ->
+    rabbit_event:stop_stats_timer(State, #gs2_state.timer).
+
+emit_stats(State = #gs2_state{queue = Queue}) ->
+    rabbit_core_metrics:gen_server2_stats(self(), priority_queue:len(Queue)),
+    State.
+
+stop_stats(State) ->
+    rabbit_core_metrics:gen_server2_deleted(self()),
+    State.

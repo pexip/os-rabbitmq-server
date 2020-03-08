@@ -18,6 +18,8 @@
     <th>State</th>
     <th>Inbound message rate</th>
     <th>Last changed</th>
+    <th>ID</th>
+    <th>Operations</th>
   </tr>
  </thead>
  <tbody>
@@ -36,7 +38,7 @@
         <sub><%= fmt_string(link.upstream_queue) %></sub>
       <% } %>
     </td>
-    <td><%= fmt_string(link.uri) %></td>
+    <td><%= fmt_string(fmt_uri_with_credentials(link.uri)) %></td>
 <% if (vhosts_interesting) { %>
     <td><%= fmt_string(link.vhost) %></td>
 <% } %>
@@ -78,6 +80,15 @@
       <% } %>
     </td>
     <td><%= link.timestamp %></td>
+    <td><%= link.id %></td>
+    <td>
+        <form action="#/restart-link" method="delete" class="confirm">
+        <input type="hidden" name="id" value="<%= link.id %>"/>
+        <input type="hidden" name="node" value="<%= link.node %>"/>
+        <input type="hidden" name="vhost" value="<%= link.vhost %>"/>
+        <input type="submit" value="Restart"/>
+        </form>
+    </td>
   </tr>
 <% } %>
   <% } %>

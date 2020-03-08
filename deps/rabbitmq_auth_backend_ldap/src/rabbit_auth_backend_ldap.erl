@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_auth_backend_ldap).
@@ -25,18 +25,35 @@
 -behaviour(rabbit_authz_backend).
 
 -export([user_login_authentication/2, user_login_authorization/1,
-         check_vhost_access/3, check_resource_access/3]).
+         check_vhost_access/3, check_resource_access/3, check_topic_access/4]).
+
+-export([get_connections/0]).
+
+%% for tests
+-export([purge_connections/0]).
 
 -define(L(F, A),  log("LDAP "         ++ F, A)).
 -define(L1(F, A), log("    LDAP "     ++ F, A)).
 -define(L2(F, A), log("        LDAP " ++ F, A)).
 -define(SCRUBBED_CREDENTIAL,  "xxxx").
+-define(RESOURCE_ACCESS_QUERY_VARIABLES, [username, user_dn, vhost, resource, name, permission]).
+
+-define(LDAP_OPERATION_RETRIES, 10).
 
 -import(rabbit_misc, [pget/2]).
 
 -record(impl, { user_dn, password }).
 
 %%--------------------------------------------------------------------
+
+get_connections() ->
+    worker_pool:submit(ldap_pool, fun() -> get(ldap_conns) end, reuse).
+
+purge_connections() ->
+    [ok = worker_pool:submit(ldap_pool,
+                             fun() -> purge_conn(Anon, Servers, Opts) end, reuse)
+     || {{Anon, Servers, Opts}, _} <- maps:to_list(get_connections())],
+    ok.
 
 user_login_authentication(Username, []) ->
     %% Without password, e.g. EXTERNAL
@@ -106,7 +123,51 @@ check_resource_access(User = #auth_user{username = Username,
        [log_resource(Args), log_user(User), log_result(R)]),
     R.
 
+check_topic_access(User = #auth_user{username = Username,
+                                     impl     = #impl{user_dn = UserDN}},
+                   #resource{virtual_host = VHost, kind = topic = Resource, name = Name},
+                   Permission,
+                   Context) ->
+    OptionsArgs = topic_context_as_options(Context, undefined),
+    Args = [{username,   Username},
+            {user_dn,    UserDN},
+            {vhost,      VHost},
+            {resource,   Resource},
+            {name,       Name},
+            {permission, Permission}] ++ OptionsArgs,
+    ?L("CHECK: ~s for ~s", [log_resource(Args), log_user(User)]),
+    R = evaluate_ldap(env(topic_access_query), Args, User),
+    ?L("DECISION: ~s for ~s: ~p",
+        [log_resource(Args), log_user(User), log_result(R)]),
+    R.
+
 %%--------------------------------------------------------------------
+
+topic_context_as_options(Context, Namespace) when is_map(Context) ->
+    % filter keys that would erase fixed variables
+    lists:flatten([begin
+         Value = maps:get(Key, Context),
+         case Value of
+             MapOfValues when is_map(MapOfValues) ->
+                 topic_context_as_options(MapOfValues, Key);
+             SimpleValue ->
+                 case Namespace of
+                     undefined ->
+                         {rabbit_data_coercion:to_atom(Key), SimpleValue};
+                     Namespace ->
+                         {create_option_name_with_namespace(Namespace, Key), Value}
+                 end
+         end
+     end || Key <- maps:keys(Context), lists:member(
+                    rabbit_data_coercion:to_atom(Key),
+                    ?RESOURCE_ACCESS_QUERY_VARIABLES) =:= false]);
+topic_context_as_options(_, _) ->
+    [].
+
+create_option_name_with_namespace(Namespace, Key) ->
+    rabbit_data_coercion:to_atom(
+        rabbit_data_coercion:to_list(Namespace) ++ "." ++ rabbit_data_coercion:to_list(Key)
+    ).
 
 evaluate(Query, Args, User, LDAP) ->
     ?L1("evaluating query: ~p", [Query]),
@@ -203,12 +264,41 @@ evaluate0({equals, StringQuery1, StringQuery2}, Args, User, LDAP) ->
               evaluate(StringQuery1, Args, User, LDAP),
               evaluate(StringQuery2, Args, User, LDAP));
 
-evaluate0({match, StringQuery, REQuery}, Args, User, LDAP) ->
+evaluate0({match, {string, _} = StringQuery, {string, _} = REQuery}, Args, User, LDAP) ->
     safe_eval(fun (String1, String2) ->
                       do_match(String1, String2)
               end,
               evaluate(StringQuery, Args, User, LDAP),
               evaluate(REQuery, Args, User, LDAP));
+
+evaluate0({match, StringQuery, {string, _} = REQuery}, Args, User, LDAP) when is_list(StringQuery)->
+    safe_eval(fun (String1, String2) ->
+        do_match(String1, String2)
+              end,
+        evaluate(StringQuery, Args, User, LDAP),
+        evaluate(REQuery, Args, User, LDAP));
+
+evaluate0({match, {string, _} = StringQuery, REQuery}, Args, User, LDAP) when is_list(REQuery) ->
+    safe_eval(fun (String1, String2) ->
+        do_match(String1, String2)
+              end,
+        evaluate(StringQuery, Args, User, LDAP),
+        evaluate(REQuery, Args, User, LDAP));
+
+evaluate0({match, StringQuery, REQuery}, Args, User, LDAP) when is_list(StringQuery),
+                                                                is_list(REQuery)  ->
+    safe_eval(fun (String1, String2) ->
+        do_match(String1, String2)
+              end,
+        evaluate(StringQuery, Args, User, LDAP),
+        evaluate(REQuery, Args, User, LDAP));
+
+evaluate0({match, StringQuery, REQuery}, Args, User, LDAP) ->
+    safe_eval(fun (String1, String2) ->
+        do_match_bidirectionally(String1, String2)
+              end,
+        evaluate(StringQuery, Args, User, LDAP),
+        evaluate(REQuery, Args, User, LDAP));
 
 evaluate0(StringPattern, Args, User, LDAP) when is_list(StringPattern) ->
     evaluate0({string, StringPattern}, Args, User, LDAP);
@@ -270,6 +360,14 @@ safe_eval(_F, _,          {error, _}) -> false;
 safe_eval(F,  V1,         V2)         -> F(V1, V2).
 
 do_match(S1, S2) ->
+    case re:run(S1, S2) of
+        {match, _} -> log_match(S1, S2, R = true),
+            R;
+        nomatch    -> log_match(S1, S2, R = false),
+            R
+    end.
+
+do_match_bidirectionally(S1, S2) ->
     case re:run(S1, S2) of
         {match, _} -> log_match(S1, S2, R = true),
                       R;
@@ -337,7 +435,9 @@ with_ldap({error, _} = E, _Fun, _State) ->
 %% to avoid rebinding if the connection is already bound as the user
 %% of interest, so this could still be more efficient.
 with_ldap({ok, Creds}, Fun, Servers) ->
-    Opts0 = [{port, env(port)}],
+    Opts0 = [{port, env(port)},
+             {idle_timeout, env(idle_timeout)},
+             {anon_auth, env(anon_auth)}],
     Opts1 = case env(log) of
                 network ->
                     Pre = "    LDAP network traffic: ",
@@ -362,63 +462,139 @@ with_ldap({ok, Creds}, Fun, Servers) ->
                infinity -> Opts1;
                MS       -> [{timeout, MS} | Opts1]
            end,
+
     worker_pool:submit(
       ldap_pool,
       fun () ->
               case with_login(Creds, Servers, Opts, Fun) of
-                  {error, {gen_tcp_error, closed}} ->
-                      %% retry with new connection
-                      rabbit_log:warning("TCP connection to a LDAP server is already closed.~n"),
-                      purge_conn(Creds == anon, Servers, Opts),
-                      rabbit_log:warning("LDAP will retry with a new connection.~n"),
+                  {error, {gen_tcp_error, _}} ->
+                      purge_connection(Creds, Servers, Opts),
                       with_login(Creds, Servers, Opts, Fun);
                   Result -> Result
               end
       end, reuse).
 
 with_login(Creds, Servers, Opts, Fun) ->
+    with_login(Creds, Servers, Opts, Fun, ?LDAP_OPERATION_RETRIES).
+with_login(_Creds, _Servers, _Opts, _Fun, 0 = _RetriesLeft) ->
+    rabbit_log:warning("LDAP failed to perform an operation. TCP connection to a LDAP server was closed or otherwise defunct. Exhausted all retries."),
+    {error, ldap_connect_error};
+with_login(Creds, Servers, Opts, Fun, RetriesLeft) ->
     case get_or_create_conn(Creds == anon, Servers, Opts) of
         {ok, LDAP} ->
             case Creds of
                 anon ->
                     ?L1("anonymous bind", []),
-                    Fun(LDAP);
+                    case call_ldap_fun(Fun, LDAP) of
+                        {error, ldap_closed} ->
+                            purge_connection(Creds, Servers, Opts),
+                            with_login(Creds, Servers, Opts, Fun, RetriesLeft - 1);
+                        Other -> Other
+                    end;
                 {UserDN, Password} ->
                     case eldap:simple_bind(LDAP, UserDN, Password) of
                         ok ->
                             ?L1("bind succeeded: ~s",
                                 [scrub_dn(UserDN, env(log))]),
-                            Fun(LDAP);
+                            case call_ldap_fun(Fun, LDAP, UserDN) of
+                                {error, ldap_closed} ->
+                                    with_login(Creds, Servers, Opts, Fun, RetriesLeft - 1);
+                                {error, {gen_tcp_error, _}} ->
+                                    with_login(Creds, Servers, Opts, Fun, RetriesLeft - 1);
+                                Other -> Other
+                            end;
                         {error, invalidCredentials} ->
                             ?L1("bind returned \"invalid credentials\": ~s",
                                 [scrub_dn(UserDN, env(log))]),
                             {refused, UserDN, []};
+                        {error, ldap_closed} ->
+                            purge_connection(Creds, Servers, Opts),
+                            with_login(Creds, Servers, Opts, Fun, RetriesLeft - 1);
+                        {error, {gen_tcp_error, _}} ->
+                            purge_connection(Creds, Servers, Opts),
+                            with_login(Creds, Servers, Opts, Fun, RetriesLeft - 1);
                         {error, E} ->
-                            ?L1("bind error: ~s ~p",
+                            ?L1("bind error: ~p ~p",
                                 [scrub_dn(UserDN, env(log)), E]),
-                            {error, E}
+                            %% Do not report internal bind error to a client
+                            {error, ldap_bind_error}
                     end
             end;
         Error ->
             ?L1("connect error: ~p", [Error]),
-            Error
+            case Error of
+                {error, {gen_tcp_error, _}} -> Error;
+                %% Do not report internal connection error to a client
+                _Other                      -> {error, ldap_connect_error}
+            end
+    end.
+
+purge_connection(Creds, Servers, Opts) ->
+    %% purge and retry with a new connection
+    rabbit_log:warning("TCP connection to a LDAP server was closed or otherwise defunct."),
+    purge_conn(Creds == anon, Servers, Opts),
+    rabbit_log:warning("LDAP will retry with a new connection.").
+
+call_ldap_fun(Fun, LDAP) ->
+    call_ldap_fun(Fun, LDAP, "").
+
+call_ldap_fun(Fun, LDAP, UserDN) ->
+    case Fun(LDAP) of
+        {error, ldap_closed} ->
+            %% LDAP connection was close, let with_login/5 retry
+            {error, ldap_closed};
+        {error, {gen_tcp_error, E}} ->
+            %% ditto
+            {error, {gen_tcp_error, E}};
+        {error, E} ->
+            ?L1("evaluate error: ~s ~p", [scrub_dn(UserDN, env(log)), E]),
+            {error, ldap_evaluate_error};
+        Other -> Other
     end.
 
 %% Gets either the anonymous or bound (authenticated) connection
 get_or_create_conn(IsAnon, Servers, Opts) ->
     Conns = case get(ldap_conns) of
-                undefined -> dict:new();
+                undefined -> #{};
                 Dict      -> Dict
             end,
     Key = {IsAnon, Servers, Opts},
-    case dict:find(Key, Conns) of
-        {ok, Conn} -> Conn;
+    case maps:find(Key, Conns) of
+        {ok, Conn} ->
+            Timeout = rabbit_misc:pget(idle_timeout, Opts, infinity),
+            %% Defer the timeout by re-setting it.
+            set_connection_timeout(Key, Timeout),
+            {ok, Conn};
         error      ->
-            case eldap_open(Servers, Opts) of
-                {ok, _} = Conn -> put(ldap_conns, dict:store(Key, Conn, Conns)), Conn;
+            {Timeout, EldapOpts} = case lists:keytake(idle_timeout, 1, Opts) of
+                false                             -> {infinity, Opts};
+                {value, {idle_timeout, T}, EOpts} -> {T, EOpts}
+            end,
+            case eldap_open(Servers, EldapOpts) of
+                {ok, Conn} ->
+                    put(ldap_conns, maps:put(Key, Conn, Conns)),
+                    set_connection_timeout(Key, Timeout),
+                    {ok, Conn};
                 Error -> Error
             end
     end.
+
+set_connection_timeout(_, infinity) ->
+    ok;
+set_connection_timeout(Key, Timeout) when is_integer(Timeout) ->
+    worker_pool_worker:set_timeout(Key, Timeout,
+        fun() ->
+            Conns = case get(ldap_conns) of
+                undefined -> #{};
+                Dict      -> Dict
+            end,
+            case maps:find(Key, Conns) of
+                {ok, Conn} ->
+                    eldap:close(Conn),
+                    put(ldap_conns, maps:remove(Key, Conns));
+                _ -> ok
+            end
+        end).
 
 %% Get attribute(s) from eldap entry
 get_attributes(_AttrName, []) -> {error, not_found};
@@ -446,15 +622,16 @@ is_multi_attr_member(Str1, Str2) ->
 purge_conn(IsAnon, Servers, Opts) ->
     Conns = get(ldap_conns),
     Key = {IsAnon, Servers, Opts},
-    {_, {_, Conn}} = dict:find(Key, Conns),
-    rabbit_log:warning("LDAP Purging an already closed LDAP server connection~n"),
+    {ok, Conn} = maps:find(Key, Conns),
+    rabbit_log:warning("LDAP will purge an already closed or defunct LDAP server connection from the pool"),
     % We cannot close the connection with eldap:close/1 because as of OTP-13327
     % eldap will try to do_unbind first and will fail with a `{gen_tcp_error, closed}`.
     % Since we know that the connection is already closed, we just
     % kill its process.
     unlink(Conn),
     exit(Conn, closed),
-    put(ldap_conns, dict:erase(Key, Conns)).
+    put(ldap_conns, maps:remove(Key, Conns)),
+    ok.
 
 eldap_open(Servers, Opts) ->
     case eldap:open(Servers, ssl_conf() ++ Opts) of
@@ -542,8 +719,11 @@ vhost_if_defined(VHost) -> [{vhost, VHost}].
 
 dn_lookup_when() -> case {env(dn_lookup_attribute), env(dn_lookup_bind)} of
                         {none, _}       -> never;
-                        {_,    as_user} -> postbind;
-                        {_,    _}       -> prebind
+                        {_,    as_user}   -> postbind;
+                        %% make it more obvious what the invariants are,
+                        %% see rabbitmq/rabbitmq-auth-backend-ldap#94. MK.
+                        {_,    anon}      -> prebind;
+                        {_,    _}         -> prebind
                     end.
 
 username_to_dn_prebind(Username) ->

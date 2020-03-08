@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_heartbeat).
@@ -57,7 +57,7 @@
 
 -spec system_code_change(_,_,_,_) -> {'ok',_}.
 -spec system_continue(_,_,{_, _}) -> any().
--spec system_terminate(_,_,_,_) -> none().
+-spec system_terminate(_,_,_,_) -> no_return().
 
 %%----------------------------------------------------------------------------
 start(SupPid, Sock, SendTimeoutSec, SendFun, ReceiveTimeoutSec, ReceiveFun) ->

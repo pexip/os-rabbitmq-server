@@ -11,54 +11,54 @@
 %%   The Original Code is RabbitMQ Management Plugin.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_bindings).
 
--export([init/1, to_json/2, content_types_provided/2, is_authorized/2]).
--export([allowed_methods/2, post_is_create/2, create_path/2]).
+-export([init/2, to_json/2, content_types_provided/2, is_authorized/2]).
+-export([allowed_methods/2]).
 -export([content_types_accepted/2, accept_content/2, resource_exists/2]).
 -export([basic/1, augmented/2]).
--export([finish_request/2]).
--export([encodings_provided/2]).
+-export([variances/2]).
 
--include("rabbit_mgmt.hrl").
--include_lib("webmachine/include/webmachine.hrl").
+-include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 %%--------------------------------------------------------------------
 
-init([Mode]) ->
-    {ok, {Mode, #context{}}}.
+init(Req, [Mode]) ->
+    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), {Mode, #context{}}}.
 
-finish_request(ReqData, Context) ->
-    {ok, rabbit_mgmt_cors:set_headers(ReqData, ?MODULE), Context}.
+variances(Req, Context) ->
+    {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
 
 content_types_provided(ReqData, Context) ->
-   {[{"application/json", to_json}], ReqData, Context}.
+   {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
 
-encodings_provided(ReqData, Context) ->
-    {[{"identity", fun(X) -> X end},
-     {"gzip", fun(X) -> zlib:gzip(X) end}], ReqData, Context}.
-
+%% The current version of Cowboy forces us to report the resource doesn't
+%% exist here in order to get a 201 response. It seems Cowboy confuses the
+%% resource from the request and the resource that will be created by POST.
+%% https://github.com/ninenines/cowboy/issues/723#issuecomment-161319576
 resource_exists(ReqData, {Mode, Context}) ->
-    {case list_bindings(Mode, ReqData) of
-         vhost_not_found -> false;
-         _               -> true
-     end, ReqData, {Mode, Context}}.
+    case cowboy_req:method(ReqData) of
+        <<"POST">> ->
+            {false, ReqData, {Mode, Context}};
+        _ ->
+            {case list_bindings(Mode, ReqData) of
+                 vhost_not_found -> false;
+                 _               -> true
+             end, ReqData, {Mode, Context}}
+    end.
 
 content_types_accepted(ReqData, Context) ->
-   {[{"application/json", accept_content}], ReqData, Context}.
+    {[{'*', accept_content}], ReqData, Context}.
 
 allowed_methods(ReqData, {Mode, Context}) ->
     {case Mode of
-         source_destination -> ['HEAD', 'GET', 'POST', 'OPTIONS'];
-         _                  -> ['HEAD', 'GET', 'OPTIONS']
+         source_destination -> [<<"HEAD">>, <<"GET">>, <<"POST">>, <<"OPTIONS">>];
+         _                  -> [<<"HEAD">>, <<"GET">>, <<"OPTIONS">>]
      end, ReqData, {Mode, Context}}.
-
-post_is_create(ReqData, Context) ->
-    {true, ReqData, Context}.
 
 to_json(ReqData, {Mode, Context}) ->
     Bs = [rabbit_mgmt_format:binding(B) || B <- list_bindings(Mode, ReqData)],
@@ -68,30 +68,40 @@ to_json(ReqData, {Mode, Context}) ->
        "routing_key", "properties_key"],
       ReqData, {Mode, Context}).
 
-create_path(ReqData, Context) ->
-    {"dummy", ReqData, Context}.
-
-accept_content(ReqData, {_Mode, Context}) ->
+accept_content(ReqData0, {_Mode, Context}) ->
+    {ok, Body, ReqData} = cowboy_req:read_body(ReqData0),
     Source = rabbit_mgmt_util:id(source, ReqData),
     Dest = rabbit_mgmt_util:id(destination, ReqData),
     DestType = rabbit_mgmt_util:id(dtype, ReqData),
     VHost = rabbit_mgmt_util:vhost(ReqData),
-    {ok, Props} = rabbit_mgmt_util:decode(wrq:req_body(ReqData)),
-    {Method, Key, Args} = method_key_args(DestType, Source, Dest, Props),
-    Response = rabbit_mgmt_util:amqp_request(VHost, ReqData, Context, Method),
-    case Response of
-        {{halt, _}, _, _} = Res ->
+    {ok, Props} = rabbit_mgmt_util:decode(Body),
+    MethodName = case rabbit_mgmt_util:destination_type(ReqData) of
+                     exchange -> 'exchange.bind';
+                     queue    -> 'queue.bind'
+                 end,
+    {Key, Args} = key_args(DestType, Props),
+    case rabbit_mgmt_util:direct_request(
+           MethodName,
+           fun rabbit_mgmt_format:format_accept_content/1,
+           [{queue, Dest},
+            {exchange, Source},
+            {destination, Dest},
+            {source, Source},
+            {routing_key, Key},
+            {arguments, Args}],
+           "Binding error: ~s", ReqData, Context) of
+        {stop, _, _} = Res ->
             Res;
         {true, ReqData, Context2} ->
-            Loc = rabbit_web_dispatch_util:relativise(
-                    wrq:path(ReqData),
-                    binary_to_list(
-                      rabbit_mgmt_format:url(
-                        "/api/bindings/~s/e/~s/~s/~s/~s",
-                        [VHost, Source, DestType, Dest,
-                         rabbit_mgmt_format:pack_binding_props(Key, Args)]))),
-            {true, rabbit_mgmt_util:set_resp_header("Location", Loc, ReqData),
-             Context2}
+            From = binary_to_list(cowboy_req:path(ReqData)),
+            Prefix = rabbit_mgmt_util:get_path_prefix(),
+            BindingProps = rabbit_mgmt_format:pack_binding_props(Key, Args),
+            UrlWithBindings = rabbit_mgmt_format:url("/api/bindings/~s/e/~s/~s/~s/~s",
+                                                     [VHost, Source, DestType,
+                                                      Dest, BindingProps]),
+            To = Prefix ++ binary_to_list(UrlWithBindings),
+            Loc = rabbit_web_dispatch_util:relativise(From, To),
+            {{true, Loc}, ReqData, Context2}
     end.
 
 is_authorized(ReqData, {Mode, Context}) ->
@@ -107,19 +117,18 @@ basic(ReqData) ->
 augmented(ReqData, Context) ->
     rabbit_mgmt_util:filter_vhost(basic(ReqData), ReqData, Context).
 
-method_key_args(<<"q">>, Source, Dest, Props) ->
-    M = #'queue.bind'{routing_key = K, arguments = A} =
+key_args(<<"q">>, Props) ->
+    #'queue.bind'{routing_key = K, arguments = A} =
         rabbit_mgmt_util:props_to_method(
-          'queue.bind', Props,
-          [], [{exchange, Source}, {queue,       Dest}]),
-    {M, K, A};
+          'queue.bind', Props, [], []),
+    {K, A};
 
-method_key_args(<<"e">>, Source, Dest, Props) ->
-    M = #'exchange.bind'{routing_key = K, arguments = A} =
+key_args(<<"e">>, Props) ->
+    #'exchange.bind'{routing_key = K, arguments = A} =
         rabbit_mgmt_util:props_to_method(
           'exchange.bind', Props,
-          [], [{source,   Source}, {destination, Dest}]),
-    {M, K, A}.
+          [], []),
+    {K, A}.
 
 %%--------------------------------------------------------------------
 

@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_event).
@@ -41,7 +41,8 @@ handle_call(_Request, State) ->
     {ok, not_understood, State}.
 
 handle_event(#event{type  = parameter_set,
-                    props = Props}, State) ->
+                    props = Props0}, State) ->
+    Props = rabbit_data_coercion:to_list(Props0),
     case {pget(component, Props), pget(name, Props)} of
         {global, cluster_name} ->
             rabbit_federation_parameters:adjust(everything);

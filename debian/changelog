@@ -1,3 +1,67 @@
+rabbitmq-server (3.7.8-4) unstable; urgency=medium
+
+  * Remove Elixir version patch.
+  * Build-depends on Elixir 1.6.6.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 30 Oct 2018 08:28:31 +0000
+
+rabbitmq-server (3.7.8-3) unstable; urgency=medium
+
+  * Remove $LANG wrapper hack.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 29 Oct 2018 10:25:25 +0100
+
+rabbitmq-server (3.7.8-2) unstable; urgency=medium
+
+  * Wrap rabbitmqctl to set $LANG and avoid warning.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 29 Oct 2018 10:13:27 +0100
+
+rabbitmq-server (3.7.8-1) unstable; urgency=medium
+
+  [ Daniel Baumann ]
+  * Updating vcs fields.
+  * Updating copyright format url.
+  * Updating maintainer field.
+  * Running wrap-and-sort -bast.
+  * Updating standards version to 4.0.0.
+  * Removing gbp.conf, not used anymore or should be specified in the
+    developers dotfiles.
+  * Correcting permissions in debian packaging files.
+  * Updating standards version to 4.0.1.
+  * Deprecating priority extra as per policy 4.0.1.
+  * Updating standards version to 4.1.0.
+
+  [ Ondřej Nový ]
+  * d/control: Set Vcs-* to salsa.debian.org
+  * d/changelog: Remove trailing whitespaces
+  * d/control: Use team+openstack@tracker.debian.org as maintainer
+
+  [ Thomas Goirand ]
+  * New upstream release:
+    - Fix FTBFS with newer Erlang (Closes: #910623).
+  * Fix the way to calculate upstream VERSION in debian/rules.
+  * Switched rabbitmq-server.service to type notify, and other minor changes
+    in this file (Closes: #812342), do not wait for timeout on shutdown either
+    (Closes: #902136).
+  * Updated debian/control for this release.
+  * Bumped debhelper to 10.
+  * Standards-Version is now 4.2.1.
+  * Add patch to accept Elixir 1.6.5.
+  * Also package manpages.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 24 Oct 2018 18:39:10 +0200
+
+rabbitmq-server (3.6.10-1) unstable; urgency=medium
+
+  * New upstream release (Closes: #863586), fixing multiple issues:
+    - CVE-2017-4965: XSS vulnerabilities in management UI
+    - CVE-2017-4966: authentication details are stored in browser-local storage
+      without expiration
+    - CVE-2017-4967: XSS vulnerabilities in management UI
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 28 Jun 2017 15:00:41 +0200
+
 rabbitmq-server (3.6.6-1pexip3) pexip; urgency=medium
 
   * Changed systemd service to restart on exit

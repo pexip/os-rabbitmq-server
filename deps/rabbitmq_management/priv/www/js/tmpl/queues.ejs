@@ -1,7 +1,8 @@
+
 <h1>Queues</h1>
 <div class="section">
   <%= pagiante_ui(queues, 'queues') %>
-</div> 
+</div>
 <div class="updatable">
 <% if (queues.items.length > 0) { %>
 <table class="list">
@@ -110,13 +111,15 @@
    <td class="c">
      <%= fmt_features_short(queue) %>
      <%= fmt_policy_short(queue) %>
+     <%= fmt_op_policy_short(queue) %>
    </td>
 <% } %>
 <% if (show_column('queues', 'features_no_policy')) { %>
    <td class="c"><%= fmt_features_short(queue) %></td>
 <% } %>
 <% if (show_column('queues', 'policy')) { %>
-   <td class="c"><%= fmt_string(queue.policy) %></td>
+   <td class="c"><%= link_policy(queue.vhost, queue.policy) %>
+                 <%= fmt_string(queue.operator_policy) %></td>
 <% } %>
 <% if (show_column('queues', 'consumers')) { %>
    <td class="c"><%= fmt_string(queue.consumers) %></td>
@@ -193,7 +196,7 @@
           <td>
             <select name="vhost">
               <% for (var i = 0; i < vhosts.length; i++) { %>
-              <option value="<%= fmt_string(vhosts[i].name) %>"><%= fmt_string(vhosts[i].name) %></option>
+              <option value="<%= fmt_string(vhosts[i].name) %>" <%= (vhosts[i].name === current_vhost) ? 'selected="selected"' : '' %>><%= fmt_string(vhosts[i].name) %></option>
               <% } %>
             </select>
           </td>
@@ -223,7 +226,7 @@
           <td>
             <select name="node">
               <% for (var i = 0; i < nodes.length; i++) { %>
-              <option value="<%= fmt_string(nodes[i].name) %>"><%= nodes[i].name %></option>
+              <option value="<%= fmt_string(nodes[i].name) %>"><%= fmt_node(nodes[i].name) %></option>
               <% } %>
             </select>
           </td>
@@ -249,10 +252,13 @@
                   <span class="argument-link" field="arguments" key="x-message-ttl" type="number">Message TTL</span> <span class="help" id="queue-message-ttl"></span> |
                   <span class="argument-link" field="arguments" key="x-expires" type="number">Auto expire</span> <span class="help" id="queue-expires"></span> |
                   <span class="argument-link" field="arguments" key="x-max-length" type="number">Max length</span> <span class="help" id="queue-max-length"></span> |
-                  <span class="argument-link" field="arguments" key="x-max-length-bytes" type="number">Max length bytes</span> <span class="help" id="queue-max-length-bytes"></span><br/>
+                  <span class="argument-link" field="arguments" key="x-max-length-bytes" type="number">Max length bytes</span> <span class="help" id="queue-max-length-bytes"></span> |
+                  <span class="argument-link" field="arguments" key="x-overflow" type="string">Overflow behaviour</span> <span class="help" id="queue-overflow"></span><br/>
                   <span class="argument-link" field="arguments" key="x-dead-letter-exchange" type="string">Dead letter exchange</span> <span class="help" id="queue-dead-letter-exchange"></span> |
                   <span class="argument-link" field="arguments" key="x-dead-letter-routing-key" type="string">Dead letter routing key</span> <span class="help" id="queue-dead-letter-routing-key"></span> |
-                  <span class="argument-link" field="arguments" key="x-max-priority" type="number">Maximum priority</span> <span class="help" id="queue-max-priority"></span>
+                  <span class="argument-link" field="arguments" key="x-max-priority" type="number">Maximum priority</span> <span class="help" id="queue-max-priority"></span><br/>
+                  <span class="argument-link" field="arguments" key="x-queue-mode" type="string" value="lazy">Lazy mode</span> <span class="help" id="queue-lazy"></span>
+                  <span class="argument-link" field="arguments" key="x-queue-master-locator" type="string" value="">Master locator</span> <span class="help" id="queue-master-locator"></span>
                 </td>
               </tr>
             </table>

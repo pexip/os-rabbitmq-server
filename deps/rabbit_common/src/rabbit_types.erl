@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_types).
@@ -29,7 +29,8 @@
               username/0, password/0, password_hash/0,
               ok/1, error/1, ok_or_error/1, ok_or_error2/2, ok_pid_or_error/0,
               channel_exit/0, connection_exit/0, mfargs/0, proc_name/0,
-              proc_type_and_name/0, timestamp/0]).
+              proc_type_and_name/0, timestamp/0,
+              tracked_connection/0, node_type/0, topic_access_context/0]).
 
 -type(maybe(T) :: T | 'none').
 -type(timestamp() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}).
@@ -98,8 +99,8 @@
 -type(listener() ::
         #listener{node     :: node(),
                   protocol :: atom(),
-                  host     :: rabbit_networking:hostname(),
-                  port     :: rabbit_networking:ip_port()}).
+                  host     :: rabbit_net:hostname(),
+                  port     :: rabbit_net:ip_port()}).
 
 -type(binding_source() :: rabbit_exchange:name()).
 -type(binding_destination() :: rabbit_amqqueue:name() | rabbit_exchange:name()).
@@ -117,7 +118,8 @@
                   exclusive_owner :: rabbit_types:maybe(pid()),
                   arguments       :: rabbit_framing:amqp_table(),
                   pid             :: rabbit_types:maybe(pid()),
-                  slave_pids      :: [pid()]}).
+                  slave_pids      :: [pid()],
+                  vhost           :: rabbit_types:vhost()}).
 
 -type(exchange() ::
         #exchange{name        :: rabbit_exchange:name(),
@@ -126,9 +128,30 @@
                   auto_delete :: boolean(),
                   arguments   :: rabbit_framing:amqp_table()}).
 
+-type(connection_name() :: binary()).
+
+%% used e.g. by rabbit_networking
 -type(connection() :: pid()).
 
+%% used e.g. by rabbit_connection_tracking
+-type(tracked_connection() ::
+        #tracked_connection{id           :: {node(), connection_name()},
+                            node         :: node(),
+                            vhost        :: vhost(),
+                            name         :: connection_name(),
+                            pid          :: pid(),
+                            protocol     :: protocol_name(),
+                            peer_host    :: rabbit_networking:hostname(),
+                            peer_port    :: rabbit_networking:ip_port(),
+                            username     :: username(),
+                            connected_at :: integer()}).
+
+%% old AMQP 0-9-1-centric type, avoid when possible
 -type(protocol() :: rabbit_framing:protocol()).
+
+-type(protocol_name() :: 'amqp0_8' | 'amqp0_9_1' | 'amqp1_0' | 'mqtt' | 'stomp' | any()).
+
+-type(node_type() :: 'disc' | 'ram').
 
 -type(auth_user() ::
         #auth_user{username :: username(),
@@ -162,3 +185,7 @@
 
 -type(proc_name() :: term()).
 -type(proc_type_and_name() :: {atom(), proc_name()}).
+
+-type(topic_access_context() :: #{routing_key  => rabbit_router:routing_key(),
+                                  variable_map => map(),
+                                  _ => _}).

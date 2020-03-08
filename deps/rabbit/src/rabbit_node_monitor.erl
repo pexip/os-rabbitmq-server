@@ -11,10 +11,14 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_node_monitor).
+
+%% Transitional step until we can require Erlang/OTP 21 and
+%% use the now recommended try/catch syntax for obtaining the stack trace.
+-compile(nowarn_deprecated_function).
 
 -behaviour(gen_server).
 
@@ -37,6 +41,7 @@
          alive_nodes/1, alive_rabbit_nodes/1]).
 
 -define(SERVER, ?MODULE).
+-define(NODE_REPLY_TIMEOUT, 5000).
 -define(RABBIT_UP_RPC_TIMEOUT, 2000).
 -define(RABBIT_DOWN_PING_INTERVAL, 1000).
 
@@ -181,7 +186,7 @@ partitions() ->
     gen_server:call(?SERVER, partitions, infinity).
 
 partitions(Nodes) ->
-    {Replies, _} = gen_server:multi_call(Nodes, ?SERVER, partitions, infinity),
+    {Replies, _} = gen_server:multi_call(Nodes, ?SERVER, partitions, ?NODE_REPLY_TIMEOUT),
     Replies.
 
 status(Nodes) ->
@@ -344,13 +349,13 @@ init([]) ->
     Nodes = possibly_partitioned_nodes(),
     startup_log(Nodes),
     Monitors = lists:foldl(fun(Node, Monitors0) ->
-				   pmon:monitor({rabbit, Node}, Monitors0)
-			   end, pmon:new(), Nodes),
+                                   pmon:monitor({rabbit, Node}, Monitors0)
+                           end, pmon:new(), Nodes),
     {ok, ensure_keepalive_timer(#state{monitors    = Monitors,
                                        subscribers = pmon:new(),
                                        partitions  = [],
                                        guid        = rabbit_guid:gen(),
-                                       node_guids  = orddict:new(),
+                                       node_guids  = maps:new(),
                                        autoheal    = rabbit_autoheal:init()})}.
 
 handle_call(partitions, _From, State = #state{partitions = Partitions}) ->
@@ -405,27 +410,27 @@ handle_cast({node_up, Node, NodeType, GUID},
             State = #state{guid       = MyGUID,
                            node_guids = GUIDs}) ->
     cast(Node, {announce_guid, node(), MyGUID}),
-    GUIDs1 = orddict:store(Node, GUID, GUIDs),
+    GUIDs1 = maps:put(Node, GUID, GUIDs),
     handle_cast({node_up, Node, NodeType}, State#state{node_guids = GUIDs1});
 
 handle_cast({announce_guid, Node, GUID}, State = #state{node_guids = GUIDs}) ->
-    {noreply, State#state{node_guids = orddict:store(Node, GUID, GUIDs)}};
+    {noreply, State#state{node_guids = maps:put(Node, GUID, GUIDs)}};
 
 handle_cast({check_partial_partition, Node, Rep, NodeGUID, MyGUID, RepGUID},
             State = #state{guid       = MyGUID,
                            node_guids = GUIDs}) ->
     case lists:member(Node, rabbit_mnesia:cluster_nodes(running)) andalso
-        orddict:find(Node, GUIDs) =:= {ok, NodeGUID} of
+        maps:find(Node, GUIDs) =:= {ok, NodeGUID} of
         true  -> spawn_link( %%[1]
                    fun () ->
                            case rpc:call(Node, rabbit, is_running, []) of
                                {badrpc, _} -> ok;
-                               _           ->  
-				   rabbit_log:warning("Received a 'DOWN' message" 
-						      " from ~p but still can" 
-						      " communicate with it ~n",
-						      [Node]),
-				   cast(Rep, {partial_partition,
+                               _           ->
+                                   rabbit_log:warning("Received a 'DOWN' message"
+                                                      " from ~p but still can"
+                                                      " communicate with it ~n",
+                                                      [Node]),
+                                   cast(Rep, {partial_partition,
                                                          Node, node(), RepGUID})
                            end
                    end);
@@ -499,18 +504,18 @@ handle_cast({node_up, Node, NodeType},
     rabbit_log:info("rabbit on node ~p up~n", [Node]),
     {AllNodes, DiscNodes, RunningNodes} = read_cluster_status(),
     write_cluster_status({add_node(Node, AllNodes),
-			  case NodeType of
-			      disc -> add_node(Node, DiscNodes);
-			      ram  -> DiscNodes
-			  end,
-			  add_node(Node, RunningNodes)}),
+                          case NodeType of
+                              disc -> add_node(Node, DiscNodes);
+                              ram  -> DiscNodes
+                          end,
+                          add_node(Node, RunningNodes)}),
     ok = handle_live_rabbit(Node),
     Monitors1 = case pmon:is_monitored({rabbit, Node}, Monitors) of
-		    true ->
-			Monitors;
-		    false ->
-			pmon:monitor({rabbit, Node}, Monitors)
-		end,
+                    true ->
+                        Monitors;
+                    false ->
+                        pmon:monitor({rabbit, Node}, Monitors)
+                end,
     {noreply, maybe_autoheal(State#state{monitors = Monitors1})};
 
 handle_cast({joined_cluster, Node, NodeType}, State) ->
@@ -560,10 +565,10 @@ handle_info({nodedown, Node, Info}, State = #state{guid       = MyGUID,
                     cast(N, {check_partial_partition,
                              Node, node(), DownGUID, CheckGUID, MyGUID})
             end,
-    case orddict:find(Node, GUIDs) of
+    case maps:find(Node, GUIDs) of
         {ok, DownGUID} -> Alive = rabbit_mnesia:cluster_nodes(running)
                               -- [node(), Node],
-                          [case orddict:find(N, GUIDs) of
+                          [case maps:find(N, GUIDs) of
                                {ok, CheckGUID} -> Check(N, CheckGUID, DownGUID);
                                error           -> ok
                            end || N <- Alive];
@@ -584,7 +589,7 @@ handle_info({mnesia_system_event,
     State1 = case pmon:is_monitored({rabbit, Node}, Monitors) of
                  true  -> State;
                  false -> State#state{
-			    monitors = pmon:monitor({rabbit, Node}, Monitors)}
+                            monitors = pmon:monitor({rabbit, Node}, Monitors)}
              end,
     ok = handle_live_rabbit(Node),
     Partitions1 = lists:usort([Node | Partitions]),
@@ -622,6 +627,10 @@ handle_info(ping_up_nodes, State) ->
     %% i.e. only nodes that we know to be up.
     [cast(N, keepalive) || N <- alive_nodes() -- [node()]],
     {noreply, ensure_keepalive_timer(State#state{keepalive_timer = undefined})};
+
+handle_info({'EXIT', _, _} = Info, State = #state{autoheal = AState0}) ->
+    AState = rabbit_autoheal:process_down(Info, AState0),
+    {noreply, State#state{autoheal = AState}};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -686,12 +695,18 @@ await_cluster_recovery(Condition) ->
     ok.
 
 run_outside_applications(Fun, WaitForExistingProcess) ->
-    spawn(fun () ->
-                  %% If our group leader is inside an application we are about
-                  %% to stop, application:stop/1 does not return.
-                  group_leader(whereis(init), self()),
-                  register_outside_app_process(Fun, WaitForExistingProcess)
-          end).
+    spawn_link(fun () ->
+                       %% Ignore exit messages from the monitor - the link is needed
+                       %% to ensure the monitor detects abnormal exits from this process
+                       %% and can reset the 'restarting' status on the autoheal, avoiding
+                       %% a deadlock. The monitor is restarted when rabbit does, so messages
+                       %% in the other direction should be ignored.
+                       process_flag(trap_exit, true),
+                       %% If our group leader is inside an application we are about
+                       %% to stop, application:stop/1 does not return.
+                       group_leader(whereis(init), self()),
+                       register_outside_app_process(Fun, WaitForExistingProcess)
+               end).
 
 register_outside_app_process(Fun, WaitForExistingProcess) ->
     %% Ensure only one such process at a time, the exit(badarg) is
@@ -893,4 +908,4 @@ startup_log([]) ->
     rabbit_log:info("Starting rabbit_node_monitor~n", []);
 startup_log(Nodes) ->
     rabbit_log:info("Starting rabbit_node_monitor, might be partitioned from ~p~n",
-		    [Nodes]).
+                    [Nodes]).

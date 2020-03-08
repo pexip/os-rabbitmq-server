@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_amqp1_0_outgoing_link).
@@ -45,7 +45,7 @@ attach(#'v1_0.attach'{name = Name,
             ?V_1_0_SENDER_SETTLE_MODE_UNSETTLED -> false;
             _                                   -> ?DEFAULT_SEND_SETTLED
         end,
-    DOSym = rabbit_amqp1_0_framing:symbol_for(DefaultOutcome),
+    DOSym = amqp10_framing:symbol_for(DefaultOutcome),
     case ensure_source(Source,
                        #outgoing_link{delivery_count  = ?INIT_TXFR_COUNT,
                                       send_settled    = SndSettled,
@@ -67,7 +67,7 @@ attach(#'v1_0.attach'{name = Name,
                      exclusive = false,
                      arguments = [{<<"x-credit">>, table,
                                    [{<<"credit">>, long,    0},
-                                    {<<"drain">>,  boolean, false}]}]},
+                                    {<<"drain">>,  bool, false}]}]},
                    self()) of
                 #'basic.consume_ok'{} ->
                     %% TODO we should avoid the race by getting the queue to send
@@ -211,11 +211,11 @@ delivery(Deliver = #'basic.deliver'{delivery_tag = DeliveryTag,
     Msg1_0 = rabbit_amqp1_0_message:annotated_message(
                RKey, Deliver, Msg),
     ?DEBUG("Outbound content:~n  ~p~n",
-           [[rabbit_amqp1_0_framing:pprint(Section) ||
-                Section <- rabbit_amqp1_0_framing:decode_bin(
+           [[amqp10_framing:pprint(Section) ||
+                Section <- amqp10_framing:decode_bin(
                              iolist_to_binary(Msg1_0))]]),
     %% TODO Ugh
-    TLen = iolist_size(rabbit_amqp1_0_framing:encode_bin(Txfr)),
+    TLen = iolist_size(amqp10_framing:encode_bin(Txfr)),
     Frames = case FrameMax of
                  unlimited ->
                      [[Txfr, Msg1_0]];

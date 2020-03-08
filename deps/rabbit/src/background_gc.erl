@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(background_gc).
@@ -25,7 +25,6 @@
          terminate/2, code_change/3]).
 
 -define(MAX_RATIO, 0.01).
--define(IDEAL_INTERVAL, 60000).
 -define(MAX_INTERVAL, 240000).
 
 -record(state, {last_interval}).
@@ -45,7 +44,9 @@ run() -> gen_server2:cast(?MODULE, run).
 
 %%----------------------------------------------------------------------------
 
-init([]) -> {ok, interval_gc(#state{last_interval = ?IDEAL_INTERVAL})}.
+init([]) ->
+    {ok, IdealInterval} = application:get_env(rabbit, background_gc_target_interval),
+    {ok, interval_gc(#state{last_interval = IdealInterval})}.
 
 handle_call(Msg, _From, State) ->
     {stop, {unexpected_call, Msg}, {unexpected_call, Msg}, State}.
@@ -65,14 +66,22 @@ terminate(_Reason, State) -> State.
 %%----------------------------------------------------------------------------
 
 interval_gc(State = #state{last_interval = LastInterval}) ->
+    {ok, IdealInterval} = application:get_env(rabbit, background_gc_target_interval),
     {ok, Interval} = rabbit_misc:interval_operation(
                        {?MODULE, gc, []},
-                       ?MAX_RATIO, ?MAX_INTERVAL, ?IDEAL_INTERVAL, LastInterval),
+                       ?MAX_RATIO, ?MAX_INTERVAL, IdealInterval, LastInterval),
     erlang:send_after(Interval, self(), run),
     State#state{last_interval = Interval}.
 
 gc() ->
-    [garbage_collect(P) || P <- processes(),
-                           {status, waiting} == process_info(P, status)],
-    garbage_collect(), %% since we will never be waiting...
+    Enabled = rabbit_misc:get_env(rabbit, background_gc_enabled, false),
+    case Enabled of
+        true ->
+            [garbage_collect(P) || P <- processes(),
+                                   {status, waiting} == process_info(P, status)],
+            %% since we will never be waiting...
+            garbage_collect();
+         false ->
+            ok
+    end,
     ok.

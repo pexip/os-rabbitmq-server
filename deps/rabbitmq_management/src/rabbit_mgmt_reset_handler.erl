@@ -11,7 +11,7 @@
 %%   The Original Code is RabbitMQ Management Console.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% When management extensions are enabled and/or disabled at runtime, the
@@ -51,7 +51,9 @@ handle_event(#event{type = plugins_changed, props = Details}, State) ->
     Enabled = pget(enabled, Details),
     Disabled = pget(disabled, Details),
     case extensions_changed(Enabled ++ Disabled) of
-        true  -> rabbit_mgmt_app:reset_dispatcher(Disabled);
+        true  ->
+            _ = rabbit_mgmt_app:reset_dispatcher(Disabled),
+            ok;
         false -> ok
     end,
     {ok, State};

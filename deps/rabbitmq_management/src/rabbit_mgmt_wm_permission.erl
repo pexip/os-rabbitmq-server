@@ -11,40 +11,36 @@
 %%   The Original Code is RabbitMQ Management Plugin.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_permission).
 
--export([init/1, resource_exists/2, to_json/2,
+-export([init/2, resource_exists/2, to_json/2,
          content_types_provided/2, content_types_accepted/2,
          is_authorized/2, allowed_methods/2, accept_content/2,
          delete_resource/2]).
--export([finish_request/2]).
--export([encodings_provided/2]).
+-export([variances/2]).
 
--include("rabbit_mgmt.hrl").
--include_lib("webmachine/include/webmachine.hrl").
+-include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 %%--------------------------------------------------------------------
-init(_Config) -> {ok, #context{}}.
 
-finish_request(ReqData, Context) ->
-    {ok, rabbit_mgmt_cors:set_headers(ReqData, Context), Context}.
+init(Req, _State) ->
+    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
+
+variances(Req, Context) ->
+    {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
 
 content_types_provided(ReqData, Context) ->
-   {[{"application/json", to_json}], ReqData, Context}.
-
-encodings_provided(ReqData, Context) ->
-    {[{"identity", fun(X) -> X end},
-     {"gzip", fun(X) -> zlib:gzip(X) end}], ReqData, Context}.
+   {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
 
 content_types_accepted(ReqData, Context) ->
-   {[{"application/json", accept_content}], ReqData, Context}.
+    {[{'*', accept_content}], ReqData, Context}.
 
 allowed_methods(ReqData, Context) ->
-    {['HEAD', 'GET', 'PUT', 'DELETE', 'OPTIONS'], ReqData, Context}.
+    {[<<"HEAD">>, <<"GET">>, <<"PUT">>, <<"DELETE">>, <<"OPTIONS">>], ReqData, Context}.
 
 resource_exists(ReqData, Context) ->
     {case perms(ReqData) of
@@ -56,27 +52,27 @@ resource_exists(ReqData, Context) ->
 to_json(ReqData, Context) ->
     rabbit_mgmt_util:reply(perms(ReqData), ReqData, Context).
 
-accept_content(ReqData, Context) ->
-    case perms(ReqData) of
+accept_content(ReqData0, Context = #context{user = #user{username = Username}}) ->
+    case perms(ReqData0) of
          not_found ->
             rabbit_mgmt_util:bad_request(vhost_or_user_not_found,
-                                         ReqData, Context);
+                                         ReqData0, Context);
          _         ->
-            User = rabbit_mgmt_util:id(user, ReqData),
-            VHost = rabbit_mgmt_util:id(vhost, ReqData),
+            User = rabbit_mgmt_util:id(user, ReqData0),
+            VHost = rabbit_mgmt_util:id(vhost, ReqData0),
             rabbit_mgmt_util:with_decode(
-              [configure, write, read], ReqData, Context,
-              fun([Conf, Write, Read], _) ->
+              [configure, write, read], ReqData0, Context,
+              fun([Conf, Write, Read], _, ReqData) ->
                       rabbit_auth_backend_internal:set_permissions(
-                        User, VHost, Conf, Write, Read),
+                        User, VHost, Conf, Write, Read, Username),
                       {true, ReqData, Context}
               end)
     end.
 
-delete_resource(ReqData, Context) ->
+delete_resource(ReqData, Context = #context{user = #user{username = Username}}) ->
     User = rabbit_mgmt_util:id(user, ReqData),
     VHost = rabbit_mgmt_util:id(vhost, ReqData),
-    rabbit_auth_backend_internal:clear_permissions(User, VHost),
+    rabbit_auth_backend_internal:clear_permissions(User, VHost, Username),
     {true, ReqData, Context}.
 
 is_authorized(ReqData, Context) ->

@@ -10,12 +10,12 @@
 %%
 %% The Original Code is RabbitMQ.
 %%
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_trust_store_sup).
 -behaviour(supervisor).
--export([start_link/1]).
+-export([start_link/0]).
 -export([init/1]).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
@@ -23,15 +23,14 @@
 
 %% ...
 
-start_link(Settings) ->
-
-    supervisor:start_link({local, ?MODULE}, ?MODULE, Settings).
+start_link() ->
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 
 %% ...
 
-init(Settings) ->
+init([]) ->
     {ok,
      {{one_for_one, 1, 5},
-      [{trust_store, {rabbit_trust_store, start_link, [Settings]},
+      [{trust_store, {rabbit_trust_store, start_link, []},
         permanent, timer:seconds(5), worker, [rabbit_trust_store]}]}}.

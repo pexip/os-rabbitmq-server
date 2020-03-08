@@ -21,7 +21,9 @@
                   'other_proc'          : ['proc',   'Other process memory'],
                   'code'                : ['system', 'Code'],
                   'atom'                : ['system', 'Atoms'],
-                  'other_system'        : ['system', 'Other system']};
+                  'other_system'        : ['system', 'Other system'],
+                  'allocated_unused'    : ['unused', 'Allocated unused'],
+                  'reserved_unallocated': ['unused', 'Unallocated reserved by the OS']};
 %>
 <%= format('memory-bar', {sections: sections, memory: memory, total_out: []}) %>
 <span class="clear">&nbsp;</span>
@@ -40,7 +42,7 @@ var key = [[{name: 'Queues', colour: 'queue',
                     ['connection_other',    'other']]}],
 
            [{name: 'Tables', colour: 'table',
-             keys: [['mnesia',              'mnesia'],
+             keys: [['mnesia',              'internal database tables'],
                     ['msg_index',           'message store index'],
                     ['mgmt_db',             'management database'],
                     ['other_ets',           'other']]}],
@@ -51,15 +53,34 @@ var key = [[{name: 'Queues', colour: 'queue',
             {name: 'System', colour: 'system',
              keys: [['code',                'code'],
                     ['atom',                'atoms'],
-                    ['other_system',        'other']]}]];
+                    ['other_system',        'other']
+                    ]}],
+
+            [{name: 'Preallocated memory', colour: 'unused',
+              keys: [['allocated_unused',     'preallocated by runtime, unused'],
+                     ['reserved_unallocated', 'unallocated, reserved by the OS']]}]];
 %>
 <%= format('memory-table', {key: key, memory: memory}) %>
 </div>
 
 <div class="memory-info">
   Last updated: <b><%= fmt_date(new Date()) %></b>.<br/>
-  Total memory used at last update: <b><%= fmt_bytes(memory.total) %></b>
-  <span class="help" id="memory-use"></span>
+  Memory calculation strategy: <b><%= memory.strategy %></b>. <span class="help" id="memory-calculation-strategy-breakdown"></span><br/><br/>
+  Amount of memory used vs. allocated during last update: <span class="help" id="memory-use"></span><br/>
+  <table class="facts">
+      <tr>
+        <th>Runtime Used</th>
+        <td><%= fmt_bytes(memory.total.erlang) %></td>
+      </tr>
+      <tr>
+        <th>Runtime Allocated</th>
+        <td><%= fmt_bytes(memory.total.allocated) %></td>
+      </tr>
+      <tr>
+        <th>Resident Set Size (RSS) reported by the OS</th>
+        <td><%= fmt_bytes(memory.total.rss) %></td>
+      </tr>
+    </table>
 </div>
 
 <% } %>

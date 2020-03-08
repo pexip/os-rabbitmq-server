@@ -1,38 +1,71 @@
 Source: rabbitmq-server
 Section: net
-Priority: extra
+Priority: optional
 Maintainer: Pexip AS <packaging@pexip.com>
-XSBC-Pexip-Original-Maintainer: PKG OpenStack <openstack-devel@lists.alioth.debian.org>
-XSBC-Pexip-Original-Uploaders: James Page <james.page@ubuntu.com>,
-           Thomas Goirand <zigo@debian.org>,
-Build-Depends: debhelper (>= 9~),
-               dh-python,
-               dh-systemd (>= 1.5),
-               erlang-dev,
-               erlang-nox (>= 1:13.b.3),
-               erlang-src (>= 1:13.b.3),
-               git,
-               python-simplejson,
-               python-all,
-               unzip,
-               xmlto,
-               xsltproc,
-               zip
-Build-Depends-Indep: rsync,
-Standards-Version: 3.9.8
-Vcs-Browser: https://anonscm.debian.org/cgit/openstack/rabbitmq-server.git/
-Vcs-Git: https://anonscm.debian.org/git/openstack/rabbitmq-server.git
+XSBC-Pexip-Original-Maintainer: Debian OpenStack <team+openstack@tracker.debian.org>
+XSBC-Pexip-Original-Uploaders:
+ James Page <james.page@ubuntu.com>,
+ Thomas Goirand <zigo@debian.org>,
+Build-Depends:
+ debhelper (>= 10),
+ dh-python,
+ elixir (>= 1.6.6),
+ erlang-base (>= 1:19.3),
+ erlang-crypto (>= 1:19.3),
+ erlang-dev (>= 1:19.3),
+ erlang-edoc (>= 1:19.3),
+ erlang-eldap (>= 1:19.3),
+ erlang-erl-docgen (>= 1:19.3),
+ erlang-eunit (>= 1:19.3),
+ erlang-inets (>= 1:19.3),
+ erlang-mnesia (>= 1:19.3),
+ erlang-nox (>= 1:19.3),
+ erlang-os-mon (>= 1:19.3),
+ erlang-parsetools (>= 1:19.3),
+ erlang-public-key (>= 1:19.3),
+ erlang-runtime-tools (>= 1:19.3),
+ erlang-src (>= 1:19.3),
+ erlang-ssl (>= 1:19.3),
+ erlang-syntax-tools (>= 1:19.3),
+ erlang-tools (>= 1:19.3),
+ erlang-xmerl (>= 1:19.3),
+ locales-all,
+ python-all,
+ python-simplejson,
+ rsync,
+ unzip,
+ xmlto,
+ xsltproc,
+ zip,
+Standards-Version: 4.2.1
+Vcs-Browser: https://salsa.debian.org/openstack-team/third-party/rabbitmq-server
+Vcs-Git: https://salsa.debian.org/openstack-team/third-party/rabbitmq-server.git
 Homepage: http://www.rabbitmq.com/
 XS-Pexip-Upstream: http://ftp.debian.org/debian/ buster
 
 Package: rabbitmq-server
 Architecture: all
-Depends: adduser,
-         erlang-nox (>= 1:13.b.3) | esl-erlang,
-         lsb-base,
-         logrotate,
-         ${misc:Depends},
-         ${python:Depends},
+Depends:
+ adduser,
+ erlang-base | erlang-base-hipe,
+ erlang-crypto (>= 1:19.3),
+ erlang-eldap (>= 1:19.3),
+ erlang-inets (>= 1:19.3),
+ erlang-mnesia (>= 1:19.3),
+ erlang-os-mon (>= 1:19.3),
+ erlang-parsetools (>= 1:19.3),
+ erlang-public-key (>= 1:19.3),
+ erlang-runtime-tools (>= 1:19.3),
+ erlang-ssl (>= 1:19.3),
+ erlang-syntax-tools (>= 1:19.3),
+ erlang-tools (>= 1:19.3),
+ erlang-xmerl (>= 1:19.3),
+ locales-all,
+ logrotate,
+ lsb-base,
+ socat,
+ ${misc:Depends},
+ ${python:Depends},
 Description: AMQP server written in Erlang
  RabbitMQ is an implementation of AMQP, the emerging standard for high
  performance enterprise messaging. The RabbitMQ server is a robust and

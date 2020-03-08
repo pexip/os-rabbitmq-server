@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_password).
@@ -35,7 +35,7 @@ hash(HashingMod, Cleartext) ->
     <<SaltBin/binary, Hash/binary>>.
 
 generate_salt() ->
-    Salt = rand_compat:uniform(16#ffffffff),
+    Salt = rand:uniform(16#ffffffff),
     <<Salt:32>>.
 
 salted_hash(Salt, Cleartext) ->

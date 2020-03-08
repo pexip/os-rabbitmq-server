@@ -1,8 +1,0 @@
-{application, rabbitmq_management_agent,
- [{description, "RabbitMQ Management Agent"},
-  {vsn, "3.6.6"},
-  {modules, []},
-  {registered, []},
-  {mod, {rabbit_mgmt_agent_app, []}},
-  {env, []},
-  {applications, [kernel, stdlib, rabbit_common, rabbit]}]}.

@@ -7,8 +7,12 @@ PROCESS_THRESHOLDS=[[0.75, 'red'],
                     [0.5, 'yellow']];
 
 function fmt_string(str, unknown) {
-    if (unknown == undefined) unknown = UNKNOWN_REPR;
-    if (str == undefined) return unknown;
+    if (unknown == undefined) {
+        unknown = UNKNOWN_REPR;
+    }
+    if (str == undefined) {
+        return unknown;
+    }
     return fmt_escape_html("" + str);
 }
 
@@ -79,9 +83,19 @@ function fmt_features(obj) {
 
 function fmt_policy_short(obj) {
     if (obj.policy != undefined && obj.policy != '') {
-        return '<acronym class="policy" title="Policy: ' +
+        return '<abbr class="policy" title="Policy: ' +
             fmt_escape_html(obj.policy) + '">' +
-            fmt_escape_html(obj.policy) + '</acronym> ';
+            link_policy(obj.vhost, obj.policy) + '</abbr> ';
+    } else {
+        return '';
+    }
+}
+
+function fmt_op_policy_short(obj) {
+    if (obj.operator_policy != undefined && obj.operator_policy != '') {
+        return '<abbr class="policy" title="Operator policy: ' +
+            fmt_escape_html(obj.operator_policy) + '">' +
+            fmt_escape_html(obj.operator_policy) + '</abbr> ';
     } else {
         return '';
     }
@@ -91,21 +105,16 @@ function fmt_features_short(obj) {
     var res = '';
     var features = args_to_features(obj);
 
-    if (obj.owner_pid_details != undefined) {
-        res += '<acronym title="Exclusive queue: click for owning connection">'
-            + link_conn(obj.owner_pid_details.name, "Excl") + '</acronym> ';
-    }
-
     for (var k in ALL_ARGS) {
         if (features[k] != undefined) {
-            res += '<acronym title="' + k + ': ' + fmt_string(features[k]) +
-                '">' + ALL_ARGS[k].short + '</acronym> ';
+            res += '<abbr title="' + k + ': ' + fmt_string(features[k]) +
+                '">' + ALL_ARGS[k].short + '</abbr> ';
         }
     }
 
     if (features.arguments) {
-        res += '<acronym title="' + fmt_table_flat(features.arguments) +
-        '">Args</acronym> ';
+        res += '<abbr title="' + fmt_table_flat(features.arguments) +
+        '">Args</abbr> ';
     }
     return res;
 }
@@ -126,12 +135,15 @@ function args_to_features(obj) {
     var res = {};
     for (var k in obj.arguments) {
         if (k in KNOWN_ARGS) {
-            res[k] = obj.arguments[k];
+            res[k] = fmt_escape_html(obj.arguments[k]);
         }
         else {
             if (res.arguments == undefined) res.arguments = {};
-            res.arguments[k] = obj.arguments[k];
+            res.arguments[fmt_escape_html(k)] = fmt_escape_html(obj.arguments[k]);
         }
+    }
+    if (obj.exclusive) {
+        res['exclusive'] = true;
     }
     if (obj.durable) {
         res['durable'] = true;
@@ -142,6 +154,9 @@ function args_to_features(obj) {
     if (obj.internal != undefined && obj.internal) {
         res['internal'] = true;
     }
+    if (obj.messages_delayed != undefined){
+        res['messages delayed'] = obj.messages_delayed;
+    }
     return res;
 }
 
@@ -150,19 +165,19 @@ function fmt_mirrors(queue) {
     var unsynced = queue.slave_nodes || [];
     unsynced = jQuery.grep(unsynced,
                            function (node, i) {
-                               return jQuery.inArray(node, synced) == -1
+                               return jQuery.inArray(node, synced) == -1;
                            });
     var res = '';
     if (synced.length > 0) {
-        res += ' <acronym title="Synchronised mirrors: ' + synced + '">+' +
-            synced.length + '</acronym>';
+        res += ' <abbr title="Synchronised mirrors: ' + synced + '">+' +
+            synced.length + '</abbr>';
     }
     if (synced.length == 0 && unsynced.length > 0) {
-        res += ' <acronym title="There are no synchronised mirrors">+0</acronym>';
+        res += ' <abbr title="There are no synchronised mirrors">+0</abbr>';
     }
     if (unsynced.length > 0) {
-        res += ' <acronym class="warning" title="Unsynchronised mirrors: ' +
-            unsynced + '">+' + unsynced.length + '</acronym>';
+        res += ' <abbr class="warning" title="Unsynchronised mirrors: ' +
+            unsynced + '">+' + unsynced.length + '</abbr>';
     }
     return res;
 }
@@ -177,10 +192,10 @@ function fmt_sync_state(queue) {
 
 function fmt_channel_mode(ch) {
     if (ch.transactional) {
-        return '<acronym title="Transactional">T</acronym>';
+        return '<abbr title="Transactional">T</abbr>';
     }
     else if (ch.confirm) {
-        return '<acronym title="Confirm">C</acronym>';
+        return '<abbr title="Confirm">C</abbr>';
     }
     else {
         return '';
@@ -315,9 +330,9 @@ function fmt_exchange_type(type) {
             return fmt_escape_html(type);
         }
     }
-    return '<div class="status-red"><acronym title="Exchange type not found. ' +
+    return '<div class="status-red"><abbr title="Exchange type not found. ' +
         'Publishing to this exchange will fail.">' + fmt_escape_html(type) +
-        '</acronym></div>';
+        '</abbr></div>';
 }
 
 function fmt_exchange_url(name) {
@@ -360,10 +375,10 @@ function fmt_amqp_value(val) {
     } else {
         var t = typeof(val);
         if (t == 'string') {
-            return '<acronym class="type" title="string">' +
-                fmt_escape_html(val) + '</acronym>';
+            return '<abbr class="type" title="string">' +
+                fmt_escape_html(val) + '</abbr>';
         } else {
-            return '<acronym class="type" title="' + t + '">' + val + '</acronym>';
+            return '<abbr class="type" title="' + t + '">' + val + '</abbr>';
         }
     }
 }
@@ -416,8 +431,8 @@ function fmt_plugins_small(node) {
             plugins.push(application.name);
         }
     }
-    return '<acronym title="Plugins: ' + plugins.join(", ") + '">' +
-        plugins.length + '</acronym>';
+    return '<abbr title="Enabled plugins: ' + plugins.join(", ") + '">' +
+        plugins.length + '</abbr>';
 }
 
 function get_plugins_list(node) {
@@ -440,6 +455,16 @@ function fmt_rabbit_version(applications) {
     return 'unknown';
 }
 
+function fmt_strip_tags(txt) {
+    if(txt === null) {
+        return "";
+    }
+    if(txt === undefined) {
+        return "";
+    }
+    return ("" + txt).replace(/<(?:.|\n)*?>/gm, '');
+}
+
 function fmt_escape_html(txt) {
     return fmt_escape_html0(txt).replace(/\n/g, '<br/>');
 }
@@ -449,7 +474,14 @@ function fmt_escape_html_one_line(txt) {
 }
 
 function fmt_escape_html0(txt) {
-    return txt.replace(/&/g, '&amp;')
+    if(txt === null) {
+        return "";
+    }
+    if(txt === undefined) {
+        return "";
+    }
+
+    return ("" + txt).replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/\"/g, '&quot;');
@@ -476,10 +508,7 @@ function fmt_maybe_wrap(txt, encoding) {
 }
 
 function fmt_node(node_host) {
-    var both = node_host.split('@');
-    var node = both.slice(0, 1);
-    var host = both.slice(1);
-    return node == 'rabbit' ? host : (node + '@' + host);
+    return fmt_string(node_host);
 }
 
 function fmt_object_state(obj) {
@@ -505,7 +534,7 @@ function fmt_object_state(obj) {
     }
     else if (obj.state == 'flow') {
         colour = 'yellow';
-        explanation = 'Publishing rate recently restricted by server.';
+        explanation = 'Publishing rate recently throttled by server.';
     }
     else if (obj.state == 'down') {
         colour = 'red';
@@ -517,6 +546,10 @@ function fmt_object_state(obj) {
         explanation = 'The queue has crashed repeatedly and been unable to ' +
             'restart.';
     }
+    else if (obj.state == 'stopped') {
+        colour = 'red';
+        explanation = 'The queue process was stopped by the vhost supervisor.';
+    }
 
     return fmt_state(colour, text, explanation);
 }
@@ -524,8 +557,8 @@ function fmt_object_state(obj) {
 function fmt_state(colour, text, explanation) {
     var key;
     if (explanation) {
-        key = '<acronym class="normal" title="' + explanation + '">' +
-            text + '</acronym>';
+        key = '<abbr class="normal" title="' + explanation + '">' +
+            text + '</abbr>';
     }
     else {
         key = text;
@@ -547,8 +580,18 @@ function fmt_shortened_uri(uri) {
         return uri;
     }
     else {
-        return '<acronym title="' + uri + '">' +
-            uri.substr(0, uri.indexOf('?')) + '?...</acronym>';
+        return '<abbr title="' + uri + '">' +
+            uri.substr(0, uri.indexOf('?')) + '?...</abbr>';
+    }
+}
+
+function fmt_uri_with_credentials(uri) {
+    if (typeof uri == 'string') {
+        // mask password
+        var mask = /^([a-zA-Z0-9+-.]+):\/\/(.*):(.*)@/;
+        return uri.replace(mask, "$1://$2:[redacted]@");
+    } else {
+        return UNKNOWN_REPR;
     }
 }
 
@@ -570,8 +613,8 @@ function fmt_client_name(properties) {
 
 function fmt_trunc(str, max_length) {
     return str.length > max_length ?
-        ('<acronym class="normal" title="' + fmt_escape_html(str) + '">' +
-         fmt_escape_html(str.substring(0, max_length)) + '...</acronym>') :
+        ('<abbr class="normal" title="' + fmt_escape_html(str) + '">' +
+         fmt_escape_html(str.substring(0, max_length)) + '...</abbr>') :
         fmt_escape_html(str);
 }
 
@@ -597,7 +640,7 @@ function link_conn(name, desc) {
 }
 
 function link_channel(name) {
-    return _link_to(short_chan(name), '#/channels/' + esc(name))
+    return _link_to(short_chan(name), '#/channels/' + esc(name));
 }
 
 function link_exchange(vhost, name, args) {
@@ -610,19 +653,19 @@ function link_queue(vhost, name, args) {
 }
 
 function link_vhost(name) {
-    return _link_to(name, '#/vhosts/' + esc(name))
+    return _link_to(name, '#/vhosts/' + esc(name));
 }
 
 function link_user(name) {
-    return _link_to(name, '#/users/' + esc(name))
+    return _link_to(name, '#/users/' + esc(name));
 }
 
 function link_node(name) {
-    return _link_to(name, '#/nodes/' + esc(name))
+    return _link_to(fmt_node(name), '#/nodes/' + esc(name));
 }
 
 function link_policy(vhost, name) {
-    return _link_to(name, '#/policies/' + esc(vhost) + '/' + esc(name))
+    return _link_to(name, '#/policies/' + esc(vhost) + '/' + esc(name));
 }
 
 function _link_to(name, url, highlight, args) {
@@ -686,7 +729,7 @@ function filter_ui_pg(items, truncate, appendselect) {
         fmt_escape_html(current_filter) + '"/>' +
         '<input type="checkbox" name="filter-regex-mode" id="filter-regex-mode"' +
         (current_filter_regex_on ? ' checked' : '') +
-        '/><label for="filter-regex-mode">Regex</label> <span class="help" id="filter-regex">(?)</span>' +
+        '/><label for="filter-regex-mode">Regex</label> <span class="help" id="filter-regex"></span>' +
         '</td></tr></table>';
 
     function items_desc(l) {
@@ -696,7 +739,7 @@ function filter_ui_pg(items, truncate, appendselect) {
     var selected = current_filter == '' ? (items_desc(items.length)) :
         (items.length + ' of ' + items_desc(total) + ' selected');
 
-    
+
     selected += appendselect;
 
     res += '<p id="filter-truncate"><span class="updatable">' + selected +
@@ -712,7 +755,7 @@ function filter_ui(items) {
         parseInt(get_pref('truncate')) : current_truncate;
      var truncate_input = '<input type="text" id="truncate" value="' +
         current_truncate + '">';
-     var selected = '';    
+     var selected = '';
     if (items.length > current_truncate) {
         selected += '<span id="filter-warning-show"> ' +
             '(only showing first</span> ';
@@ -759,9 +802,9 @@ function pagiante_ui(pages, context){
     res +=   '</input></th></span>' ;
 
     res += '<th> <input type="checkbox" data-page-start="1" class="pagination_class pagination_class_checkbox" id="'+ context +'-filter-regex-mode"' ;
-        
-    res += fmt_regex_request(context, "") + '></input> <label for="filter-regex-mode">Regex</label> <span class="help" id="filter-regex">(?)</span></th>' ;  
-    
+
+    res += fmt_regex_request(context, "") + '></input> <label for="filter-regex-mode">Regex</label> <span class="help" id="filter-regex"></span></th>' ;
+
     res +=' </table>' ;
     res += '<p id="filter-truncate"><span class="updatable">';
     res += '<span><label for="'+ context +'-pagesize"> Displaying ' + pages.item_count + '  item'+ ((pages.item_count > 1) ? 's' : '' ) + ' , page size up to: </label> ';
@@ -856,20 +899,20 @@ function properties_size(obj) {
         if (obj.hasOwnProperty(k)) count++;
     }
     return count;
-}   
+}
 
 function frm_default_value(template, defaultValue){
     var store_value = get_pref(template);
-    var result = (((store_value == null) 
-      || (store_value == undefined) 
-      || (store_value == '')) ? defaultValue : 
+    var result = (((store_value == null)
+      || (store_value == undefined)
+      || (store_value == '')) ? defaultValue :
     store_value);
 
    return ((result == undefined) ? defaultValue : result);
 }
 
 function fmt_page_number_request(template, defaultPage){
-     if  ((defaultPage == undefined) || (defaultPage <= 0)) 
+     if  ((defaultPage == undefined) || (defaultPage <= 0))
          defaultPage = 1;
     return frm_default_value(template + '_current_page_number', defaultPage);
 }
@@ -888,6 +931,29 @@ function fmt_filter_name_request(template, defaultName){
 function fmt_regex_request(template, defaultName){
     result = frm_default_value(template + '_current_regex', defaultName);
     return result;
+}
+
+function fmt_vhost_state(vhost){
+    var cluster_state = vhost.cluster_state;
+    var down_nodes = [];
+    var ok_count = 0;
+    var non_ok_count = 0;
+    for(var node in cluster_state){
+        var node_state = cluster_state[node];
+        if(cluster_state[node] == "stopped" || cluster_state[node] == "nodedown"){
+            non_ok_count++;
+            down_nodes.push(node);
+        } else if(cluster_state[node] == "running"){
+            ok_count++;
+        }
+    }
+    if(non_ok_count == 0 ){
+        return fmt_state('green', 'running', '');
+    } else if(non_ok_count > 0 && ok_count == 0){
+        return fmt_state('red', 'stopped', 'Vhost supervisor is not running.');
+    } else if(non_ok_count > 0 && ok_count > 0){
+        return fmt_state('yellow', 'partial', 'Vhost supervisor is stopped on some cluster nodes: ' + down_nodes.join(', '));
+    }
 }
 
 function isNumberKey(evt){

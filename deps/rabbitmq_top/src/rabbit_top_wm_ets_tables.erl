@@ -16,33 +16,26 @@
 
 -module(rabbit_top_wm_ets_tables).
 
--export([init/1, to_json/2, content_types_provided/2, is_authorized/2]).
+-export([init/2, to_json/2, content_types_provided/2, is_authorized/2]).
 
--include_lib("rabbitmq_management/include/rabbit_mgmt.hrl").
+-include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
--include_lib("webmachine/include/webmachine.hrl").
 
 %%--------------------------------------------------------------------
 
-init(_Config) -> {ok, #context{}}.
+init(Req, _State) ->
+    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
+
 
 content_types_provided(ReqData, Context) ->
-   {[{"application/json", to_json}], ReqData, Context}.
+   {[{<<"application/json">>, to_json}], ReqData, Context}.
 
 to_json(ReqData, Context) ->
-    Sort = case wrq:get_qs_value("sort", ReqData) of
-               undefined -> memory;
-               Str       -> list_to_atom(Str)
-           end,
-    Node = b2a(rabbit_mgmt_util:id(node, ReqData)),
-    Order = case wrq:get_qs_value("sort_reverse", ReqData) of
-                "true" -> asc;
-                _      -> desc
-            end,
-    RowCount = case wrq:get_qs_value("row_count", ReqData) of
-                   undefined -> 20;
-                   List when is_list(List) -> list_to_integer(List)
-               end,
+    Sort     = rabbit_top_util:sort_by_param(ReqData, memory),
+    Node     = rabbit_data_coercion:to_atom(rabbit_mgmt_util:id(node, ReqData)),
+    Order    = rabbit_top_util:sort_order_param(ReqData),
+    RowCount = rabbit_top_util:row_count_param(ReqData, 20),
+
     rabbit_mgmt_util:reply([{node,       Node},
                             {row_count,  RowCount},
                             {ets_tables, ets_tables(Node, Sort, Order, RowCount)}],
@@ -53,12 +46,18 @@ is_authorized(ReqData, Context) ->
 
 %%--------------------------------------------------------------------
 
-b2a(B) -> list_to_atom(binary_to_list(B)).
-
 ets_tables(Node, Sort, Order, RowCount) ->
-    [fmt(P) || P <- rabbit_top_worker:ets_tables(Node, Sort, Order, RowCount)].
+    try
+        [fmt(P) || P <- rabbit_top_worker:ets_tables(Node, Sort, Order, RowCount)]
+    catch
+        exit:{noproc, _} ->
+            []
+    end.
 
 fmt(Info) ->
     {owner, Pid} = lists:keyfind(owner, 1, Info),
-    Info1 = lists:keydelete(owner, 1, Info),
+    %% OTP 21 introduced the 'id' element that contains a reference.
+    %% These cannot be serialised and must be removed from the proplist
+    Info1 = lists:keydelete(owner, 1,
+                            lists:keydelete(id, 1, Info)),
     [{owner,  rabbit_top_util:fmt(Pid)} | Info1].

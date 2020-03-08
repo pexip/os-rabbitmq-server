@@ -11,41 +11,41 @@
 %%   The Original Code is RabbitMQ Management Plugin.
 %%
 %%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_vhosts).
 
--export([init/1, to_json/2, content_types_provided/2, is_authorized/2]).
--export([finish_request/2, allowed_methods/2]).
--export([encodings_provided/2]).
+-export([init/2, to_json/2, content_types_provided/2, is_authorized/2]).
+-export([variances/2]).
 -export([basic/0, augmented/2]).
 
--include("rabbit_mgmt.hrl").
--include_lib("webmachine/include/webmachine.hrl").
+-include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
+
+-define(BASIC_COLUMNS, ["name", "tracing", "pid"]).
+
+-define(DEFAULT_SORT, ["name"]).
 
 %%--------------------------------------------------------------------
 
-init(_Config) -> {ok, #context{}}.
+init(Req, _State) ->
+    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
 
-finish_request(ReqData, Context) ->
-    {ok, rabbit_mgmt_cors:set_headers(ReqData, Context), Context}.
-
-allowed_methods(ReqData, Context) ->
-    {['HEAD', 'GET', 'OPTIONS'], ReqData, Context}.
+variances(Req, Context) ->
+    {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
 
 content_types_provided(ReqData, Context) ->
-   {[{"application/json", to_json}], ReqData, Context}.
+   {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
 
-encodings_provided(ReqData, Context) ->
-    {[{"identity", fun(X) -> X end},
-     {"gzip", fun(X) -> zlib:gzip(X) end}], ReqData, Context}.
-
-to_json(ReqData, Context) ->
+to_json(ReqData, Context = #context{user = User}) ->
     try
-        rabbit_mgmt_util:reply_list_or_paginate(
-          augmented(ReqData, Context),ReqData, Context)
+        Basic = [rabbit_vhost:info(V)
+                 || V <- rabbit_mgmt_util:list_visible_vhosts(User)],
+        Data = rabbit_mgmt_util:augment_resources(Basic, ?DEFAULT_SORT,
+                                                  ?BASIC_COLUMNS, ReqData,
+                                                  Context, fun augment/2),
+        rabbit_mgmt_util:reply(Data, ReqData, Context)
     catch
         {error, invalid_range_parameters, Reason} ->
             rabbit_mgmt_util:bad_request(iolist_to_binary(Reason), ReqData, Context)
@@ -55,6 +55,9 @@ is_authorized(ReqData, Context) ->
     rabbit_mgmt_util:is_authorized(ReqData, Context).
 
 %%--------------------------------------------------------------------
+
+augment(Basic, ReqData) ->
+    rabbit_mgmt_db:augment_vhosts(Basic, rabbit_mgmt_util:range(ReqData)).
 
 augmented(ReqData, #context{user = User}) ->
     rabbit_mgmt_db:augment_vhosts(

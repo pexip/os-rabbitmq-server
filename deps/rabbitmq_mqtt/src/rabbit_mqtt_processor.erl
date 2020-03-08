@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mqtt_processor).
@@ -21,7 +21,7 @@
          close_connection/1]).
 
 %% for testing purposes
--export([get_vhost_username/1]).
+-export([get_vhost_username/1, get_vhost/3, get_vhost_from_user_mapping/2]).
 
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include("rabbit_mqtt_frame.hrl").
@@ -32,7 +32,8 @@
         Frame = #mqtt_frame{ fixed = #mqtt_frame_fixed{ type = Type }}).
 
 initial_state(Socket, SSLLoginName) ->
-    initial_state(Socket, SSLLoginName,
+    RealSocket = rabbit_net:unwrap_socket(Socket),
+    initial_state(RealSocket, SSLLoginName,
         adapter_info(Socket, 'MQTT'),
         fun send_client/2).
 
@@ -50,7 +51,7 @@ initial_state(Socket, SSLLoginName,
     #proc_state{ unacked_pubs   = gb_trees:empty(),
                  awaiting_ack   = gb_trees:empty(),
                  message_id     = 1,
-                 subscriptions  = dict:new(),
+                 subscriptions  = #{},
                  consumer_tags  = {undefined, undefined},
                  channels       = {undefined, undefined},
                  exchange       = rabbit_mqtt_util:env(exchange),
@@ -58,8 +59,6 @@ initial_state(Socket, SSLLoginName,
                  adapter_info   = AdapterInfo,
                  ssl_login_name = SSLLoginName,
                  send_fun       = SendFun }.
-
-info(client_id, #proc_state{ client_id = ClientId }) -> ClientId.
 
 process_frame(#mqtt_frame{ fixed = #mqtt_frame_fixed{ type = Type }},
               PState = #proc_state{ connection = undefined } )
@@ -80,12 +79,17 @@ process_request(?CONNECT,
                                            clean_sess = CleanSess,
                                            client_id  = ClientId0,
                                            keep_alive = Keepalive} = Var},
-                PState = #proc_state{ ssl_login_name = SSLLoginName,
-                                      send_fun = SendFun }) ->
+                PState0 = #proc_state{ ssl_login_name = SSLLoginName,
+                                       send_fun       = SendFun,
+                                       adapter_info   = AdapterInfo = #amqp_adapter_info{additional_info = Extra} }) ->
     ClientId = case ClientId0 of
                    []    -> rabbit_mqtt_util:gen_client_id();
                    [_|_] -> ClientId0
                end,
+    AdapterInfo1 = AdapterInfo#amqp_adapter_info{additional_info = [
+        {variable_map, #{<<"client_id">> => rabbit_data_coercion:to_binary(ClientId)}}
+                | Extra]},
+    PState = PState0#proc_state{adapter_info = AdapterInfo1},
     {Return, PState1} =
         case {lists:member(ProtoVersion, proplists:get_keys(?PROTOCOL_NAMES)),
               ClientId0 =:= [] andalso CleanSess =:= false} of
@@ -96,13 +100,13 @@ process_request(?CONNECT,
             _ ->
                 case creds(Username, Password, SSLLoginName) of
                     nocreds ->
-                        rabbit_log:error("MQTT login failed: no credentials provided~n"),
+                        rabbit_log_connection:error("MQTT login failed: no credentials provided~n"),
                         {?CONNACK_CREDENTIALS, PState};
                     {invalid_creds, {undefined, Pass}} when is_list(Pass) ->
-                        rabbit_log:error("MQTT login failed: no user username is provided"),
+                        rabbit_log_connection:error("MQTT login failed: no user username is provided"),
                         {?CONNACK_CREDENTIALS, PState};
                     {invalid_creds, {User, undefined}} when is_list(User) ->
-                        rabbit_log:error("MQTT login failed for ~p: no password provided", [User]),
+                        rabbit_log_connection:error("MQTT login failed for ~p: no password provided", [User]),
                         {?CONNACK_CREDENTIALS, PState};
                     {UserBin, PassBin} ->
                         case process_login(UserBin, PassBin, ProtoVersion, PState) of
@@ -158,13 +162,18 @@ process_request(?PUBACK,
       true ->
         Tag = gb_trees:get(MessageId, Awaiting),
         amqp_channel:cast(Channel, #'basic.ack'{ delivery_tag = Tag }),
-        {ok, PState #proc_state{ awaiting_ack = gb_trees:delete( MessageId, Awaiting)}}
+        {ok, PState#proc_state{ awaiting_ack = gb_trees:delete(MessageId, Awaiting) }}
     end;
 
 process_request(?PUBLISH,
-                #mqtt_frame{
-                  fixed = #mqtt_frame_fixed{ qos = ?QOS_2 }}, PState) ->
-    {error, qos2_not_supported, PState};
+                Frame = #mqtt_frame{
+                    fixed = Fixed = #mqtt_frame_fixed{ qos = ?QOS_2 }},
+                PState) ->
+    % Downgrade QOS_2 to QOS_1
+    process_request(?PUBLISH,
+                    Frame#mqtt_frame{
+                        fixed = Fixed#mqtt_frame_fixed{ qos = ?QOS_1 }},
+                    PState);
 process_request(?PUBLISH,
                 #mqtt_frame{
                   fixed = #mqtt_frame_fixed{ qos    = Qos,
@@ -174,7 +183,7 @@ process_request(?PUBLISH,
                                                   message_id = MessageId },
                   payload = Payload },
                   PState = #proc_state{retainer_pid = RPid}) ->
-    check_publish_or_die(Topic, fun() ->
+    check_publish(Topic, fun() ->
         Msg = #mqtt_msg{retain     = Retain,
                         qos        = Qos,
                         topic      = Topic,
@@ -192,14 +201,15 @@ process_request(?PUBLISH,
 process_request(?SUBSCRIBE,
                 #mqtt_frame{
                   variable = #mqtt_frame_subscribe{
-                              message_id  = MessageId,
+                              message_id  = SubscribeMsgId,
                               topic_table = Topics},
                   payload = undefined},
                 #proc_state{channels = {Channel, _},
                             exchange = Exchange,
                             retainer_pid = RPid,
-                            send_fun = SendFun } = PState0) ->
-    check_subscribe_or_die(Topics, fun() ->
+                            send_fun = SendFun,
+                            message_id  = StateMsgId} = PState0) ->
+    check_subscribe(Topics, fun() ->
         {QosResponse, PState1} =
             lists:foldl(fun (#mqtt_topic{name = TopicName,
                                          qos  = Qos}, {QosList, PState}) ->
@@ -212,23 +222,29 @@ process_request(?SUBSCRIBE,
                                        routing_key = rabbit_mqtt_util:mqtt2amqp(
                                                        TopicName)},
                            #'queue.bind_ok'{} = amqp_channel:call(Channel, Binding),
+                           SupportedQosList = case maps:find(TopicName, Subs) of
+                               {ok, L} -> [SupportedQos|L];
+                               error   -> [SupportedQos]
+                           end,
                            {[SupportedQos | QosList],
-                            PState1 #proc_state{subscriptions =
-                                                dict:append(TopicName, SupportedQos, Subs)}}
+                            PState1 #proc_state{
+                                subscriptions =
+                                    maps:put(TopicName, SupportedQosList, Subs)}}
                        end, {[], PState0}, Topics),
         SendFun(#mqtt_frame{fixed    = #mqtt_frame_fixed{type = ?SUBACK},
                             variable = #mqtt_frame_suback{
-                                        message_id = MessageId,
+                                        message_id = SubscribeMsgId,
                                         qos_table  = QosResponse}}, PState1),
         %% we may need to send up to length(Topics) messages.
         %% if QoS is > 0 then we need to generate a message id,
         %% and increment the counter.
+        StartMsgId = safe_max_id(SubscribeMsgId, StateMsgId),
         N = lists:foldl(fun (Topic, Acc) ->
                           case maybe_send_retained_message(RPid, Topic, Acc, PState1) of
                             {true, X} -> Acc + X;
                             false     -> Acc
                           end
-                        end, MessageId, Topics),
+                        end, StartMsgId, Topics),
         {ok, PState1#proc_state{message_id = N}}
     end, PState0);
 
@@ -245,7 +261,7 @@ process_request(?UNSUBSCRIBE,
     Subs1 =
     lists:foldl(
       fun (#mqtt_topic{ name = TopicName }, Subs) ->
-        QosSubs = case dict:find(TopicName, Subs) of
+        QosSubs = case maps:find(TopicName, Subs) of
                       {ok, Val} when is_list(Val) -> lists:usort(Val);
                       error                       -> []
                   end,
@@ -259,7 +275,7 @@ process_request(?UNSUBSCRIBE,
                                   rabbit_mqtt_util:mqtt2amqp(TopicName)},
                   #'queue.unbind_ok'{} = amqp_channel:call(Channel, Binding)
           end, QosSubs),
-        dict:erase(TopicName, Subs)
+        maps:remove(TopicName, Subs)
       end, Subs0, Topics),
     SendFun(#mqtt_frame{ fixed    = #mqtt_frame_fixed { type       = ?UNSUBACK },
                          variable = #mqtt_frame_suback{ message_id = MessageId }},
@@ -273,8 +289,6 @@ process_request(?PINGREQ, #mqtt_frame{}, #proc_state{ send_fun = SendFun } = PSt
 
 process_request(?DISCONNECT, #mqtt_frame{}, PState) ->
     {stop, PState}.
-
-%%----------------------------------------------------------------------------
 
 hand_off_to_retainer(RetainerPid, Topic, #mqtt_msg{payload = <<"">>}) ->
   rabbit_mqtt_retainer:clear(RetainerPid, Topic),
@@ -350,11 +364,10 @@ amqp_callback({#'basic.deliver'{ consumer_tag = ConsumerTag,
                   {?QOS_0, ?QOS_0} ->
                       {ok, PState};
                   {?QOS_1, ?QOS_1} ->
-                      {ok,
-                       next_msg_id(
-                         PState #proc_state{
-                           awaiting_ack =
-                             gb_trees:insert(MsgId, DeliveryTag, Awaiting)})};
+                      Awaiting1 = gb_trees:insert(MsgId, DeliveryTag, Awaiting),
+                      PState1 = PState#proc_state{ awaiting_ack = Awaiting1 },
+                      PState2 = next_msg_id(PState1),
+                      {ok, PState2};
                   {?QOS_0, ?QOS_1} ->
                       amqp_channel:cast(
                         Channel, #'basic.ack'{ delivery_tag = DeliveryTag }),
@@ -395,10 +408,17 @@ delivery_dup({#'basic.deliver'{ redelivered = Redelivered },
         {bool, Dup} -> Redelivered orelse Dup
     end.
 
-next_msg_id(PState = #proc_state{ message_id = 16#ffff }) ->
-    PState #proc_state{ message_id = 1 };
-next_msg_id(PState = #proc_state{ message_id = MsgId }) ->
-    PState #proc_state{ message_id = MsgId + 1 }.
+ensure_valid_mqtt_message_id(Id) when Id >= 16#ffff ->
+    1;
+ensure_valid_mqtt_message_id(Id) ->
+    Id.
+
+safe_max_id(Id0, Id1) ->
+    ensure_valid_mqtt_message_id(erlang:max(Id0, Id1)).
+
+next_msg_id(PState = #proc_state{ message_id = MsgId0 }) ->
+    MsgId1 = ensure_valid_mqtt_message_id(MsgId0 + 1),
+    PState#proc_state{ message_id = MsgId1 }.
 
 %% decide at which qos level to deliver based on subscription
 %% and the message publish qos level. non-MQTT publishes are
@@ -412,10 +432,10 @@ delivery_qos(Tag, Headers,   #proc_state{ consumer_tags = {_, Tag} }) ->
     end.
 
 maybe_clean_sess(PState = #proc_state { clean_sess = false,
-                                        channels   = {Channel, _},
+                                        connection = Conn,
                                         client_id  = ClientId }) ->
+    SessionPresent = session_present(Conn, ClientId),
     {_Queue, PState1} = ensure_queue(?QOS_1, PState),
-    SessionPresent = session_present(Channel, ClientId),
     {SessionPresent, PState1};
 maybe_clean_sess(PState = #proc_state { clean_sess = true,
                                         connection = Conn,
@@ -429,16 +449,18 @@ maybe_clean_sess(PState = #proc_state { clean_sess = true,
     end,
     {false, PState}.
 
-session_present(Channel, ClientId)  ->
+session_present(Conn, ClientId)  ->
     {_, QueueQ1} = rabbit_mqtt_util:subcription_queue_name(ClientId),
     Declare = #'queue.declare'{queue   = QueueQ1,
                                passive = true},
-    case amqp_channel:call(Channel, Declare) of
-        #'queue.declare_ok'{} -> true;
-        _                     -> false
+    {ok, Channel} = amqp_connection:open_channel(Conn),
+    try
+        amqp_channel:call(Channel, Declare),
+        amqp_channel:close(Channel),
+        true
+    catch exit:{{shutdown, {server_initiated_close, ?NOT_FOUND, _Text}}, _} ->
+            false
     end.
-
-%%----------------------------------------------------------------------------
 
 make_will_msg(#mqtt_frame_connect{ will_flag   = false }) ->
     undefined;
@@ -455,39 +477,110 @@ make_will_msg(#mqtt_frame_connect{ will_retain = Retain,
 process_login(UserBin, PassBin, ProtoVersion,
               #proc_state{ channels     = {undefined, undefined},
                            socket       = Sock,
-                           adapter_info = AdapterInfo }) ->
-    {VHost, UsernameBin} = get_vhost_username(UserBin),
-    case amqp_connection:start(#amqp_params_direct{
-                                  username     = UsernameBin,
-                                  password     = PassBin,
-                                  virtual_host = VHost,
-                                  adapter_info = set_proto_version(AdapterInfo, ProtoVersion)}) of
-        {ok, Connection} ->
-            case rabbit_access_control:check_user_loopback(UsernameBin, Sock) of
-                ok          ->
-                    [{internal_user, InternalUser}] = amqp_connection:info(
-                        Connection, [internal_user]),
-                    {?CONNACK_ACCEPT, Connection, VHost,
-                                      #auth_state{user = InternalUser,
-                                                  username = UsernameBin,
-                                                  vhost = VHost}};
-                not_allowed ->
-                    amqp_connection:close(Connection),
-                    rabbit_log:warning(
-                      "MQTT login failed for ~p access_refused "
-                      "(access must be from localhost)~n",
-                      [binary_to_list(UsernameBin)]),
+                           adapter_info = AdapterInfo,
+                           ssl_login_name = SslLoginName}) ->
+    {ok, {_, _, _, ToPort}} = rabbit_net:socket_ends(Sock, inbound),
+    {VHostPickedUsing, {VHost, UsernameBin}} = get_vhost(UserBin, SslLoginName, ToPort),
+    rabbit_log_connection:info(
+        "MQTT vhost picked using ~s~n",
+        [human_readable_vhost_lookup_strategy(VHostPickedUsing)]),
+    case rabbit_vhost:exists(VHost) of
+        true  ->
+            case amqp_connection:start(#amqp_params_direct{
+                username     = UsernameBin,
+                password     = PassBin,
+                virtual_host = VHost,
+                adapter_info = set_proto_version(AdapterInfo, ProtoVersion)}) of
+                {ok, Connection} ->
+                    case rabbit_access_control:check_user_loopback(UsernameBin, Sock) of
+                        ok          ->
+                            [{internal_user, InternalUser}] = amqp_connection:info(
+                                Connection, [internal_user]),
+                            {?CONNACK_ACCEPT, Connection, VHost,
+                                #auth_state{user = InternalUser,
+                                    username = UsernameBin,
+                                    vhost = VHost}};
+                        not_allowed ->
+                            amqp_connection:close(Connection),
+                            rabbit_log_connection:warning(
+                                "MQTT login failed for ~p access_refused "
+                                "(access must be from localhost)~n",
+                                [binary_to_list(UsernameBin)]),
+                            ?CONNACK_AUTH
+                    end;
+                {error, {auth_failure, Explanation}} ->
+                    rabbit_log_connection:error("MQTT login failed for ~p auth_failure: ~s~n",
+                        [binary_to_list(UserBin), Explanation]),
+                    ?CONNACK_CREDENTIALS;
+                {error, access_refused} ->
+                    rabbit_log_connection:warning("MQTT login failed for ~p access_refused "
+                    "(vhost access not allowed)~n",
+                        [binary_to_list(UserBin)]),
+                    ?CONNACK_AUTH;
+                {error, not_allowed} ->
+                    %% when vhost allowed for TLS connection
+                    rabbit_log_connection:warning("MQTT login failed for ~p access_refused "
+                    "(vhost access not allowed)~n",
+                        [binary_to_list(UserBin)]),
                     ?CONNACK_AUTH
             end;
-        {error, {auth_failure, Explanation}} ->
-            rabbit_log:error("MQTT login failed for ~p auth_failure: ~s~n",
-                             [binary_to_list(UserBin), Explanation]),
-            ?CONNACK_CREDENTIALS;
-        {error, access_refused} ->
-            rabbit_log:warning("MQTT login failed for ~p access_refused "
-                               "(vhost access not allowed)~n",
-                               [binary_to_list(UserBin)]),
-            ?CONNACK_AUTH
+        false ->
+            rabbit_log_connection:error("MQTT login failed for ~p auth_failure: vhost ~s does not exist~n",
+                [binary_to_list(UserBin), VHost]),
+            ?CONNACK_CREDENTIALS
+    end.
+
+get_vhost(UserBin, none, Port) ->
+    get_vhost_no_ssl(UserBin, Port);
+get_vhost(UserBin, undefined, Port) ->
+    get_vhost_no_ssl(UserBin, Port);
+get_vhost(UserBin, SslLogin, Port) ->
+    get_vhost_ssl(UserBin, SslLogin, Port).
+
+get_vhost_no_ssl(UserBin, Port) ->
+    case vhost_in_username(UserBin) of
+        true  ->
+            {vhost_in_username_or_default, get_vhost_username(UserBin)};
+        false ->
+            PortVirtualHostMapping = rabbit_runtime_parameters:value_global(
+                mqtt_port_to_vhost_mapping
+            ),
+            case get_vhost_from_port_mapping(Port, PortVirtualHostMapping) of
+                undefined ->
+                    {default_vhost, {rabbit_mqtt_util:env(vhost), UserBin}};
+                VHost ->
+                    {port_to_vhost_mapping, {VHost, UserBin}}
+            end
+    end.
+
+get_vhost_ssl(UserBin, SslLoginName, Port) ->
+    UserVirtualHostMapping = rabbit_runtime_parameters:value_global(
+        mqtt_default_vhosts
+    ),
+    case get_vhost_from_user_mapping(SslLoginName, UserVirtualHostMapping) of
+        undefined ->
+            PortVirtualHostMapping = rabbit_runtime_parameters:value_global(
+                mqtt_port_to_vhost_mapping
+            ),
+            case get_vhost_from_port_mapping(Port, PortVirtualHostMapping) of
+                undefined ->
+                    {vhost_in_username_or_default, get_vhost_username(UserBin)};
+                VHostFromPortMapping ->
+                    {port_to_vhost_mapping, {VHostFromPortMapping, UserBin}}
+            end;
+        VHostFromCertMapping ->
+            {cert_to_vhost_mapping, {VHostFromCertMapping, UserBin}}
+    end.
+
+vhost_in_username(UserBin) ->
+    case application:get_env(?APP, ignore_colons_in_username) of
+        {ok, true} -> false;
+        _ ->
+            %% split at the last colon, disallowing colons in username
+            case re:split(UserBin, ":(?!.*?:)") of
+                [_, _]      -> true;
+                [UserBin]   -> false
+            end
     end.
 
 get_vhost_username(UserBin) ->
@@ -501,6 +594,40 @@ get_vhost_username(UserBin) ->
                 [UserBin]         -> Default
             end
     end.
+
+get_vhost_from_user_mapping(_User, not_found) ->
+    undefined;
+get_vhost_from_user_mapping(User, Mapping) ->
+    M = rabbit_data_coercion:to_proplist(Mapping),
+    case rabbit_misc:pget(User, M) of
+        undefined ->
+            undefined;
+        VHost ->
+            VHost
+    end.
+
+get_vhost_from_port_mapping(_Port, not_found) ->
+    undefined;
+get_vhost_from_port_mapping(Port, Mapping) ->
+    M = rabbit_data_coercion:to_proplist(Mapping),
+    Res = case rabbit_misc:pget(rabbit_data_coercion:to_binary(Port), M) of
+        undefined ->
+            undefined;
+        VHost ->
+            VHost
+    end,
+    Res.
+
+human_readable_vhost_lookup_strategy(vhost_in_username_or_default) ->
+    "vhost in username or default";
+human_readable_vhost_lookup_strategy(port_to_vhost_mapping) ->
+    "MQTT port to vhost mapping";
+human_readable_vhost_lookup_strategy(cert_to_vhost_mapping) ->
+    "client certificate to vhost mapping";
+human_readable_vhost_lookup_strategy(default_vhost) ->
+    "plugin configuration or default";
+human_readable_vhost_lookup_strategy(Val) ->
+     atom_to_list(Val).
 
 creds(User, Pass, SSLLoginName) ->
     DefaultUser   = rabbit_mqtt_util:env(default_user),
@@ -594,8 +721,34 @@ ensure_queue(Qos, #proc_state{ channels      = {Channel, _},
             {Q, PState}
     end.
 
-send_will(PState = #proc_state{ will_msg = WillMsg }) ->
-    amqp_pub(WillMsg, PState).
+send_will(PState = #proc_state{will_msg = undefined}) ->
+    PState;
+
+send_will(PState = #proc_state{will_msg = WillMsg = #mqtt_msg{retain = Retain,
+                                                              topic = Topic},
+                               retainer_pid = RPid,
+                               channels = {ChQos0, ChQos1}}) ->
+    case check_topic_access(Topic, write, PState) of
+        ok ->
+            amqp_pub(WillMsg, PState),
+            case Retain of
+                false -> ok;
+                true  -> hand_off_to_retainer(RPid, Topic, WillMsg)
+            end;
+        Error  ->
+            rabbit_log:warning(
+                "Could not send last will: ~p~n",
+                [Error])
+    end,
+    case ChQos1 of
+        undefined -> ok;
+        _         -> amqp_channel:close(ChQos1)
+    end,
+    case ChQos0 of
+        undefined -> ok;
+        _         -> amqp_channel:close(ChQos0)
+    end,
+    PState #proc_state{ channels = {undefined, undefined} }.
 
 amqp_pub(undefined, PState) ->
     PState;
@@ -654,7 +807,6 @@ human_readable_mqtt_version(_) ->
     "N/A".
 
 send_client(Frame, #proc_state{ socket = Sock }) ->
-    %rabbit_log:info("MQTT sending frame ~p ~n", [Frame]),
     rabbit_net:port_command(Sock, rabbit_mqtt_frame:serialise(Frame)).
 
 close_connection(PState = #proc_state{ connection = undefined }) ->
@@ -671,30 +823,92 @@ close_connection(PState = #proc_state{ connection = Connection,
     PState #proc_state{ channels   = {undefined, undefined},
                         connection = undefined }.
 
-% NB: check_*_or_die: MQTT spec says we should ack normally, ie pretend there
+% NB: check_*: MQTT spec says we should ack normally, ie pretend there
 % was no auth error, but here we are closing the connection with an error. This
 % is what happens anyway if there is an authorization failure at the AMQP level.
 
-check_publish_or_die(TopicName, Fn, PState) ->
+check_publish(TopicName, Fn, PState) ->
   case check_topic_access(TopicName, write, PState) of
     ok -> Fn();
     _ -> {err, unauthorized, PState}
   end.
 
-check_subscribe_or_die([], Fn, _) ->
+check_subscribe([], Fn, _) ->
   Fn();
 
-check_subscribe_or_die([#mqtt_topic{name = TopicName} | Topics], Fn, PState) ->
+check_subscribe([#mqtt_topic{name = TopicName} | Topics], Fn, PState) ->
   case check_topic_access(TopicName, read, PState) of
-    ok -> check_subscribe_or_die(Topics, Fn, PState);
+    ok -> check_subscribe(Topics, Fn, PState);
     _ -> {err, unauthorized, PState}
   end.
 
 check_topic_access(TopicName, Access,
                    #proc_state{
-                      auth_state = #auth_state{user = User,
-                                               vhost = VHost}}) ->
+                        auth_state = #auth_state{user = User = #user{username = Username},
+                                                 vhost = VHost},
+                        exchange = Exchange,
+                        client_id = ClientId}) ->
   Resource = #resource{virtual_host = VHost,
                        kind = topic,
-                       name = TopicName},
-  rabbit_access_control:check_resource_access(User, Resource, Access).
+                       name = Exchange},
+
+  Context = #{routing_key  => rabbit_mqtt_util:mqtt2amqp(TopicName),
+              variable_map => #{
+                  <<"username">>  => Username,
+                  <<"vhost">>     => VHost,
+                  <<"client_id">> => rabbit_data_coercion:to_binary(ClientId)
+              }
+  },
+
+  try rabbit_access_control:check_topic_access(User, Resource, Access, Context) of
+    R -> R
+  catch
+    _:{amqp_error, access_refused, Msg, _} ->
+      rabbit_log:error("operation resulted in an error (access_refused): ~p~n", [Msg]),
+        {error, access_refused};
+    _:Error ->
+      rabbit_log:error("~p~n", [Error]),
+        {error, access_refused}
+  end.
+
+info(consumer_tags, #proc_state{consumer_tags = Val}) -> Val;
+info(unacked_pubs, #proc_state{unacked_pubs = Val}) -> Val;
+info(awaiting_ack, #proc_state{awaiting_ack = Val}) -> Val;
+info(awaiting_seqno, #proc_state{awaiting_seqno = Val}) -> Val;
+info(message_id, #proc_state{message_id = Val}) -> Val;
+info(client_id, #proc_state{client_id = Val}) ->
+    rabbit_data_coercion:to_binary(Val);
+info(clean_sess, #proc_state{clean_sess = Val}) -> Val;
+info(will_msg, #proc_state{will_msg = Val}) -> Val;
+info(channels, #proc_state{channels = Val}) -> Val;
+info(exchange, #proc_state{exchange = Val}) -> Val;
+info(adapter_info, #proc_state{adapter_info = Val}) -> Val;
+info(ssl_login_name, #proc_state{ssl_login_name = Val}) -> Val;
+info(retainer_pid, #proc_state{retainer_pid = Val}) -> Val;
+info(user, #proc_state{auth_state = #auth_state{username = Val}}) -> Val;
+info(vhost, #proc_state{auth_state = #auth_state{vhost = Val}}) -> Val;
+info(host, #proc_state{adapter_info = #amqp_adapter_info{host = Val}}) -> Val;
+info(port, #proc_state{adapter_info = #amqp_adapter_info{port = Val}}) -> Val;
+info(peer_host, #proc_state{adapter_info = #amqp_adapter_info{peer_host = Val}}) -> Val;
+info(peer_port, #proc_state{adapter_info = #amqp_adapter_info{peer_port = Val}}) -> Val;
+info(protocol, #proc_state{adapter_info = #amqp_adapter_info{protocol = Val}}) ->
+    case Val of
+        {Proto, Version} -> {Proto, rabbit_data_coercion:to_binary(Version)};
+        Other -> Other
+    end;
+info(channels, PState) -> additional_info(channels, PState);
+info(channel_max, PState) -> additional_info(channel_max, PState);
+info(frame_max, PState) -> additional_info(frame_max, PState);
+info(client_properties, PState) -> additional_info(client_properties, PState);
+info(ssl, PState) -> additional_info(ssl, PState);
+info(ssl_protocol, PState) -> additional_info(ssl_protocol, PState);
+info(ssl_key_exchange, PState) -> additional_info(ssl_key_exchange, PState);
+info(ssl_cipher, PState) -> additional_info(ssl_cipher, PState);
+info(ssl_hash, PState) -> additional_info(ssl_hash, PState);
+info(Other, _) -> throw({bad_argument, Other}).
+
+
+additional_info(Key,
+                #proc_state{adapter_info =
+                            #amqp_adapter_info{additional_info = AddInfo}}) ->
+    proplists:get_value(Key, AddInfo).

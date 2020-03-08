@@ -17,8 +17,20 @@ function dispatcher() {
 }
 
 function set_auth_pref(userinfo) {
+    // clear a local storage value used by earlier versions
+    clear_local_pref('auth');
+
     var b64 = b64_encode_utf8(userinfo);
-    store_pref('auth', encodeURIComponent(b64));
+    var date  = new Date();
+    var login_session_timeout = get_login_session_timeout();
+
+    if (login_session_timeout) {
+        date.setMinutes(date.getMinutes() + login_session_timeout);
+    } else {
+        // 8 hours from now
+        date.setHours(date.getHours() + 8);
+    }
+    store_cookie_value_with_expiration('auth', encodeURIComponent(b64), date);
 }
 
 function login_route () {
@@ -48,6 +60,7 @@ function login_route_with_path() {
 
 function start_app_login() {
     app = new Sammy.Application(function () {
+        this.get('#/', function() {});
         this.put('#/login', function() {
             username = this.params['username'];
             password = this.params['password'];
@@ -58,7 +71,7 @@ function start_app_login() {
         this.get(/\#\/login\/(.*)/, login_route_with_path);
     });
     app.run();
-    if (get_pref('auth') != null) {
+    if (get_cookie_value('auth') != null) {
         check_login();
     }
 }
@@ -66,17 +79,40 @@ function start_app_login() {
 function check_login() {
     user = JSON.parse(sync_get('/whoami'));
     if (user == false) {
+        // clear a local storage value used by earlier versions
         clear_pref('auth');
+        clear_cookie_value('auth');
         replace_content('login-status', '<p>Login failed</p>');
     }
     else {
+        hide_popup_warn();
         replace_content('outer', format('layout', {}));
+        var user_login_session_timeout = parseInt(user.login_session_timeout);
+        // Update auth login_session_timeout if changed
+        if (has_auth_cookie_value() && !isNaN(user_login_session_timeout) &&
+            user_login_session_timeout !== get_login_session_timeout()) {
+
+            update_login_session_timeout(user_login_session_timeout);
+        }
         setup_global_vars();
         setup_constant_events();
         update_vhosts();
         update_interval();
         setup_extensions();
     }
+}
+
+function get_login_session_timeout() {
+    parseInt(get_cookie_value('login_session_timeout'));
+}
+
+function update_login_session_timeout(login_session_timeout) {
+    var auth_info = get_cookie_value('auth');
+    var date  = new Date();
+    // `login_session_timeout` minutes from now
+    date.setMinutes(date.getMinutes() + login_session_timeout);
+    store_cookie_value('login_session_timeout', login_session_timeout);
+    store_cookie_value_with_expiration('auth', auth_info, date);
 }
 
 function start_app() {
@@ -204,7 +240,7 @@ function set_timer_interval(interval) {
 function reset_timer() {
     clearInterval(timer);
     if (timer_interval != null) {
-        timer = setInterval('partial_update()', timer_interval);
+        timer = setInterval(partial_update, timer_interval);
     }
 }
 
@@ -215,6 +251,7 @@ function update_manual(div, query) {
         path = current_reqs['node']['path'] + '?' + query + '=true';
         template = query;
     }
+
     var data = JSON.parse(sync_get(path));
 
     replace_content(div, format(template, data));
@@ -222,6 +259,7 @@ function update_manual(div, query) {
 }
 
 function render(reqs, template, highlight) {
+    var old_template = current_template;
     current_template = template;
     current_reqs = reqs;
     for (var i in outstanding_reqs) {
@@ -229,6 +267,9 @@ function render(reqs, template, highlight) {
     }
     outstanding_reqs = [];
     current_highlight = highlight;
+    if (old_template !== current_template) {
+        window.scrollTo(0, 0);
+    }
     update();
 }
 
@@ -260,7 +301,8 @@ function partial_update() {
                 var befores = $('#main .updatable');
                 var afters = $('#scratch .updatable');
                 if (befores.length != afters.length) {
-                    throw("before/after mismatch");
+                    console.log("before/after mismatch! Doing a full reload...");
+                    full_refresh();
                 }
                 for (var i = 0; i < befores.length; i++) {
                     $(befores[i]).empty().append($(afters[i]).contents());
@@ -270,7 +312,7 @@ function partial_update() {
                 render_charts();
             });
         }
-  }
+    }
 }
 
 function update_navigation() {
@@ -395,11 +437,15 @@ function y_position() {
 }
 
 function with_update(fun) {
+    if(outstanding_reqs.length > 0){
+        return false;
+    }
     with_reqs(apply_state(current_reqs), [], function(json) {
             var html = format(current_template, json);
             fun(html);
             update_status('ok');
         });
+    return true;
 }
 
 function apply_state(reqs) {
@@ -472,58 +518,74 @@ function apply_state(reqs) {
     return reqs2;
 }
 
-function show_popup(type, text, mode) {
+function show_popup(type, text, _mode) {
     var cssClass = '.form-popup-' + type;
     function hide() {
-        if (mode == 'fade') {
-            $(cssClass).fadeOut(200, function() {
-                $(this).remove();
-            });
-        }
-        else {
-            $(cssClass).slideUp(200, function() {
-                $(this).remove();
-            });
-        }
+        $(cssClass).fadeOut(100, function() {
+            $(this).remove();
+        });
     }
-
     hide();
-    if ($(cssClass).length && type === 'help' &&
-        $(cssClass).text().indexOf(text.replace(/<[^>]*>/g, '')) != -1 ) {
-        return;
-    }
-    $('h1').after(format('error-popup', {'type': type, 'text': text}));
-    if (mode == 'fade') {
-        $(cssClass).fadeIn(200);
-    }
-    else {
-        $(cssClass).center().slideDown(200);
-    }
+    $('#outer').after(format('popup', {'type': type, 'text': text}));
+    $(cssClass).fadeIn(100);
     $(cssClass + ' span').click(function () {
         $('.popup-owner').removeClass('popup-owner');
         hide();
     });
 }
 
+function hide_popup_warn() {
+    var cssClass = '.form-popup-warn';
+    $('.popup-owner').removeClass('popup-owner');
+    $(cssClass).fadeOut(100, function() {
+        $(this).remove();
+    });
+}
 
+function submit_import(form) {
+    if (form.file.value) {
+        var confirm_upload = confirm('Are you sure you want to import a definitions file? Some entities (vhosts, users, queues, etc) may be overwritten!');
+        if (confirm_upload === true) {
+            var file = form.file.files[0]; // FUTURE: limit upload file size (?)
+            var vhost_upload = $("select[name='vhost-upload'] option:selected");
+            var vhost_selected = vhost_upload.index() > 0;
 
+            var vhost_name = null;
+            if (vhost_selected) {
+                vhost_name = vhost_upload.val();
+            }
 
-   function submit_import(form) {
-       var idx = $("select[name='vhost-upload'] option:selected").index()
-       var vhost = ((idx <=0 ) ? "" : "/" + esc($("select[name='vhost-upload'] option:selected").val()));
-       form.action ="api/definitions" + vhost + '?auth=' + get_pref('auth');
-       form.submit();
-     };
+            var vhost_part = '';
+            if (vhost_name) {
+                vhost_part = '/' + esc(vhost_name);
+            }
 
+            var form_action = "/definitions" + vhost_part + '?auth=' + get_cookie_value('auth');
+            var fd = new FormData();
+            fd.append('file', file);
+            with_req('POST', form_action, fd, function(resp) {
+                show_popup('info', 'Your definitions were imported successfully.');
+            });
+        }
+    }
+    return false;
+};
 
 function postprocess() {
+    $('form.confirm-queue').submit(function() {
+        return confirm("Are you sure? The queue is going to be deleted. " +
+                       "Messages cannot be recovered after deletion.");
+        });
+
+    $('form.confirm-purge-queue').submit(function() {
+        return confirm("Are you sure? Messages cannot be recovered after purging.");
+        });
+
     $('form.confirm').submit(function() {
             return confirm("Are you sure? This object cannot be recovered " +
                            "after deletion.");
         });
-    $('div.section h2, div.section-hidden h2').die().live('click', function() {
-            toggle_visibility($(this));
-        });
+
     $('label').map(function() {
             if ($(this).attr('for') == '') {
                 var id = 'auto-label-' + Math.floor(Math.random()*1000000000);
@@ -534,28 +596,30 @@ function postprocess() {
                 }
             }
         });
+
     $('#download-definitions').click(function() {
-            var idx = $("select[name='vhost-download'] option:selected").index()
+            var idx = $("select[name='vhost-download'] option:selected").index();
             var vhost = ((idx <=0 ) ? "" : "/" + esc($("select[name='vhost-download'] option:selected").val()));
             var path = 'api/definitions' + vhost + '?download=' +
                 esc($('#download-filename').val()) +
-                '&auth=' + get_pref('auth');
+                '&auth=' + get_cookie_value('auth');
             window.location = path;
             setTimeout('app.run()');
             return false;
         });
 
-
     $('.update-manual').click(function() {
             update_manual($(this).attr('for'), $(this).attr('query'));
         });
-    $('input, select').die();
-    $('.multifield input').live('keyup', function() {
+
+    $(document).on('keyup', '.multifield input', function() {
             update_multifields();
         });
-    $('.multifield select').live('change', function() {
+
+    $(document).on('change', '.multifield select', function() {
             update_multifields();
         });
+
     $('.controls-appearance').change(function() {
         var params = $(this).get(0).options;
         var selected = $(this).val();
@@ -569,52 +633,55 @@ function postprocess() {
             }
         }
     });
-    $('.help').die().live('click', function() {
-        help($(this).attr('id'));
+
+    $(document).on('click', '.help', function() {
+      show_popup('help', HELP[$(this).attr('id')]);
     });
-    $('.popup-options-link').die().live('click', function() {
-        var remove = $('.popup-owner').length == 1 &&
-                     $('.popup-owner').get(0) == $(this).get(0);
+
+    $(document).on('click', '.popup-options-link', function() {
         $('.popup-owner').removeClass('popup-owner');
-        if (remove) {
-            $('.form-popup-options').fadeOut(200, function() {
-                $(this).remove();
-            });
-        }
-        else {
-            $(this).addClass('popup-owner');
-            var template = $(this).attr('type') + '-options';
-            show_popup('options', format(template, {span: $(this)}),
-                       'fade');
-        }
+        $(this).addClass('popup-owner');
+        var template = $(this).attr('type') + '-options';
+        show_popup('options', format(template, {span: $(this)}), 'fade');
     });
-    $('.rate-visibility-option').die().live('click', function() {
+
+    $(document).on('click', '.rate-visibility-option', function() {
         var k = $(this).attr('data-pref');
         var show = get_pref(k) !== 'true';
         store_pref(k, '' + show);
         partial_update();
     });
-    $('input, select').live('focus', function() {
+
+    $(document).on('focus', 'input, select', function() {
         update_counter = 0; // If there's interaction, reset the counter.
     });
+
     $('.tag-link').click(function() {
         $('#tags').val($(this).attr('tag'));
     });
+
     $('.argument-link').click(function() {
         var field = $(this).attr('field');
         var row = $('#' + field).find('.mf').last();
         var key = row.find('input').first();
+        var value = row.find('input').last();
         var type = row.find('select').last();
         key.val($(this).attr('key'));
+        value.val($(this).attr('value'));
         type.val($(this).attr('type'));
         update_multifields();
     });
-    $('form.auto-submit select, form.auto-submit input').live('click', function(){
+
+    $(document).on('click', 'form.auto-submit select, form.auto-submit input', function(){
         $(this).parents('form').submit();
     });
-    $('#filter').die().live('keyup', debounce(update_filter, 500));
+
+    $('#filter').on('keyup', debounce(update_filter, 500));
+
     $('#filter-regex-mode').change(update_filter_regex_mode);
-    $('#truncate').die().live('keyup', debounce(update_truncate, 500));
+
+    $('#truncate').on('keyup', debounce(update_truncate, 500));
+
     if (! user_administrator) {
         $('.administrator-only').remove();
     }
@@ -622,19 +689,24 @@ function postprocess() {
     update_multifields();
 }
 
-
 function url_pagination_template(template, defaultPage, defaultPageSize){
-   return  '/' + template + '?page=' + fmt_page_number_request(template, defaultPage) +
-                       '&page_size=' +  fmt_page_size_request(template, defaultPageSize) +
-                       '&name=' + fmt_filter_name_request(template, "") +
-                       '&use_regex=' + ((fmt_regex_request(template,"") == "checked" ? 'true' : 'false'));
-
+    var page_number_request = fmt_page_number_request(template, defaultPage);
+    var page_size = fmt_page_size_request(template, defaultPageSize);
+    var name_request = fmt_filter_name_request(template, "");
+    var use_regex = fmt_regex_request(template, "") == "checked";
+    if (use_regex) {
+        name_request = esc(name_request);
+    }
+    return  '/' + template +
+        '?page=' +  page_number_request +
+        '&page_size=' + page_size +
+        '&name=' + name_request +
+        '&use_regex=' + use_regex;
 }
 
-
 function stored_page_info(template, page_start){
-    var pageSize = $('#' + template+'-pagesize').val();
-    var filterName = $('#' + template+'-name').val();
+    var pageSize = fmt_strip_tags($('#' + template+'-pagesize').val());
+    var filterName = fmt_strip_tags($('#' + template+'-name').val());
 
     store_pref(template + '_current_page_number', page_start);
     if (filterName != null && filterName != undefined) {
@@ -646,11 +718,9 @@ function stored_page_info(template, page_start){
         store_pref(template + '_current_regex', regex_on ? "checked" : " " );
     }
 
-
     if (pageSize != null && pageSize != undefined) {
         store_pref(template + '_current_page_size', pageSize);
     }
-
 }
 
 function update_pages(template, page_start){
@@ -662,7 +732,6 @@ function update_pages(template, page_start){
          case 'channels' : renderChannels(); break;
      }
 }
-
 
 function renderQueues() {
     render({'queues':  {path: url_pagination_template('queues', 1, 100),
@@ -688,9 +757,11 @@ function renderChannels() {
                         'channels', '#/channels');
 }
 
-
 function update_pages_from_ui(sender) {
-    update_pages(current_template, !!$(sender).attr('data-page-start') ? $(sender).attr('data-page-start') : $(sender).val());
+    var val = $(sender).val();
+    var raw = !!$(sender).attr('data-page-start') ? $(sender).attr('data-page-start') : val;
+    var s   = fmt_strip_tags(raw);
+    update_pages(current_template, s);
 }
 
 function postprocess_partial() {
@@ -709,6 +780,12 @@ function postprocess_partial() {
     });
 
     setup_visibility();
+
+    $('#main').off('click', 'div.section h2, div.section-hidden h2');
+    $('#main').on('click', 'div.section h2, div.section-hidden h2', function() {
+            toggle_visibility($(this));
+        });
+
     $('.sort').click(function() {
             var sort = $(this).attr('sort');
             if (current_sort == sort) {
@@ -720,6 +797,7 @@ function postprocess_partial() {
             }
             update();
         });
+
     // TODO remove this hack when we get rid of "updatable"
     if ($('#filter-warning-show').length > 0) {
         $('#filter-truncate').addClass('filter-warning');
@@ -821,7 +899,7 @@ function update_filter_regex(jElem) {
             current_filter_regex = new RegExp(current_filter,'i');
         } catch (e) {
             jElem.parents('.filter').append('<p class="status-error">' +
-                                            e.message + '</p>');
+                                            fmt_escape_html(e.message) + '</p>');
         }
     }
 }
@@ -894,17 +972,27 @@ function toggle_visibility(item) {
         all.addClass('section-invisible');
     }
     else {
-        if (all.hasClass('section-hidden'))
+        if (all.hasClass('section-hidden')) {
             store_pref(pref, 't');
-        else
+        } else {
             clear_pref(pref);
+        }
         all.removeClass('section-invisible');
         all.addClass('section-visible');
     }
 }
 
 function publish_msg(params0) {
-    var params = params_magic(params0);
+    try {
+        var params = params_magic(params0);
+        publish_msg0(params);
+    } catch (e) {
+        show_popup('warn', fmt_escape_html(e));
+        return false;
+    }
+}
+
+function publish_msg0(params) {
     var path = fill_path_template('/exchanges/:vhost/:name/publish', params);
     params['payload_encoding'] = 'string';
     params['properties'] = {};
@@ -990,18 +1078,20 @@ function format(template, json) {
         return tmpl.render(json);
     } catch (err) {
         clearInterval(timer);
-        debug(err['name'] + ": " + err['message']);
+        console.log("Uncaught error: " + err);
+        console.log("Stack: " + err['stack']);
+        debug(err['name'] + ": " + err['message'] + "\n" + err['stack'] + "\n");
     }
 }
 
 function update_status(status) {
     var text;
     if (status == 'ok')
-        text = "Last update: " + fmt_date(new Date());
+        text = "Refreshed " + fmt_date(new Date());
     else if (status == 'error') {
         var next_try = new Date(new Date().getTime() + timer_interval);
         text = "Error: could not connect to server since " +
-            fmt_date(last_successful_connect) + ".<br/>Will retry at " +
+            fmt_date(last_successful_connect) + ". Will retry at " +
             fmt_date(next_try) + ".";
     }
     else
@@ -1011,11 +1101,25 @@ function update_status(status) {
     replace_content('status', html);
 }
 
+function has_auth_cookie_value() {
+    return get_cookie_value('auth') != null;
+}
+
 function auth_header() {
-    return "Basic " + decodeURIComponent(get_pref('auth'));
+    if(has_auth_cookie_value()) {
+        return "Basic " + decodeURIComponent(get_cookie_value('auth'));
+    } else {
+        return null;
+    }
 }
 
 function with_req(method, path, body, fun) {
+    if(!has_auth_cookie_value()) {
+        // navigate to the login form
+        location.reload();
+        return;
+    }
+
     var json;
     var req = xmlHttpRequest();
     req.open(method, 'api' + path, true );
@@ -1060,7 +1164,7 @@ function sync_req(type, params0, path_template, options) {
         params = params_magic(params0);
         path = fill_path_template(path_template, params);
     } catch (e) {
-        show_popup('warn', e);
+        show_popup('warn', fmt_escape_html(e));
         return false;
     }
     var req = xmlHttpRequest();
@@ -1069,11 +1173,11 @@ function sync_req(type, params0, path_template, options) {
     req.setRequestHeader('authorization', auth_header());
 
     if (options != undefined || options != null) {
-	if (options.headers != undefined || options.headers != null) {
-	    jQuery.each(options.headers, function (k, v) {
-		req.setRequestHeader(k, v);
-	    });
-	}
+        if (options.headers != undefined || options.headers != null) {
+            jQuery.each(options.headers, function (k, v) {
+            req.setRequestHeader(k, v);
+            });
+        }
     }
 
     try {
@@ -1118,8 +1222,8 @@ function check_bad_response(req, full_page_404) {
         var error = JSON.parse(req.responseText).error;
         if (typeof(error) != 'string') error = JSON.stringify(error);
 
-        if (error == 'bad_request' || error == 'not_found') {
-            show_popup('warn', reason);
+        if (error == 'bad_request' || error == 'not_found' || error == 'not_authorised') {
+            show_popup('warn', fmt_escape_html(reason));
         } else if (error == 'page_out_of_range') {
             var seconds = 60;
             if (last_page_out_of_range_error > 0)
@@ -1151,8 +1255,7 @@ function check_bad_response(req, full_page_404) {
         update_status('error');
     }
     else {
-        debug("Got response code " + req.status + " with body " +
-              req.responseText);
+        debug("Management API returned status code " + req.status + " - <strong>" + fmt_escape_html_one_line(req.responseText) + "</strong>");
         clearInterval(timer);
     }
 
@@ -1306,7 +1409,7 @@ function put_parameter(sammy, mandatory_keys, num_keys, bool_keys,
     if (sync_put(sammy, '/parameters/:component/:vhost/:name')) update();
 }
 
-function put_policy(sammy, mandatory_keys, num_keys, bool_keys) {
+function put_cast_params(sammy, path, mandatory_keys, num_keys, bool_keys) {
     for (var i in sammy.params) {
         if (i === 'length' || !sammy.params.hasOwnProperty(i)) continue;
         if (sammy.params[i] == '' && jQuery.inArray(i, mandatory_keys) == -1) {
@@ -1319,7 +1422,7 @@ function put_policy(sammy, mandatory_keys, num_keys, bool_keys) {
             sammy.params[i] = sammy.params[i] == 'true';
         }
     }
-    if (sync_put(sammy, '/policies/:vhost/:name')) update();
+    if (sync_put(sammy, path)) update();
 }
 
 function update_column_options(sammy) {
@@ -1400,4 +1503,26 @@ function debounce(f, delay) {
         if (timeout) clearTimeout(timeout);
         timeout = setTimeout(delayed, delay);
     }
+}
+
+function rename_multifield(params, from, to) {
+    var new_params = {};
+    for(var key in params){
+        var match = key.match("^" + from + "_[0-9_]*_mftype$");
+        var match2 = key.match("^" + from +  "_[0-9_]*_mfkey$");
+        var match3 = key.match("^" + from + "_[0-9_]*_mfvalue$");
+        if (match != null) {
+            new_params[match[0].replace(from, to)] = params[match];
+        }
+        else if (match2 != null) {
+            new_params[match2[0].replace(from, to)] = params[match2];
+        }
+        else if (match3 != null) {
+            new_params[match3[0].replace(from, to)] = params[match3];
+        }
+        else {
+            new_params[key] = params[key]
+        }
+    }
+    return new_params;
 }

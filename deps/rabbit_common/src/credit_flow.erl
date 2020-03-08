@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(credit_flow).
@@ -107,13 +107,13 @@
                                       {from, FROM},
                                       {from_info, erlang:process_info(FROM)},
                                       {timestamp,
-                                       time_compat:os_system_time(
+                                       os:system_time(
                                          milliseconds)}])).
 -define(TRACE_UNBLOCKED(SELF, FROM), rabbit_event:notify(credit_flow_unblocked,
                                        [{process, SELF},
                                         {from, FROM},
                                         {timestamp,
-                                         time_compat:os_system_time(
+                                         os:system_time(
                                            milliseconds)}])).
 -else.
 -define(TRACE_BLOCKED(SELF, FROM), ok).
@@ -168,8 +168,8 @@ state() -> case blocked() of
                true  -> flow;
                false -> case get(credit_blocked_at) of
                             undefined -> running;
-                            B         -> Now = time_compat:monotonic_time(),
-                                         Diff = time_compat:convert_time_unit(Now - B,
+                            B         -> Now = erlang:monotonic_time(),
+                                         Diff = erlang:convert_time_unit(Now - B,
                                                                               native,
                                                                               micro_seconds),
                                          case Diff < ?STATE_CHANGE_INTERVAL of
@@ -200,7 +200,7 @@ grant(To, Quantity) ->
 block(From) ->
     ?TRACE_BLOCKED(self(), From),
     case blocked() of
-        false -> put(credit_blocked_at, time_compat:monotonic_time());
+        false -> put(credit_blocked_at, erlang:monotonic_time());
         true  -> ok
     end,
     ?UPDATE(credit_blocked, [], Blocks, [From | Blocks]).

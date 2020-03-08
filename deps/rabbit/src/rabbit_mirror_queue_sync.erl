@@ -16,7 +16,7 @@
 
 -module(rabbit_mirror_queue_sync).
 
--include("rabbit.hrl").
+-include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([master_prepare/4, master_go/8, slave/7, conserve_resources/3]).
 
@@ -37,7 +37,7 @@
 %%
 %%               Master             Syncer                 Slave(s)
 %% sync_mirrors -> ||                                         ||
-%% (from channel)  || -- (spawns) --> ||                      ||
+%%                 || -- (spawns) --> ||                      ||
 %%                 || --------- sync_start (over GM) -------> ||
 %%                 ||                 || <--- sync_ready ---- ||
 %%                 ||                 ||         (or)         ||
@@ -104,7 +104,7 @@ master_batch_go0(Args, BatchSize, BQ, BQS) ->
                     false -> {cont, Acc1}
                 end
         end,
-    FoldAcc = {[], 0, {0, BQ:depth(BQS)}, time_compat:monotonic_time()},
+    FoldAcc = {[], 0, {0, BQ:depth(BQS)}, erlang:monotonic_time()},
     bq_fold(FoldFun, FoldAcc, Args, BQ, BQS).
 
 master_batch_send({Syncer, Ref, Log, HandleInfo, EmitStats, Parent},
@@ -150,10 +150,20 @@ master_send_receive(SyncMsg, NewAcc, Syncer, Ref, Parent) ->
 
 master_done({Syncer, Ref, _Log, _HandleInfo, _EmitStats, Parent}, BQS) ->
     receive
-        {next, Ref}              -> stop_syncer(Syncer, {done, Ref}),
-                                    {ok, BQS};
-        {'EXIT', Parent, Reason} -> {shutdown,  Reason, BQS};
-        {'EXIT', Syncer, Reason} -> {sync_died, Reason, BQS}
+        {'$gen_call', From,
+         cancel_sync_mirrors}    ->
+            stop_syncer(Syncer, {cancel, Ref}),
+            gen_server2:reply(From, ok),
+            {cancelled, BQS};
+        {cancelled, Ref} ->
+            {cancelled, BQS};
+        {next, Ref}              ->
+            stop_syncer(Syncer, {done, Ref}),
+            {ok, BQS};
+        {'EXIT', Parent, Reason} ->
+            {shutdown,  Reason, BQS};
+        {'EXIT', Syncer, Reason} ->
+            {sync_died, Reason, BQS}
     end.
 
 stop_syncer(Syncer, Msg) ->
@@ -164,12 +174,12 @@ stop_syncer(Syncer, Msg) ->
     end.
 
 maybe_emit_stats(Last, I, EmitStats, Log) ->
-    Interval = time_compat:convert_time_unit(
-                 time_compat:monotonic_time() - Last, native, micro_seconds),
+    Interval = erlang:convert_time_unit(
+                 erlang:monotonic_time() - Last, native, micro_seconds),
     case Interval > ?SYNC_PROGRESS_INTERVAL of
         true  -> EmitStats({syncing, I}),
                  Log("~p messages", [I]),
-                 time_compat:monotonic_time();
+                 erlang:monotonic_time();
         false -> Last
     end.
 
@@ -230,7 +240,7 @@ syncer_check_resources(Ref, MPid, SPids) ->
             syncer_loop(Ref, MPid, SPids);
         true ->
             case wait_for_resources(Ref, SPids) of
-                cancel -> ok;
+                cancel -> MPid ! {cancelled, Ref};
                 SPids1 -> MPid ! {next, Ref},
                           syncer_loop(Ref, MPid, SPids1)
             end
@@ -240,7 +250,7 @@ syncer_loop(Ref, MPid, SPids) ->
     receive
         {conserve_resources, memory, true} ->
             case wait_for_resources(Ref, SPids) of
-                cancel -> ok;
+                cancel -> MPid ! {cancelled, Ref};
                 SPids1 -> syncer_loop(Ref, MPid, SPids1)
             end;
         {conserve_resources, _, _} ->

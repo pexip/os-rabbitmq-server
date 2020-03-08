@@ -11,34 +11,26 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 -module(rabbit_mgmt_wm_healthchecks).
 
--export([init/1, to_json/2, content_types_provided/2, is_authorized/2]).
--export([finish_request/2, allowed_methods/2]).
--export([encodings_provided/2]).
+-export([init/2, to_json/2, content_types_provided/2, is_authorized/2]).
 -export([resource_exists/2]).
+-export([variances/2]).
 
--include("rabbit_mgmt.hrl").
--include_lib("webmachine/include/webmachine.hrl").
+-include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 
 %%--------------------------------------------------------------------
 
-init(_Config) -> {ok, #context{}}.
+init(Req, _State) ->
+    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
 
-finish_request(ReqData, Context) ->
-    {ok, rabbit_mgmt_cors:set_headers(ReqData, Context), Context}.
-
-allowed_methods(ReqData, Context) ->
-    {['HEAD', 'GET', 'OPTIONS'], ReqData, Context}.
+variances(Req, Context) ->
+    {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
 
 content_types_provided(ReqData, Context) ->
-   {[{"application/json", to_json}], ReqData, Context}.
-
-encodings_provided(ReqData, Context) ->
-    {[{"identity", fun(X) -> X end},
-     {"gzip", fun(X) -> zlib:gzip(X) end}], ReqData, Context}.
+   {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
 
 resource_exists(ReqData, Context) ->
     {case node0(ReqData) of
@@ -48,19 +40,25 @@ resource_exists(ReqData, Context) ->
 
 to_json(ReqData, Context) ->
     Node = node0(ReqData),
-    try
-        Timeout = case wrq:get_req_header("timeout", ReqData) of
-                      undefined -> 70000;
-                      Val       -> list_to_integer(Val)
-                  end,
-        rabbit_health_check:node(Node, Timeout),
-        rabbit_mgmt_util:reply([{status, ok}], ReqData, Context)
-    catch
-        {node_is_ko, ErrorMsg, _ErrorCode} ->
-            rabbit_mgmt_util:reply([{status, failed},
-                                    {reason, rabbit_mgmt_format:print(ErrorMsg)}],
-                                   ReqData, Context)
+    Timeout = case cowboy_req:header(<<"timeout">>, ReqData) of
+                  undefined -> 70000;
+                  Val       -> list_to_integer(binary_to_list(Val))
+              end,
+    case rabbit_health_check:node(Node, Timeout) of
+        ok ->
+            rabbit_mgmt_util:reply([{status, ok}], ReqData, Context);
+        {badrpc, Err} ->
+            failure(rabbit_mgmt_format:print("~p", Err), ReqData, Context);
+        {error_string, Err} ->
+            S = rabbit_mgmt_format:escape_html_tags(
+                  rabbit_data_coercion:to_list(rabbit_mgmt_format:print(Err))),
+            failure(S, ReqData, Context)
     end.
+
+failure(Message, ReqData, Context) ->
+    rabbit_mgmt_util:reply([{status, failed},
+                            {reason, Message}],
+                           ReqData, Context).
 
 is_authorized(ReqData, Context) ->
     rabbit_mgmt_util:is_authorized(ReqData, Context).

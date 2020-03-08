@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ Federation.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_queue_link_sup_sup).
@@ -57,7 +57,7 @@ stop_child(Q) ->
 %%----------------------------------------------------------------------------
 
 init([]) ->
-    {ok, {{one_for_one, 3, 10}, []}}.
+    {ok, {{one_for_one, 1200, 60}, []}}.
 
 %% Clean out all mutable aspects of the queue except policy. We need
 %% to keep the entire queue around rather than just take its name

@@ -11,7 +11,7 @@
 %%  The Original Code is RabbitMQ.
 %%
 %%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%  Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_shovel_dyn_worker_sup_sup).
@@ -21,6 +21,7 @@
 
 -import(rabbit_misc, [pget/2]).
 
+-include("rabbit_shovel.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 -define(SUPERVISOR, ?MODULE).
 
@@ -56,9 +57,10 @@ child_exists(Name) ->
 stop_child(Name) ->
     case get(shovel_worker_autodelete) of
         true -> ok; %% [1]
-        _    -> ok = mirrored_supervisor:terminate_child(?SUPERVISOR, Name),
-                ok = mirrored_supervisor:delete_child(?SUPERVISOR, Name),
-                rabbit_shovel_status:remove(Name)
+        _    ->
+            ok = mirrored_supervisor:terminate_child(?SUPERVISOR, Name),
+            ok = mirrored_supervisor:delete_child(?SUPERVISOR, Name),
+            rabbit_shovel_status:remove(Name)
     end.
 
 %% [1] An autodeleting worker removes its own parameter, and thus ends

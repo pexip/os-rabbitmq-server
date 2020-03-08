@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_federation_parameters).
@@ -20,7 +20,7 @@
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 
--export([validate/5, notify/4, notify_clear/3]).
+-export([validate/5, notify/5, notify_clear/4]).
 -export([register/0, unregister/0, validate_policy/1, adjust/1]).
 
 -define(RUNTIME_PARAMETERS,
@@ -47,14 +47,16 @@ unregister() ->
         {Class, Name} <- ?RUNTIME_PARAMETERS],
     ok.
 
-validate(_VHost, <<"federation-upstream-set">>, Name, Term, _User) ->
+validate(_VHost, <<"federation-upstream-set">>, Name, Term0, _User) ->
+    Term = [rabbit_data_coercion:to_proplist(Upstream) || Upstream <- Term0],
     [rabbit_parameter_validation:proplist(
        Name,
        [{<<"upstream">>, fun rabbit_parameter_validation:binary/2, mandatory} |
         shared_validation()], Upstream)
      || Upstream <- Term];
 
-validate(_VHost, <<"federation-upstream">>, Name, Term, _User) ->
+validate(_VHost, <<"federation-upstream">>, Name, Term0, _User) ->
+    Term = rabbit_data_coercion:to_proplist(Term0),
     rabbit_parameter_validation:proplist(
       Name, [{<<"uri">>, fun validate_uri/2, mandatory} |
             shared_validation()], Term);
@@ -62,16 +64,16 @@ validate(_VHost, <<"federation-upstream">>, Name, Term, _User) ->
 validate(_VHost, _Component, Name, _Term, _User) ->
     {error, "name not recognised: ~p", [Name]}.
 
-notify(_VHost, <<"federation-upstream-set">>, Name, _Term) ->
+notify(_VHost, <<"federation-upstream-set">>, Name, _Term, _Username) ->
     adjust({upstream_set, Name});
 
-notify(_VHost, <<"federation-upstream">>, Name, _Term) ->
+notify(_VHost, <<"federation-upstream">>, Name, _Term, _Username) ->
     adjust({upstream, Name}).
 
-notify_clear(_VHost, <<"federation-upstream-set">>, Name) ->
+notify_clear(_VHost, <<"federation-upstream-set">>, Name, _Username) ->
     adjust({clear_upstream_set, Name});
 
-notify_clear(_VHost, <<"federation-upstream">>, Name) ->
+notify_clear(_VHost, <<"federation-upstream">>, Name, _Username) ->
     adjust({clear_upstream, Name}).
 
 adjust(Thing) ->

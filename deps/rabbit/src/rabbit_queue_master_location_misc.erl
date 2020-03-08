@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_queue_master_location_misc).
@@ -24,7 +24,7 @@
          get_location_mod_by_config/1,
          get_location_mod_by_args/1,
          get_location_mod_by_policy/1,
-         all_nodes/0]).
+         all_nodes/1]).
 
 lookup_master(QueueNameBin, VHostPath) when is_binary(QueueNameBin),
                                             is_binary(VHostPath) ->
@@ -63,8 +63,8 @@ get_location(Queue=#amqqueue{})->
     end.
 
 get_location_mod_by_args(#amqqueue{arguments=Args}) ->
-    case proplists:lookup(<<"x-queue-master-locator">> , Args) of
-        {<<"x-queue-master-locator">> , Strategy}  ->
+    case rabbit_misc:table_lookup(Args, <<"x-queue-master-locator">>) of
+        {_Type, Strategy}  ->
             case rabbit_queue_location_validator:validate_strategy(Strategy) of
                 Reply = {ok, _CB} -> Reply;
                 Error             -> Error
@@ -92,4 +92,20 @@ get_location_mod_by_config(#amqqueue{}) ->
         _ -> {error, "queue_master_locator undefined"}
     end.
 
-all_nodes()  -> rabbit_mnesia:cluster_nodes(running).
+all_nodes(Queue = #amqqueue{}) ->
+    handle_is_mirrored_ha_nodes(rabbit_mirror_queue_misc:is_mirrored_ha_nodes(Queue), Queue).
+
+handle_is_mirrored_ha_nodes(false, _Queue) ->
+    % Note: ha-mode is NOT 'nodes' - it is either exactly or all, which means
+    % that any node in the cluster is eligible to be the new queue master node
+    rabbit_nodes:all_running();
+handle_is_mirrored_ha_nodes(true, Queue) ->
+    % Note: ha-mode is 'nodes', which explicitly specifies allowed nodes.
+    % We must use suggested_queue_nodes to get that list of nodes as the
+    % starting point for finding the queue master location
+    handle_suggested_queue_nodes(rabbit_mirror_queue_misc:suggested_queue_nodes(Queue)).
+
+handle_suggested_queue_nodes({_MNode, []}) ->
+    rabbit_nodes:all_running();
+handle_suggested_queue_nodes({MNode, SNodes}) ->
+    [MNode | SNodes].

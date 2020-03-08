@@ -1,16 +1,26 @@
 PROJECT = rabbit_common
+PROJECT_DESCRIPTION = Modules shared by rabbitmq-server and rabbitmq-erlang-client
 
-BUILD_DEPS = rabbitmq_codegen
-TEST_DEPS = mochiweb proper
+define PROJECT_APP_EXTRA_KEYS
+%% Hex.pm package informations.
+	{maintainers, [
+	    "RabbitMQ Team <info@rabbitmq.com>",
+	    "Jean-Sebastien Pedron <jean-sebastien@rabbitmq.com>"
+	  ]},
+	{licenses, ["MPL 1.1"]},
+	{links, [
+	    {"Website", "http://www.rabbitmq.com/"},
+	    {"GitHub", "https://github.com/rabbitmq/rabbitmq-common"}
+	  ]},
+	{build_tools, ["make", "rebar3"]},
+	{files, [
+	    $(RABBITMQ_HEXPM_DEFAULT_FILES),
+	    "mk"
+	  ]}
+endef
 
-.DEFAULT_GOAL = all
-
-EXTRA_SOURCES += include/rabbit_framing.hrl				\
-		 src/rabbit_framing_amqp_0_8.erl			\
-		 src/rabbit_framing_amqp_0_9_1.erl
-
-.DEFAULT_GOAL = all
-$(PROJECT).d:: $(EXTRA_SOURCES)
+LOCAL_DEPS = compiler syntax_tools xmerl
+DEPS = lager jsx ranch ranch_proxy_protocol recon
 
 # FIXME: Use erlang.mk patched for RabbitMQ, while waiting for PRs to be
 # reviewed and merged.
@@ -18,52 +28,26 @@ $(PROJECT).d:: $(EXTRA_SOURCES)
 ERLANG_MK_REPO = https://github.com/rabbitmq/erlang.mk.git
 ERLANG_MK_COMMIT = rabbitmq-tmp
 
+# Variables and recipes in development.*.mk are meant to be used from
+# any Git clone. They are excluded from the files published to Hex.pm.
+# Generated files are published to Hex.pm however so people using this
+# source won't have to depend on Python and rabbitmq-codegen.
+#
+# That's why those Makefiles are included with `-include`: we ignore any
+# inclusion errors.
+
+-include development.pre.mk
+
+DEP_EARLY_PLUGINS = $(PROJECT)/mk/rabbitmq-early-test.mk
+DEP_PLUGINS = $(PROJECT)/mk/rabbitmq-build.mk \
+	      $(PROJECT)/mk/rabbitmq-hexpm.mk \
+	      $(PROJECT)/mk/rabbitmq-dist.mk \
+	      $(PROJECT)/mk/rabbitmq-test.mk \
+	      $(PROJECT)/mk/rabbitmq-tools.mk
+
+WITHOUT = plugins/proper
+
 include mk/rabbitmq-components.mk
 include erlang.mk
-include mk/rabbitmq-build.mk
-include mk/rabbitmq-dist.mk
-include mk/rabbitmq-tools.mk
 
-# --------------------------------------------------------------------
-# Compilation.
-# --------------------------------------------------------------------
-
-# $(ERTS_VER) is set in `rabbitmq-build.mk` above.
-tls_atom_version_MAX_ERTS_VER = 6.0
-ifeq ($(call compare_version,$(ERTS_VER),$(tls_atom_version_MAX_ERTS_VER),<),true)
-RMQ_ERLC_OPTS += -Ddefine_tls_atom_version
-endif
-
-# --------------------------------------------------------------------
-# Framing sources generation.
-# --------------------------------------------------------------------
-
-PYTHON       ?= python
-CODEGEN       = $(CURDIR)/codegen.py
-CODEGEN_DIR  ?= $(DEPS_DIR)/rabbitmq_codegen
-CODEGEN_AMQP  = $(CODEGEN_DIR)/amqp_codegen.py
-
-AMQP_SPEC_JSON_FILES_0_8   = $(CODEGEN_DIR)/amqp-rabbitmq-0.8.json
-AMQP_SPEC_JSON_FILES_0_9_1 = $(CODEGEN_DIR)/amqp-rabbitmq-0.9.1.json	\
-			     $(CODEGEN_DIR)/credit_extension.json
-
-include/rabbit_framing.hrl:: $(CODEGEN) $(CODEGEN_AMQP) \
-    $(AMQP_SPEC_JSON_FILES_0_9_1) $(AMQP_SPEC_JSON_FILES_0_8)
-	$(gen_verbose) env PYTHONPATH=$(CODEGEN_DIR) \
-	 $(PYTHON) $(CODEGEN) --ignore-conflicts header \
-	 $(AMQP_SPEC_JSON_FILES_0_9_1) $(AMQP_SPEC_JSON_FILES_0_8) $@
-
-src/rabbit_framing_amqp_0_9_1.erl:: $(CODEGEN) $(CODEGEN_AMQP) \
-    $(AMQP_SPEC_JSON_FILES_0_9_1)
-	$(gen_verbose) env PYTHONPATH=$(CODEGEN_DIR) \
-	 $(PYTHON) $(CODEGEN) body $(AMQP_SPEC_JSON_FILES_0_9_1) $@
-
-src/rabbit_framing_amqp_0_8.erl:: $(CODEGEN) $(CODEGEN_AMQP) \
-    $(AMQP_SPEC_JSON_FILES_0_8)
-	$(gen_verbose) env PYTHONPATH=$(CODEGEN_DIR) \
-	 $(PYTHON) $(CODEGEN) body $(AMQP_SPEC_JSON_FILES_0_8) $@
-
-clean:: clean-extra-sources
-
-clean-extra-sources:
-	$(gen_verbose) rm -f $(EXTRA_SOURCES)
+-include development.post.mk

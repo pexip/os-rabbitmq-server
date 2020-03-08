@@ -17,50 +17,47 @@
   <% } %>
 </p>
 <% } %>
+<% for (i = 0; i < vhosts.length; i++)
+{
+    for (var vhost_status_node in vhosts[i].cluster_state) {
+        if (vhosts[i].cluster_state[vhost_status_node] != 'running') {
+%>
+<p class="warning">
+  Virtual host <b><%= vhosts[i].name %></b> experienced an error on node <b><%= vhost_status_node %></b> and may be inaccessible
+</p>
+<% }}} %>
 </div>
 
 <div class="section">
 <h2>Totals</h2>
 <div class="hider updatable">
-<% if (overview.statistics_db_node != 'not_running') { %>
-  <%= queue_lengths('lengths-over', overview.queue_totals) %>
+<%= queue_lengths('lengths-over', overview.queue_totals) %>
 <% if (rates_mode != 'none') { %>
   <%= message_rates('msg-rates-over', overview.message_stats) %>
-<% } %>
-<% } else { %>
-    Totals not available
 <% } %>
 
 <% if (overview.object_totals) { %>
   <h3>Global counts <span class="help" id="resource-counts"></span></h3>
 
-  <div class="box">
-    <div class="micro-highlight">
-      <a href="#/connections">
-        Connections: <strong><%= overview.object_totals.connections %></strong>
-      </a>
-    </div>
-    <div class="micro-highlight">
-      <a href="#/channels">
-        Channels: <strong><%= overview.object_totals.channels %></strong>
-      </a>
-    </div>
-    <div class="micro-highlight">
-      <a href="#/exchanges">
-        Exchanges: <strong><%= overview.object_totals.exchanges %></strong>
-      </a>
-    </div>
-    <div class="micro-highlight">
-      <a href="#/queues">
-        Queues: <strong><%= overview.object_totals.queues %></strong>
-      </a>
-    </div>
-<% if (overview.object_totals['consumers'] != undefined) { %>    <tr>
-    <div class="micro-highlight">
-      Consumers: <strong><%= overview.object_totals.consumers %></strong>
-    </div>
+  <ul id="global-counts">
+    <li>
+      <a href="#/connections" class="button">Connections: <strong><%= overview.object_totals.connections %></strong></a>
+    </li>
+    <li>
+      <a href="#/channels" class="button">Channels: <strong><%= overview.object_totals.channels %></strong></a>
+    </li>
+    <li>
+      <a href="#/exchanges" class="button">Exchanges: <strong><%= overview.object_totals.exchanges %></strong></a>
+    </li>
+    <li>
+      <a href="#/queues" class="button">Queues: <strong><%= overview.object_totals.queues %></strong></a>
+    </li>
+<% if (overview.object_totals['consumers'] != undefined) { %>
+    <li>
+      <a href="#" class="button disabled">Consumers: <strong><%= overview.object_totals.consumers %></strong></a>
+    </li>
 <% } %>
-  </div>
+  </ul>
 <% } %>
 
 </div>
@@ -68,23 +65,13 @@
 
 <% if (user_monitor) { %>
 <div class="section">
-<% if (nodes.length == 1) { %>
-<h2>Node</h2>
-<% } else { %>
 <h2>Nodes</h2>
-<% } %>
 
 <div class="hider updatable">
-<% if (nodes.length == 1) { %>
-    <p>Node: <%= nodes[0].name %> <a href="#/nodes/<%= esc(nodes[0].name) %>">(More about this node)</a></p>
-<% } %>
 
 <table class="list">
   <tr>
-<% if (nodes.length > 1) { %>
     <th>Name</th>
-<% } %>
-
   <% if (show_column('overview', 'file_descriptors')) { %>
     <th>File descriptors <span class="help" id="file-descriptors"></span></th>
   <% } %>
@@ -95,7 +82,7 @@
     <th>Erlang processes</th>
   <% } %>
   <% if (show_column('overview', 'memory')) { %>
-    <th>Memory</th>
+    <th>Memory <span class="help" id="memory-calculation-strategy"></span></th>
   <% } %>
   <% if (show_column('overview', 'disk_space')) { %>
     <th>Disk space</th>
@@ -103,11 +90,11 @@
   <% if (show_column('overview', 'uptime')) { %>
     <th>Uptime</th>
   <% } %>
-  <% if (show_column('overview', 'rates_mode')) { %>
-    <th>Rates mode</th>
-  <% } %>
   <% if (show_column('overview', 'info')) { %>
     <th>Info</th>
+  <% } %>
+  <% if (user_administrator && show_column('overview', 'reset_stats')) { %>
+    <th>Reset stats</th>
   <% } %>
     <th class="plus-minus"><span class="popup-options-link" title="Click to change columns" type="columns" for="overview">+/-</span></th>
   </tr>
@@ -118,14 +105,12 @@
                    group_count('overview', 'General', []);
 %>
    <tr<%= alt_rows(i)%>>
-<% if (nodes.length > 1) { %>
      <td>
-       <%= link_node(node.name) %>
+       <a href="#/nodes/<%= esc(node.name) %>" class="button"><%= fmt_node(node.name) %></a>
        <% if (rabbit_versions_interesting) { %>
          <sub>RabbitMQ <%= fmt_rabbit_version(node.applications) %></sub>
        <% } %>
      </td>
-<% } %>
 <% if (!node.running) { %>
      <td colspan="<%= colspan %>">
        <div class="status-red">
@@ -135,8 +120,8 @@
 <% } else if (node.os_pid == undefined) { %>
      <td colspan="<%= colspan %>">
        <div class="status-yellow">
-         <acronym title="The rabbitmq_management_agent plugin should be enabled on this node. If it is not, various statistics will be inaccurate.">
-           Node statistics not available</acronym>
+         <abbr title="The rabbitmq_management_agent plugin should be enabled on this node. If it is not, various statistics will be inaccurate.">
+           Node statistics not available</abbr>
        </div>
      </td>
 <% } else { %>
@@ -186,37 +171,34 @@
      </td>
   <% } %>
   <% if (show_column('overview', 'uptime')) { %>
-     <td class="r"><%= fmt_uptime(node.uptime) %></td>
-  <% } %>
-  <% if (show_column('overview', 'rates_mode')) { %>
-     <td class="c"><%= fmt_string(node.rates_mode) %></td>
+     <td><span><%= fmt_uptime(node.uptime) %></span></td>
   <% } %>
   <% if (show_column('overview', 'info')) { %>
-     <td class="c">
+     <td>
+         <abbr title="Message rates"><%= fmt_string(node.rates_mode) %></abbr>
        <% if (node.type == 'disc') { %>
-         <acronym title="Broker definitions are held on disc.">Disc</acronym>
+         <abbr title="Broker definitions are held on disc.">disc</abbr>
        <% } else { %>
-         <acronym title="Broker definitions are held in RAM. Messages will still be written to disc if necessary.">RAM</acronym>
+         <abbr title="Broker definitions are held in RAM. Messages will still be written to disc if necessary.">RAM</abbr>
        <% } %>
        <%= fmt_plugins_small(node) %>
-       <% if (overview.statistics_db_node == node.name) { %>
-         <acronym title="This node contains the management statistics database">Stats</acronym>
-       <% } %>
+        <abbr title="Memory calculation strategy"><%= fmt_string(node.mem_calculation_strategy) %></abbr>
      </td>
+  <% } %>
+  <% if(user_administrator && show_column('overview', 'reset_stats')) { %>
+    <td>
+      <form action="#/reset_node" method="delete" class="confirm inline-form">
+        <input type="hidden" name="node" value="<%= node.name %>"/>
+        <input type="submit" value="This node"/>
+      </form>
+      <form action="#/reset" method="delete" class="confirm inline-form-right">
+          <input type="submit" value="All nodes"/>
+      </form>
   <% } %>
 <% } %>
    </tr>
 <% } %>
 </table>
-
-<% if (overview.statistics_db_node == 'not_running') { %>
-  <p class="status-error">Statistics database could not be contacted. Message rates and queue lengths will not be shown.</p>
-<% } %>
-
-<% if (nodes.length == 1 && nodes[0].os_pid != undefined) { %>
-    <h3>Paths</h3>
-    <%= format('paths', {node: nodes[0]}) %>
-<% } %>
 
 </div>
 </div>
@@ -280,23 +262,20 @@
 </div>
 
 <div class="section-hidden administrator-only">
-<h2>Import / export definitions</h2>
+<h2>Export definitions</h2>
 <div class="hider">
-  <form  method="post" enctype="multipart/form-data">
     <table class="two-col-layout">
       <tr>
         <td>
-          <h3>Export</h3>
           <p>
             <label for="download-filename">Filename for download:</label><br/>
             <input type="text" id="download-filename" value="<%= fmt_download_filename(overview.node) %>" class="wide" />
           </p>
         </td>
         <td>
-          <h3>Import</h3>
           <p>
-            <label>Definitions file:</label><br/>
-            <input type="file" name="file"/>
+            <button id="download-definitions">Download broker definitions</button>
+            <span class="help" id="export-definitions"></span>
           </p>
         </td>
       </tr>
@@ -314,6 +293,31 @@
             <input type="hidden" name="vhost" value="all"/>
 <% } %>
         </td>
+      </tr>
+    </table>
+</div>
+</div>
+
+<div class="section-hidden administrator-only">
+<h2>Import definitions</h2>
+<div class="hider">
+  <form  method="post" enctype="multipart/form-data">
+    <table class="two-col-layout">
+      <tr>
+        <td>
+          <p>
+            <label>Definitions file:</label><br/>
+            <input type="file" name="file"/>
+          </p>
+        </td>
+        <td>
+          <p>
+            <input type="submit" value="Upload broker definitions" onclick="submit_import($(this).closest('form')[0]); return false"/>
+            <span class="help" id="import-definitions"></span>
+          </p>
+        </td>
+      </tr>
+      <tr>
         <td>
          <% if (vhosts_interesting) { %>
           <label>Virtual host:</label>
@@ -327,21 +331,6 @@
 <% } else { %>
             <input type="hidden" name="vhost" value="all"/>
 <% } %>
-        </td>
-      </tr>
-      <tr>
-        <td>
-          <p>
-            <button id="download-definitions">Download broker definitions</button>
-            <span class="help" id="export-definitions"></span>
-          </p>
-        </td>
-        <td>
-          <p>
-            <input type="hidden" name="redirect" value="../../#/import-succeeded"/>
-            <input type="submit" value="Upload broker definitions"  onclick="submit_import($(this).closest('form')[0])" />
-            <span class="help" id="import-definitions"></span>
-          </p>
         </td>
       </tr>
     </table>

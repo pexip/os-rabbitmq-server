@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_exchange_type_event).
@@ -21,6 +21,7 @@
 -export([register/0, unregister/0]).
 -export([init/1, handle_call/2, handle_event/2, handle_info/2,
          terminate/2, code_change/3]).
+-export([info/1, info/2]).
 
 -export([fmt_proplist/1]). %% testing
 
@@ -35,11 +36,17 @@
 
 %%----------------------------------------------------------------------------
 
+info(_X) -> [].
+
+info(_X, _) -> [].
+
 register() ->
-    rabbit_exchange:declare(exchange(), topic, true, false, true, []),
+    rabbit_exchange:declare(exchange(), topic, true, false, true, [],
+                            ?INTERNAL_USER),
     gen_event:add_handler(rabbit_event, ?MODULE, []).
 
 unregister() ->
+    rabbit_exchange:delete(exchange(), false, ?INTERNAL_USER),
     gen_event:delete_handler(rabbit_event, ?MODULE, []).
 
 exchange() ->
@@ -66,7 +73,7 @@ handle_event(#event{type      = Type,
                                       %% "64 bit POSIX
                                       %% timestamp". That's second
                                       %% resolution, not millisecond.
-                                      timestamp = time_compat:convert_time_unit(
+                                      timestamp = erlang:convert_time_unit(
                                                     TS, milli_seconds, seconds)},
                   Msg = rabbit_basic:message(exchange(), Key, PBasic, <<>>),
                   rabbit_basic:publish(
@@ -93,7 +100,7 @@ ensure_vhost_exists() ->
                     V
             end,
     case rabbit_vhost:exists(VHost) of
-        false -> rabbit_vhost:add(VHost);
+        false -> rabbit_vhost:add(VHost, ?INTERNAL_USER);
         _     -> ok
     end,
     VHost.

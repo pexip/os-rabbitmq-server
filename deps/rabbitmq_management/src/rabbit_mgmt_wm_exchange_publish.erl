@@ -16,30 +16,27 @@
 
 -module(rabbit_mgmt_wm_exchange_publish).
 
--export([init/1, resource_exists/2, post_is_create/2, is_authorized/2,
-         allowed_methods/2,  content_types_provided/2, process_post/2]).
--export([finish_request/2]).
--export([encodings_provided/2]).
+-export([init/2, resource_exists/2, is_authorized/2,
+         allowed_methods/2,  content_types_provided/2, accept_content/2,
+         content_types_accepted/2]).
+-export([variances/2]).
 
--include("rabbit_mgmt.hrl").
--include_lib("webmachine/include/webmachine.hrl").
+-include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 %%--------------------------------------------------------------------
-init(_Config) -> {ok, #context{}}.
 
-finish_request(ReqData, Context) ->
-    {ok, rabbit_mgmt_cors:set_headers(ReqData, Context), Context}.
+init(Req, _State) ->
+    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
+
+variances(Req, Context) ->
+    {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
 
 allowed_methods(ReqData, Context) ->
-    {['POST', 'OPTIONS'], ReqData, Context}.
+    {[<<"POST">>, <<"OPTIONS">>], ReqData, Context}.
 
 content_types_provided(ReqData, Context) ->
-   {[{"application/json", to_json}], ReqData, Context}.
-
-encodings_provided(ReqData, Context) ->
-    {[{"identity", fun(X) -> X end},
-     {"gzip", fun(X) -> zlib:gzip(X) end}], ReqData, Context}.
+   {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
 
 resource_exists(ReqData, Context) ->
     {case rabbit_mgmt_wm_exchange:exchange(ReqData) of
@@ -47,18 +44,18 @@ resource_exists(ReqData, Context) ->
          _         -> true
      end, ReqData, Context}.
 
-post_is_create(ReqData, Context) ->
-    {false, ReqData, Context}.
+content_types_accepted(ReqData, Context) ->
+   {[{'*', accept_content}], ReqData, Context}.
 
-process_post(ReqData, Context) ->
+accept_content(ReqData, Context) ->
     rabbit_mgmt_util:post_respond(do_it(ReqData, Context)).
 
-do_it(ReqData, Context) ->
-    VHost = rabbit_mgmt_util:vhost(ReqData),
-    X = rabbit_mgmt_util:id(exchange, ReqData),
+do_it(ReqData0, Context) ->
+    VHost = rabbit_mgmt_util:vhost(ReqData0),
+    X = rabbit_mgmt_util:id(exchange, ReqData0),
     rabbit_mgmt_util:with_decode(
-      [routing_key, properties, payload, payload_encoding], ReqData, Context,
-      fun ([RoutingKey, Props0, Payload0, Enc], _) when is_binary(Payload0) ->
+      [routing_key, properties, payload, payload_encoding], ReqData0, Context,
+      fun ([RoutingKey, Props0, Payload0, Enc], _, ReqData) when is_binary(Payload0) ->
               rabbit_mgmt_util:with_channel(
                 VHost, ReqData, Context,
                 fun (Ch) ->
@@ -82,11 +79,14 @@ do_it(ReqData, Context) ->
                                 good(MRef, false, ReqData, Context);
                             #'basic.ack'{} ->
                                 good(MRef, true, ReqData, Context);
+                            #'basic.nack'{} ->
+                                erlang:demonitor(MRef),
+                                bad(rejected, ReqData, Context);
                             {'DOWN', _, _, _, Err} ->
                                 bad(Err, ReqData, Context)
                         end
                 end);
-          ([_RoutingKey, _Props, _Payload, _Enc], _) ->
+          ([_RoutingKey, _Props, _Payload, _Enc], _, _ReqData) ->
               throw({error, payload_not_string})
       end).
 
@@ -99,7 +99,10 @@ bad({shutdown, {connection_closing,
     rabbit_mgmt_util:bad_request_exception(Code, Reason, ReqData, Context);
 
 bad({shutdown, {server_initiated_close, Code, Reason}}, ReqData, Context) ->
-    rabbit_mgmt_util:bad_request_exception(Code, Reason, ReqData, Context).
+    rabbit_mgmt_util:bad_request_exception(Code, Reason, ReqData, Context);
+bad(rejected, ReqData, Context) ->
+    Msg = "Unable to publish message. Check queue limits.",
+    rabbit_mgmt_util:bad_request_exception(rejected, Msg, ReqData, Context).
 
 is_authorized(ReqData, Context) ->
     rabbit_mgmt_util:is_authorized_vhost(ReqData, Context).

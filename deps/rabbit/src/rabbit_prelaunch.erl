@@ -11,12 +11,13 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_prelaunch).
 
 -export([start/0, stop/0]).
+-export([config_file_check/0]).
 
 -import(rabbit_misc, [pget/2, pget/3]).
 
@@ -25,6 +26,7 @@
 -define(SET_DIST_PORT, 0).
 -define(ERROR_CODE, 1).
 -define(DO_NOT_SET_DIST_PORT, 2).
+-define(EX_USAGE, 64).
 
 %%----------------------------------------------------------------------------
 %% Specs
@@ -43,7 +45,8 @@ start() ->
             ok = duplicate_node_check(NodeName, NodeHost),
             ok = dist_port_set_check(),
             ok = dist_port_range_check(),
-            ok = dist_port_use_check(NodeHost);
+            ok = dist_port_use_check(NodeHost),
+            ok = config_file_check();
         [] ->
             %% Ignore running node while installing windows service
             ok = dist_port_set_check(),
@@ -56,6 +59,17 @@ stop() ->
     ok.
 
 %%----------------------------------------------------------------------------
+
+config_file_check() ->
+    case rabbit_config:validate_config_files() of
+        ok -> ok;
+        {error, {ErrFmt, ErrArgs}} ->
+            ErrMsg = io_lib:format(ErrFmt, ErrArgs),
+            {{Year, Month, Day}, {Hour, Minute, Second, Milli}} = lager_util:localtime_ms(),
+            io:format(standard_error, "~b-~2..0b-~2..0b ~2..0b:~2..0b:~2..0b.~b [error] ~s",
+                      [Year, Month, Day, Hour, Minute, Second, Milli, ErrMsg]),
+            rabbit_misc:quit(?EX_USAGE)
+    end.
 
 %% Check whether a node with the same name is already running
 duplicate_node_check(NodeName, NodeHost) ->
@@ -75,24 +89,35 @@ duplicate_node_check(NodeName, NodeHost) ->
     end.
 
 dist_port_set_check() ->
-    case os:getenv("RABBITMQ_CONFIG_FILE") of
-        false ->
+    case get_config(os:getenv("RABBITMQ_CONFIG_ARG_FILE")) of
+        {ok, [Config]} ->
+            Kernel = pget(kernel, Config, []),
+            case {pget(inet_dist_listen_min, Kernel, none),
+                  pget(inet_dist_listen_max, Kernel, none)} of
+                {none, none} -> ok;
+                _            -> rabbit_misc:quit(?DO_NOT_SET_DIST_PORT)
+            end;
+        {ok, _} ->
             ok;
-        File ->
-            case file:consult(File ++ ".config") of
-                {ok, [Config]} ->
-                    Kernel = pget(kernel, Config, []),
-                    case {pget(inet_dist_listen_min, Kernel, none),
-                          pget(inet_dist_listen_max, Kernel, none)} of
-                        {none, none} -> ok;
-                        _            -> rabbit_misc:quit(?DO_NOT_SET_DIST_PORT)
-                    end;
-                {ok, _} ->
-                    ok;
-                {error, _} ->
-                    ok
-            end
+        {error, _} ->
+            ok
     end.
+
+get_config("") -> {error, nofile};
+get_config(File)  ->
+    case consult_file(File) of
+        {ok, Contents} -> {ok, Contents};
+        {error, _} = E -> E
+    end.
+
+consult_file(false) -> {error, nofile};
+consult_file(File)  ->
+    FileName = case filename:extension(File) of
+        ""        -> File ++ ".config";
+        ".config" -> File;
+        _         -> ""
+    end,
+    file:consult(FileName).
 
 dist_port_range_check() ->
     case os:getenv("RABBITMQ_DIST_PORT") of
