@@ -4,9 +4,6 @@
 DEB_DESTDIR=debian/rabbitmq-server
 VERSION = $(shell dpkg-parsechangelog -SVersion | sed -e 's/^[[:digit:]]*://' -e 's/[-].*//' -e 's/~/.0/' -e 's/+dfsg1//' | head -n 1)
 
-export LC_ALL=en_US.UTF-8
-export LANG=en_US.UTF-8
-
 %:
 	dh $@ --parallel --with python2,systemd
 
