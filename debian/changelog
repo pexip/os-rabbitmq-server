@@ -1,6 +1,7 @@
 rabbitmq-server (3.7.8-4pexip2) pexip; urgency=medium
 
-  * Drop build-dep on locales-all
+  * Drop build-dep and runtime dep on locales-all
+  * Remove datetime.patch altogether
 
  -- Steve McIntyre <steve.mcintyre@pexip.com>  Tue, 07 Jul 2020 12:15:40 +0100
 
