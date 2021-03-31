@@ -1,0 +1,12 @@
+diff --git a/deps/rabbitmq_management/bin/rabbitmqadmin b/deps/rabbitmq_management/bin/rabbitmqadmin
+index 89397fd..6e9ec4b 100755
+--- a/deps/rabbitmq_management/bin/rabbitmqadmin
++++ b/deps/rabbitmq_management/bin/rabbitmqadmin
+@@ -42,6 +42,7 @@ if sys.version_info[0] == 2:
+     import urlparse
+     from urllib import quote_plus
+     from urllib import quote
++    from socket import error as ConnectionRefusedError
+     def b64(s):
+         return base64.b64encode(s)
+ else:
