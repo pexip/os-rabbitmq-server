@@ -1,4 +1,4 @@
-%% Copyright (c) 2013-2015, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2013-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -19,7 +19,8 @@
 
 -type cookie_option() :: {max_age, non_neg_integer()}
 	| {domain, binary()} | {path, binary()}
-	| {secure, boolean()} | {http_only, boolean()}.
+	| {secure, boolean()} | {http_only, boolean()}
+	| {same_site, lax | strict}.
 -type cookie_opts() :: [cookie_option()].
 -export_type([cookie_opts/0]).
 
@@ -53,16 +54,16 @@ skip_cookie(<< $;, Rest/binary >>, Acc) ->
 skip_cookie(<< _, Rest/binary >>, Acc) ->
 	skip_cookie(Rest, Acc).
 
-parse_cookie_name(<<>>, _, _) ->
-	error(badarg);
+parse_cookie_name(<<>>, Acc, Name) ->
+	lists:reverse([{Name, <<>>}|Acc]);
 parse_cookie_name(<< $=, _/binary >>, _, <<>>) ->
 	error(badarg);
 parse_cookie_name(<< $=, Rest/binary >>, Acc, Name) ->
 	parse_cookie_value(Rest, Acc, Name, <<>>);
 parse_cookie_name(<< $,, _/binary >>, _, _) ->
 	error(badarg);
-parse_cookie_name(<< $;, _/binary >>, _, _) ->
-	error(badarg);
+parse_cookie_name(<< $;, Rest/binary >>, Acc, Name) ->
+	parse_cookie(Rest, [{Name, <<>>}|Acc]);
 parse_cookie_name(<< $\s, _/binary >>, _, _) ->
 	error(badarg);
 parse_cookie_name(<< $\t, _/binary >>, _, _) ->
@@ -151,8 +152,14 @@ parse_cookie_test_() ->
 		{<<"foo=;bar=">>, [{<<"foo">>, <<>>}, {<<"bar">>, <<>>}]},
 		{<<"foo=\\\";;bar=good ">>,
 			[{<<"foo">>, <<"\\\"">>}, {<<"bar">>, <<"good">>}]},
+		{<<"foo=\"\\\";bar=good">>,
+			[{<<"foo">>, <<"\"\\\"">>}, {<<"bar">>, <<"good">>}]},
 		{<<>>, []}, %% Flash player.
-		{<<"foo=bar , baz=wibble ">>, [{<<"foo">>, <<"bar , baz=wibble">>}]}
+		{<<"foo=bar , baz=wibble ">>, [{<<"foo">>, <<"bar , baz=wibble">>}]},
+		%% Technically invalid, but seen in the wild
+		{<<"foo">>, [{<<"foo">>, <<>>}]},
+		{<<"foo;">>, [{<<"foo">>, <<>>}]},
+		{<<"bar;foo=1">>, [{<<"bar">>, <<"">>}, {<<"foo">>, <<"1">>}]}
 	],
 	[{V, fun() -> R = parse_cookie(V) end} || {V, R} <- Tests].
 
@@ -160,9 +167,7 @@ parse_cookie_error_test_() ->
 	%% Value.
 	Tests = [
 		<<"=">>,
-		<<"  foo ; bar  ">>,
-		<<"foo=\\\";;bar ">>,
-		<<"foo=\"\\\";bar">>
+		<<"foo ">>
 	],
 	[{V, fun() -> {'EXIT', {badarg, _}} = (catch parse_cookie(V)) end} || V <- Tests].
 -endif.
@@ -211,8 +216,13 @@ setcookie(Name, Value, Opts) ->
 		{_, false} -> <<>>;
 		{_, true} -> <<"; HttpOnly">>
 	end,
+	SameSiteBin = case lists:keyfind(same_site, 1, Opts) of
+		false -> <<>>;
+		{_, lax} -> <<"; SameSite=Lax">>;
+		{_, strict} -> <<"; SameSite=Strict">>
+	end,
 	[Name, <<"=">>, Value, <<"; Version=1">>,
-		MaxAgeBin, DomainBin, PathBin, SecureBin, HttpOnlyBin].
+		MaxAgeBin, DomainBin, PathBin, SecureBin, HttpOnlyBin, SameSiteBin].
 
 -ifdef(TEST).
 setcookie_test_() ->
@@ -231,6 +241,12 @@ setcookie_test_() ->
 		{<<"Customer">>, <<"WILE_E_COYOTE">>,
 			[{secure, false}, {http_only, false}],
 			<<"Customer=WILE_E_COYOTE; Version=1">>},
+		{<<"Customer">>, <<"WILE_E_COYOTE">>,
+			[{same_site, lax}],
+			<<"Customer=WILE_E_COYOTE; Version=1; SameSite=Lax">>},
+		{<<"Customer">>, <<"WILE_E_COYOTE">>,
+			[{same_site, strict}],
+			<<"Customer=WILE_E_COYOTE; Version=1; SameSite=Strict">>},
 		{<<"Customer">>, <<"WILE_E_COYOTE">>,
 			[{path, <<"/acme">>}, {badoption, <<"negatory">>}],
 			<<"Customer=WILE_E_COYOTE; Version=1; Path=/acme">>}

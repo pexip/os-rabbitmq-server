@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_policy).
@@ -36,13 +27,14 @@
 
 -behaviour(rabbit_runtime_parameter).
 
--include("rabbit.hrl").
+-include_lib("rabbit_common/include/rabbit.hrl").
+-include("amqqueue.hrl").
 
 -import(rabbit_misc, [pget/2, pget/3]).
 
 -export([register/0]).
 -export([invalidate/0, recover/0]).
--export([name/1, name_op/1, effective_definition/1, get/2, get_arg/3, set/1]).
+-export([name/1, name_op/1, effective_definition/1, merge_operator_definitions/2, get/2, get_arg/3, set/1]).
 -export([validate/5, notify/5, notify_clear/4]).
 -export([parse_set/7, set/7, delete/3, lookup/2, list/0, list/1,
          list_formatted/1, list_formatted/3, info_keys/0]).
@@ -59,41 +51,52 @@ register() ->
     rabbit_registry:register(runtime_parameter, <<"policy">>, ?MODULE),
     rabbit_registry:register(runtime_parameter, <<"operator_policy">>, ?MODULE).
 
-name(#amqqueue{policy = Policy}) -> name0(Policy);
+name(Q) when ?is_amqqueue(Q) ->
+    Policy = amqqueue:get_policy(Q),
+    name0(Policy);
 name(#exchange{policy = Policy}) -> name0(Policy).
 
-name_op(#amqqueue{operator_policy = Policy}) -> name0(Policy);
+name_op(Q) when ?is_amqqueue(Q) ->
+    OpPolicy = amqqueue:get_operator_policy(Q),
+    name0(OpPolicy);
 name_op(#exchange{operator_policy = Policy}) -> name0(Policy).
 
 name0(undefined) -> none;
 name0(Policy)    -> pget(name, Policy).
 
-effective_definition(#amqqueue{policy = Policy, operator_policy = OpPolicy}) ->
-    effective_definition0(Policy, OpPolicy);
+effective_definition(Q) when ?is_amqqueue(Q) ->
+    Policy = amqqueue:get_policy(Q),
+    OpPolicy = amqqueue:get_operator_policy(Q),
+    merge_operator_definitions(Policy, OpPolicy);
 effective_definition(#exchange{policy = Policy, operator_policy = OpPolicy}) ->
-    effective_definition0(Policy, OpPolicy).
+    merge_operator_definitions(Policy, OpPolicy).
 
-effective_definition0(undefined, undefined) -> undefined;
-effective_definition0(Policy, undefined)    -> pget(definition, Policy);
-effective_definition0(undefined, OpPolicy)  -> pget(definition, OpPolicy);
-effective_definition0(Policy, OpPolicy) ->
-    OpDefinition = pget(definition, OpPolicy, []),
-    Definition = pget(definition, Policy, []),
-    {Keys, _} = lists:unzip(Definition),
-    {OpKeys, _} = lists:unzip(OpDefinition),
+merge_operator_definitions(undefined, undefined) -> undefined;
+merge_operator_definitions(Policy, undefined)    -> pget(definition, Policy);
+merge_operator_definitions(undefined, OpPolicy)  -> pget(definition, OpPolicy);
+merge_operator_definitions(Policy, OpPolicy) ->
+    OpDefinition = rabbit_data_coercion:to_map(pget(definition, OpPolicy, [])),
+    Definition   = rabbit_data_coercion:to_map(pget(definition, Policy, [])),
+    Keys = maps:keys(Definition),
+    OpKeys = maps:keys(OpDefinition),
     lists:map(fun(Key) ->
-        case {pget(Key, Definition), pget(Key, OpDefinition)} of
-            {Val, undefined}       -> {Key, Val};
-            {undefined, Val}       -> {Key, Val};
-            {Val, OpVal}           -> {Key, merge_policy_value(Key, Val, OpVal)}
+        case {maps:get(Key, Definition, undefined), maps:get(Key, OpDefinition, undefined)} of
+            {Val, undefined}   -> {Key, Val};
+            {undefined, OpVal} -> {Key, OpVal};
+            {Val, OpVal}       -> {Key, merge_policy_value(Key, Val, OpVal)}
         end
     end,
     lists:umerge(Keys, OpKeys)).
 
-set(Q = #amqqueue{name = Name}) -> Q#amqqueue{policy = match(Name),
-                                              operator_policy = match_op(Name)};
-set(X = #exchange{name = Name}) -> X#exchange{policy = match(Name),
-                                              operator_policy = match_op(Name)}.
+set(Q0) when ?is_amqqueue(Q0) ->
+    Name = amqqueue:get_name(Q0),
+    Policy = match(Name),
+    OpPolicy = match_op(Name),
+    Q1 = amqqueue:set_policy(Q0, Policy),
+    Q2 = amqqueue:set_operator_policy(Q1, OpPolicy),
+    Q2;
+set(X = #exchange{name = Name}) ->
+    X#exchange{policy = match(Name), operator_policy = match_op(Name)}.
 
 match(Name = #resource{virtual_host = VHost}) ->
     match(Name, list(VHost)).
@@ -101,7 +104,9 @@ match(Name = #resource{virtual_host = VHost}) ->
 match_op(Name = #resource{virtual_host = VHost}) ->
     match(Name, list_op(VHost)).
 
-get(Name, #amqqueue{policy = Policy, operator_policy = OpPolicy}) ->
+get(Name, Q) when ?is_amqqueue(Q) ->
+    Policy = amqqueue:get_policy(Q),
+    OpPolicy = amqqueue:get_operator_policy(Q),
     get0(Name, Policy, OpPolicy);
 get(Name, #exchange{policy = Policy, operator_policy = OpPolicy}) ->
     get0(Name, Policy, OpPolicy);
@@ -128,11 +133,11 @@ get0(Name, Policy, OpPolicy) ->
 merge_policy_value(Name, PolicyVal, OpVal) ->
     case policy_merge_strategy(Name) of
         {ok, Module}       -> Module:merge_policy_value(Name, PolicyVal, OpVal);
-        {error, not_found} -> PolicyVal
+        {error, not_found} -> rabbit_policies:merge_policy_value(Name, PolicyVal, OpVal)
     end.
 
 policy_merge_strategy(Name) ->
-    case rabbit_registry:binary_to_type(Name) of
+    case rabbit_registry:binary_to_type(rabbit_data_coercion:to_binary(Name)) of
         {error, not_found} ->
             {error, not_found};
         T                  ->
@@ -170,7 +175,11 @@ recover() ->
 %% variants.
 recover0() ->
     Xs = mnesia:dirty_match_object(rabbit_durable_exchange, #exchange{_ = '_'}),
-    Qs = mnesia:dirty_match_object(rabbit_durable_queue,    #amqqueue{_ = '_'}),
+    Qs = rabbit_amqqueue:list_with_possible_retry(
+           fun() ->
+                   mnesia:dirty_match_object(
+                     rabbit_durable_queue, amqqueue:pattern_match_all())
+           end),
     Policies = list(),
     OpPolicies = list_op(),
     [rabbit_misc:execute_mnesia_transaction(
@@ -182,15 +191,26 @@ recover0() ->
                               operator_policy = match(Name, OpPolicies)}),
                  write)
        end) || X = #exchange{name = Name} <- Xs],
-    [rabbit_misc:execute_mnesia_transaction(
-       fun () ->
-               mnesia:write(
-                 rabbit_durable_queue,
-                 rabbit_queue_decorator:set(
-                   Q#amqqueue{policy = match(Name, Policies),
-                              operator_policy = match(Name, OpPolicies)}),
-                 write)
-       end) || Q = #amqqueue{name = Name} <- Qs],
+    [begin
+         QName = amqqueue:get_name(Q0),
+         Policy1 = match(QName, Policies),
+         Q1 = amqqueue:set_policy(Q0, Policy1),
+         OpPolicy1 = match(QName, OpPolicies),
+         Q2 = amqqueue:set_operator_policy(Q1, OpPolicy1),
+         Q3 = rabbit_queue_decorator:set(Q2),
+         ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
+            rabbit_misc:execute_mnesia_transaction(
+              fun () ->
+                      mnesia:write(rabbit_durable_queue, Q3, write)
+              end),
+            begin
+                Q4 = amqqueue:upgrade(Q3),
+                rabbit_misc:execute_mnesia_transaction(
+                  fun () ->
+                          mnesia:write(rabbit_durable_queue, Q4, write)
+                  end)
+            end)
+     end || Q0 <- Qs],
     ok.
 
 invalid_file() ->
@@ -217,12 +237,15 @@ parse_set(Type, VHost, Name, Pattern, Definition, Priority, ApplyTo, ActingUser)
 parse_set0(Type, VHost, Name, Pattern, Defn, Priority, ApplyTo, ActingUser) ->
     case rabbit_json:try_decode(Defn) of
         {ok, Term} ->
-            set0(Type, VHost, Name,
-                 [{<<"pattern">>,    Pattern},
-                  {<<"definition">>, maps:to_list(Term)},
-                  {<<"priority">>,   Priority},
-                  {<<"apply-to">>,   ApplyTo}],
-                 ActingUser);
+            R = set0(Type, VHost, Name,
+                     [{<<"pattern">>,    Pattern},
+                      {<<"definition">>, maps:to_list(Term)},
+                      {<<"priority">>,   Priority},
+                      {<<"apply-to">>,   ApplyTo}],
+                     ActingUser),
+            rabbit_log:info("Successfully set policy '~s' matching ~s names in virtual host '~s' using pattern '~s'",
+                            [Name, ApplyTo, VHost, Pattern]),
+            R;
         {error, Reason} ->
             {error_string,
                 rabbit_misc:format("JSON decoding error. Reason: ~ts", [Reason])}
@@ -395,25 +418,26 @@ update_exchange(X = #exchange{name = XName,
             end
     end.
 
-update_queue(Q = #amqqueue{name = QName,
-                           policy = OldPolicy,
-                           operator_policy = OldOpPolicy},
-             Policies, OpPolicies) ->
+update_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
+    QName = amqqueue:get_name(Q0),
+    OldPolicy = amqqueue:get_policy(Q0),
+    OldOpPolicy = amqqueue:get_operator_policy(Q0),
     case {match(QName, Policies), match(QName, OpPolicies)} of
         {OldPolicy, OldOpPolicy} -> no_change;
         {NewPolicy, NewOpPolicy} ->
-            NewQueue = rabbit_amqqueue:update(
-               QName,
-               fun(Q1) ->
-                    rabbit_queue_decorator:set(
-                        Q1#amqqueue{policy = NewPolicy,
-                                    operator_policy = NewOpPolicy,
-                                    policy_version =
-                                        Q1#amqqueue.policy_version + 1 })
-                end),
+            F = fun (QFun0) ->
+                    QFun1 = amqqueue:set_policy(QFun0, NewPolicy),
+                    QFun2 = amqqueue:set_operator_policy(QFun1, NewOpPolicy),
+                    NewPolicyVersion = amqqueue:get_policy_version(QFun2) + 1,
+                    QFun3 = amqqueue:set_policy_version(QFun2, NewPolicyVersion),
+                    rabbit_queue_decorator:set(QFun3)
+                end,
+            NewQueue = rabbit_amqqueue:update(QName, F),
             case NewQueue of
-                 #amqqueue{} = Q1 -> {Q, Q1};
-                 not_found        -> {Q, Q }
+                 Q1 when ?is_amqqueue(Q1) ->
+                    {Q0, Q1};
+                 not_found ->
+                    {Q0, Q0}
              end
     end.
 
@@ -421,7 +445,7 @@ notify(no_change)->
     ok;
 notify({X1 = #exchange{}, X2 = #exchange{}}) ->
     rabbit_exchange:policy_changed(X1, X2);
-notify({Q1 = #amqqueue{}, Q2 = #amqqueue{}}) ->
+notify({Q1, Q2}) when ?is_amqqueue(Q1), ?is_amqqueue(Q2) ->
     rabbit_amqqueue:policy_changed(Q1, Q2).
 
 match(Name, Policies) ->
@@ -433,8 +457,9 @@ match(Name, Policies) ->
 match_all(Name, Policies) ->
    lists:sort(fun sort_pred/2, [P || P <- Policies, matches(Name, P)]).
 
-matches(#resource{name = Name, kind = Kind, virtual_host = VHost}, Policy) ->
+matches(#resource{name = Name, kind = Kind, virtual_host = VHost} = Resource, Policy) ->
     matches_type(Kind, pget('apply-to', Policy)) andalso
+        is_applicable(Resource, pget(definition, Policy)) andalso
         match =:= re:run(Name, pget(pattern, Policy), [{capture, none}]) andalso
         VHost =:= pget(vhost, Policy).
 
@@ -445,6 +470,11 @@ matches_type(queue,    <<"all">>)       -> true;
 matches_type(_,        _)               -> false.
 
 sort_pred(A, B) -> pget(priority, A) >= pget(priority, B).
+
+is_applicable(#resource{kind = queue} = Resource, Policy) ->
+    rabbit_amqqueue:is_policy_applicable(Resource, Policy);
+is_applicable(_, _) ->
+    true.
 
 %%----------------------------------------------------------------------------
 

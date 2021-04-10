@@ -6,8 +6,9 @@
 </p>
 <% } else { %>
 <%
-  var sections = {'queue_procs'         : ['queue',  'Queues'],
-                  'queue_slave_procs'   : ['queue',  'Queues (slaves)'],
+  var sections = {'queue_procs'         : ['queue',  'Classic queues (masters)'],
+                  'queue_slave_procs'   : ['queue',  'Classic queues (mirrors)'],
+                  'quorum_queue_procs'  : ['quorum', 'Quorum queues'],
                   'binary'              : ['binary', 'Binaries'],
                   'connection_readers'  : ['conn',   'Connection readers'],
                   'connection_writers'  : ['conn',   'Connection writers'],
@@ -16,6 +17,7 @@
                   'mnesia'              : ['table',  'Mnesia'],
                   'msg_index'           : ['table',  'Message store index'],
                   'mgmt_db'             : ['table',  'Management database'],
+                  'quorum_ets'          : ['table',  'Quorum queue ETS tables'],
                   'other_ets'           : ['table',  'Other ETS tables'],
                   'plugins'             : ['proc',   'Plugins'],
                   'other_proc'          : ['proc',   'Other process memory'],
@@ -31,7 +33,8 @@
 <%
 var key = [[{name: 'Queues', colour: 'queue',
              keys: [['queue_procs',         'queues'],
-                    ['queue_slave_procs',   'slaves']]},
+                    ['queue_slave_procs',   'mirrors'],
+                    ['quorum_queue_procs',  'quorum']]},
             {name: 'Binaries', colour: 'binary',
              keys: [['binary',              '']]}],
 
@@ -45,6 +48,7 @@ var key = [[{name: 'Queues', colour: 'queue',
              keys: [['mnesia',              'internal database tables'],
                     ['msg_index',           'message store index'],
                     ['mgmt_db',             'management database'],
+                    ['quorum_ets',          'quorum queue tables'],
                     ['other_ets',           'other']]}],
 
            [{name: 'Processes', colour: 'proc',

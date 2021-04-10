@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(gatherer).
@@ -39,16 +30,6 @@
 
 %%----------------------------------------------------------------------------
 
--spec start_link() -> rabbit_types:ok_pid_or_error().
--spec stop(pid()) -> 'ok'.
--spec fork(pid()) -> 'ok'.
--spec finish(pid()) -> 'ok'.
--spec in(pid(), any()) -> 'ok'.
--spec sync_in(pid(), any()) -> 'ok'.
--spec out(pid()) -> {'value', any()} | 'empty'.
-
-%%----------------------------------------------------------------------------
-
 -define(HIBERNATE_AFTER_MIN, 1000).
 -define(DESIRED_HIBERNATE, 10000).
 
@@ -58,23 +39,38 @@
 
 %%----------------------------------------------------------------------------
 
+-spec start_link() -> rabbit_types:ok_pid_or_error().
+
 start_link() ->
     gen_server2:start_link(?MODULE, [], [{timeout, infinity}]).
 
+-spec stop(pid()) -> 'ok'.
+
 stop(Pid) ->
+    unlink(Pid),
     gen_server2:call(Pid, stop, infinity).
+
+-spec fork(pid()) -> 'ok'.
 
 fork(Pid) ->
     gen_server2:call(Pid, fork, infinity).
 
+-spec finish(pid()) -> 'ok'.
+
 finish(Pid) ->
     gen_server2:cast(Pid, finish).
+
+-spec in(pid(), any()) -> 'ok'.
 
 in(Pid, Value) ->
     gen_server2:cast(Pid, {in, Value}).
 
+-spec sync_in(pid(), any()) -> 'ok'.
+
 sync_in(Pid, Value) ->
     gen_server2:call(Pid, {in, Value}, infinity).
+
+-spec out(pid()) -> {'value', any()} | 'empty'.
 
 out(Pid) ->
     gen_server2:call(Pid, out, infinity).

@@ -1,17 +1,8 @@
-%%  The contents of this file are subject to the Mozilla Public License
-%%  Version 1.1 (the "License"); you may not use this file except in
-%%  compliance with the License. You may obtain a copy of the License
-%%  at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Software distributed under the License is distributed on an "AS IS"
-%%  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%  the License for the specific language governing rights and
-%%  limitations under the License.
-%%
-%%  The Original Code is RabbitMQ.
-%%
-%%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_shovel_status).
@@ -19,7 +10,7 @@
 
 -export([start_link/0]).
 
--export([report/3, remove/1, status/0]).
+-export([report/3, remove/1, status/0, lookup/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
@@ -42,6 +33,9 @@ remove(Name) ->
 status() ->
     gen_server:call(?SERVER, status, infinity).
 
+lookup(Name) ->
+    gen_server:call(?SERVER, {lookup, Name}, infinity).
+
 init([]) ->
     ?ETS_NAME = ets:new(?ETS_NAME,
                         [named_table, {keypos, #entry.name}, private]),
@@ -51,7 +45,17 @@ handle_call(status, _From, State) ->
     Entries = ets:tab2list(?ETS_NAME),
     {reply, [{Entry#entry.name, Entry#entry.type, Entry#entry.info,
               Entry#entry.timestamp}
-             || Entry <- Entries], State}.
+             || Entry <- Entries], State};
+
+handle_call({lookup, Name}, _From, State) ->
+    Link = case ets:lookup(?ETS_NAME, Name) of
+               [Entry] -> [{name, Name},
+                           {type, Entry#entry.type},
+                           {info, Entry#entry.info},
+                           {timestamp, Entry#entry.timestamp}];
+               [] -> not_found
+           end,
+    {reply, Link, State}.
 
 handle_cast({report, Name, Type, Info, Timestamp}, State) ->
     true = ets:insert(?ETS_NAME, #entry{name = Name, type = Type, info = Info,

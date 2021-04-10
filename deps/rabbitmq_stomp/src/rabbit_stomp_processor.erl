@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_stomp_processor).
@@ -36,7 +27,8 @@
                 config, route_state, reply_queues, frame_transformer,
                 adapter_info, send_fun, ssl_login_name, peer_addr,
                 %% see rabbitmq/rabbitmq-stomp#39
-                trailing_lf, auth_mechanism, auth_login}).
+                trailing_lf, auth_mechanism, auth_login,
+                default_topic_exchange, default_nack_requeue}).
 
 -record(subscription, {dest_hdr, ack_mode, multi_ack, description}).
 
@@ -161,7 +153,9 @@ initial_state(Configuration,
        route_state         = rabbit_routing_util:init_state(),
        reply_queues        = #{},
        frame_transformer   = undefined,
-       trailing_lf         = rabbit_misc:get_env(rabbitmq_stomp, trailing_lf, true)}.
+       trailing_lf         = application:get_env(rabbitmq_stomp, trailing_lf, true),
+       default_topic_exchange = application:get_env(rabbitmq_stomp, default_topic_exchange, <<"amq.topic">>),
+       default_nack_requeue = application:get_env(rabbitmq_stomp, default_nack_requeue, true)}.
 
 
 command({"STOMP", Frame}, State) ->
@@ -324,6 +318,7 @@ login_header(Frame, Key, Default) ->
 %%----------------------------------------------------------------------------
 %% Frame Transformation
 %%----------------------------------------------------------------------------
+
 frame_transformer("1.0") -> fun rabbit_stomp_util:trim_headers/1;
 frame_transformer(_) -> fun(Frame) -> Frame end.
 
@@ -396,8 +391,9 @@ handle_frame(Command, _Frame, State) ->
 
 ack_action(Command, Frame,
            State = #proc_state{subscriptions = Subs,
-                          channel       = Channel,
-                          version       = Version}, MethodFun) ->
+                          channel              = Channel,
+                          version              = Version,
+                          default_nack_requeue = DefaultNackRequeue}, MethodFun) ->
     AckHeader = rabbit_stomp_util:ack_header_name(Version),
     case rabbit_stomp_frame:header(Frame, AckHeader) of
         {ok, AckValue} ->
@@ -405,7 +401,7 @@ ack_action(Command, Frame,
                 {ok, {ConsumerTag, _SessionId, DeliveryTag}} ->
                     case maps:find(ConsumerTag, Subs) of
                         {ok, Sub} ->
-                            Requeue = rabbit_stomp_frame:boolean_header(Frame, "requeue", true),
+                            Requeue = rabbit_stomp_frame:boolean_header(Frame, "requeue", DefaultNackRequeue),
                             Method = MethodFun(DeliveryTag, Sub, Requeue),
                             case transactional(Frame) of
                                 {yes, Transaction} ->
@@ -437,6 +433,7 @@ ack_action(Command, Frame,
 %%----------------------------------------------------------------------------
 %% Internal helpers for processing frames callbacks
 %%----------------------------------------------------------------------------
+
 server_cancel_consumer(ConsumerTag, State = #proc_state{subscriptions = Subs}) ->
     case maps:find(ConsumerTag, Subs) of
         error ->
@@ -500,7 +497,7 @@ cancel_subscription({ok, ConsumerTag, Description}, Frame,
 %% thus we don't have to clean it up.
 tidy_canceled_subscription(ConsumerTag, _Subscription,
                            undefined, State = #proc_state{subscriptions = Subs}) ->
-    Subs1 = dict:erase(ConsumerTag, Subs),
+    Subs1 = maps:remove(ConsumerTag, Subs),
     ok(State#proc_state{subscriptions = Subs1});
 
 %% Client-initiated cancelations will pass an actual frame
@@ -602,7 +599,7 @@ do_login(Username, Passwd, VirtualHost, Heartbeat, AdapterInfo, Version,
                       io_lib:format("~B,~B", [SendTimeout, ReceiveTimeout])},
                      {?HEADER_VERSION, Version}],
           ok("CONNECTED",
-              case rabbit_misc:get_env(rabbitmq_stomp, hide_server_info, false) of
+              case application:get_env(rabbitmq_stomp, hide_server_info, false) of
                 true  -> Headers;
                 false -> [{?HEADER_SERVER, server_header()} | Headers]
               end,
@@ -652,8 +649,9 @@ server_header() ->
 
 do_subscribe(Destination, DestHdr, Frame,
              State = #proc_state{subscriptions = Subs,
-                            route_state   = RouteState,
-                            channel       = Channel}) ->
+                                 route_state   = RouteState,
+                                 channel       = Channel,
+                                 default_topic_exchange = DfltTopicEx}) ->
     check_subscription_access(Destination, State),
     Prefetch =
         rabbit_stomp_frame:integer_header(Frame, ?HEADER_PREFETCH_COUNT,
@@ -676,8 +674,7 @@ do_subscribe(Destination, DestHdr, Frame,
                     _ = send_error(Message, Detail, [ConsumerTag], State),
                     {stop, normal, close_connection(State)};
                 error ->
-                    ExchangeAndKey =
-                        rabbit_routing_util:parse_routing(Destination),
+                    ExchangeAndKey = parse_routing(Destination, DfltTopicEx),
                     try
                         amqp_channel:subscribe(Channel,
                                                #'basic.consume'{
@@ -719,11 +716,12 @@ do_subscribe(Destination, DestHdr, Frame,
 
 check_subscription_access(Destination = {topic, _Topic},
                           #proc_state{auth_login = _User,
-                                      connection = Connection}) ->
+                                      connection = Connection,
+                                      default_topic_exchange = DfltTopicEx}) ->
     [{amqp_params, AmqpParams}, {internal_user, InternalUser = #user{username = Username}}] =
         amqp_connection:info(Connection, [amqp_params, internal_user]),
     #amqp_params_direct{virtual_host = VHost} = AmqpParams,
-    {Exchange, RoutingKey} = rabbit_routing_util:parse_routing(Destination),
+    {Exchange, RoutingKey} = parse_routing(Destination, DfltTopicEx),
     Resource = #resource{virtual_host = VHost,
         kind = topic,
         name = rabbit_data_coercion:to_binary(Exchange)},
@@ -742,7 +740,9 @@ maybe_clean_up_queue(Queue, #proc_state{connection = Connection}) ->
 
 do_send(Destination, _DestHdr,
         Frame = #stomp_frame{body_iolist = BodyFragments},
-        State = #proc_state{channel = Channel, route_state = RouteState}) ->
+        State = #proc_state{channel = Channel,
+                            route_state = RouteState,
+                            default_topic_exchange = DfltTopicEx}) ->
     case ensure_endpoint(dest, Destination, Frame, Channel, RouteState) of
 
         {ok, _Q, RouteState1} ->
@@ -752,8 +752,7 @@ do_send(Destination, _DestHdr,
 
             Props = rabbit_stomp_util:message_properties(Frame1),
 
-            {Exchange, RoutingKey} =
-                rabbit_routing_util:parse_routing(Destination),
+            {Exchange, RoutingKey} = parse_routing(Destination, DfltTopicEx),
 
             Method = #'basic.publish'{
               exchange = list_to_binary(Exchange),
@@ -816,9 +815,15 @@ send_delivery(Delivery = #'basic.deliver'{consumer_tag = ConsumerTag},
                        [ConsumerTag],
                        State)
     end,
-    amqp_channel:notify_received(DeliveryCtx),
+    notify_received(DeliveryCtx),
     NewState.
 
+notify_received(undefined) ->
+  %% no notification for quorum queues
+  ok;
+notify_received(DeliveryCtx) ->
+  %% notification for flow control
+  amqp_channel:notify_received(DeliveryCtx).
 
 send_method(Method, Channel, State) ->
     amqp_channel:call(Channel, Method),
@@ -845,11 +850,15 @@ close_connection(State = #proc_state{connection = none}) ->
 close_connection(State = #proc_state{connection = Connection}) ->
     %% ignore noproc or other exceptions to avoid debris
     catch amqp_connection:close(Connection),
-    State#proc_state{channel = none, connection = none, subscriptions = none}.
+    State#proc_state{channel = none, connection = none, subscriptions = none};
+close_connection(undefined) ->
+    rabbit_log:debug("~s:close_connection: undefined state", [?MODULE]),
+    #proc_state{channel = none, connection = none, subscriptions = none}.
 
 %%----------------------------------------------------------------------------
 %% Reply-To
 %%----------------------------------------------------------------------------
+
 ensure_reply_to(Frame = #stomp_frame{headers = Headers}, State) ->
     case rabbit_stomp_frame:header(Frame, ?HEADER_REPLY_TO) of
         not_found ->
@@ -973,7 +982,6 @@ accumulate_receipts1(DeliveryTag, {_Key, Value, PR}, Acc) ->
                                       gb_trees:take_smallest(PR), Acc1)
     end.
 
-
 %%----------------------------------------------------------------------------
 %% Transaction Support
 %%----------------------------------------------------------------------------
@@ -1078,6 +1086,8 @@ ensure_endpoint(source, EndPoint, {_, _, Headers, _} = Frame, Channel, State) ->
         [{subscription_queue_name_gen,
           fun () ->
               Id = build_subscription_id(Frame),
+              % Note: we discard the exchange here so there's no need to use
+              % the default_topic_exchange configuration key
               {_, Name} = rabbit_routing_util:parse_routing(EndPoint),
               list_to_binary(rabbit_stomp_util:subscription_queue_name(Name, Id, Frame))
           end
@@ -1147,6 +1157,7 @@ log_error(Message, Detail, ServerPrivateDetail) ->
 %%----------------------------------------------------------------------------
 %% Frame sending utilities
 %%----------------------------------------------------------------------------
+
 send_frame(Command, Headers, BodyFragments, State) ->
     send_frame(#stomp_frame{command     = Command,
                             headers     = Headers,
@@ -1179,3 +1190,22 @@ additional_info(Key,
                 #proc_state{adapter_info =
                                 #amqp_adapter_info{additional_info = AddInfo}}) ->
     proplists:get_value(Key, AddInfo).
+
+parse_routing(Destination, DefaultTopicExchange) ->
+    {Exchange0, RoutingKey} = rabbit_routing_util:parse_routing(Destination),
+    Exchange1 = maybe_apply_default_topic_exchange(Exchange0, DefaultTopicExchange),
+    {Exchange1, RoutingKey}.
+
+maybe_apply_default_topic_exchange("amq.topic"=Exchange, <<"amq.topic">>=_DefaultTopicExchange) ->
+    %% This is the case where the destination is the same
+    %% as the default of amq.topic
+    Exchange;
+maybe_apply_default_topic_exchange("amq.topic"=_Exchange, DefaultTopicExchange) ->
+    %% This is the case where the destination would have been
+    %% amq.topic but we have configured a different default
+    binary_to_list(DefaultTopicExchange);
+maybe_apply_default_topic_exchange(Exchange, _DefaultTopicExchange) ->
+    %% This is the case where the destination is different than
+    %% amq.topic, so it must have been specified in the
+    %% message headers
+    Exchange.

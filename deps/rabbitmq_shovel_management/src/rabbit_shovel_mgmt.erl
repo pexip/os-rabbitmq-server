@@ -1,17 +1,8 @@
-%%  The contents of this file are subject to the Mozilla Public License
-%%  Version 1.1 (the "License"); you may not use this file except in
-%%  compliance with the License. You may obtain a copy of the License
-%%  at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Software distributed under the License is distributed on an "AS IS"
-%%  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%  the License for the specific language governing rights and
-%%  limitations under the License.
-%%
-%%  The Original Code is RabbitMQ.
-%%
-%%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_shovel_mgmt).
@@ -20,7 +11,7 @@
 
 -export([dispatcher/0, web_ui/0]).
 -export([init/2, to_json/2, resource_exists/2, content_types_provided/2,
-         is_authorized/2]).
+         is_authorized/2, allowed_methods/2, delete_resource/2]).
 
 -import(rabbit_misc, [pget/2]).
 
@@ -28,7 +19,10 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 dispatcher() -> [{"/shovels",        ?MODULE, []},
-                 {"/shovels/:vhost", ?MODULE, []}].
+                 {"/shovels/:vhost", ?MODULE, []},
+                 {"/shovels/vhost/:vhost/:name", ?MODULE, []},
+                 {"/shovels/vhost/:vhost/:name/restart", ?MODULE, []}].
+
 web_ui()     -> [{javascript, <<"shovel.js">>}].
 
 %%--------------------------------------------------------------------
@@ -39,11 +33,30 @@ init(Req, _Opts) ->
 content_types_provided(ReqData, Context) ->
    {[{<<"application/json">>, to_json}], ReqData, Context}.
 
+allowed_methods(ReqData, Context) ->
+    {[<<"HEAD">>, <<"GET">>, <<"DELETE">>, <<"OPTIONS">>], ReqData, Context}.
+
 resource_exists(ReqData, Context) ->
-    {case rabbit_mgmt_util:vhost(ReqData) of
-         not_found -> false;
-         _         -> true
-     end, ReqData, Context}.
+    Reply = case rabbit_mgmt_util:vhost(ReqData) of
+                not_found ->
+                    false;
+                VHost ->
+                    case rabbit_mgmt_util:id(name, ReqData) of
+                        none -> true;
+                        Name ->
+                            %% Deleting or restarting a shovel
+                            case rabbit_shovel_status:lookup({VHost, Name}) of
+                                not_found ->
+                                    rabbit_log:error("Shovel with the name '~s' was not found "
+                                                     "on the target node '~s' and / or virtual host '~s'",
+                                                     [Name, node(), VHost]),
+                                    false;
+                                _ ->
+                                    true
+                            end
+                    end
+            end,
+    {Reply, ReqData, Context}.
 
 to_json(ReqData, Context) ->
     rabbit_mgmt_util:reply_list(
@@ -52,7 +65,40 @@ to_json(ReqData, Context) ->
 is_authorized(ReqData, Context) ->
     rabbit_mgmt_util:is_authorized_monitor(ReqData, Context).
 
+delete_resource(ReqData, #context{user = #user{username = Username}}=Context) ->
+    VHost = rabbit_mgmt_util:id(vhost, ReqData),
+    Reply = case rabbit_mgmt_util:id(name, ReqData) of
+                none ->
+                    false;
+                Name ->
+                    %% We must distinguish between a delete and restart
+                    case is_restart(ReqData) of
+                        true ->
+                            case rabbit_shovel_util:restart_shovel(VHost, Name) of
+                                {error, ErrMsg} ->
+                                    rabbit_log:error("Error restarting shovel: ~s", [ErrMsg]),
+                                    false;
+                                ok -> true
+                            end;
+                        _ ->
+                            case rabbit_shovel_util:delete_shovel(VHost, Name, Username) of
+                                {error, ErrMsg} ->
+                                    rabbit_log:error("Error deleting shovel: ~s", [ErrMsg]),
+                                    false;
+                                ok -> true
+                            end
+                    end
+            end,
+    {Reply, ReqData, Context}.
+
 %%--------------------------------------------------------------------
+
+is_restart(ReqData) ->
+    Path = cowboy_req:path(ReqData),
+    case string:find(Path, "/restart", trailing) of
+        nomatch -> false;
+        _ -> true
+    end.
 
 filter_vhost_req(List, ReqData) ->
     case rabbit_mgmt_util:vhost(ReqData) of
@@ -65,7 +111,7 @@ filter_vhost_req(List, ReqData) ->
 %% static shovels do not have a vhost, so only allow admins (not
 %% monitors) to see them.
 filter_vhost_user(List, _ReqData, #context{user = User = #user{tags = Tags}}) ->
-    VHosts = rabbit_mgmt_util:list_login_vhosts(User, undefined),
+    VHosts = rabbit_mgmt_util:list_login_vhosts_names(User, undefined),
     [I || I <- List, case pget(vhost, I) of
                          undefined -> lists:member(administrator, Tags);
                          VHost     -> lists:member(VHost, VHosts)

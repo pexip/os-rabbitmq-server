@@ -1,20 +1,14 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ Federation.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_federation_exchange_link).
+
+%% pg2 is deprecated in OTP 23.
+-compile(nowarn_deprecated_function).
 
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include("rabbit_federation.hrl").
@@ -37,6 +31,7 @@
                 upstream_name,
                 connection,
                 channel,
+                cmd_channel,
                 consumer_tag,
                 queue,
                 internal_exchange,
@@ -75,7 +70,9 @@ init({Upstream, XName}) ->
     %% before we got here. So check if we still exist.
     case rabbit_exchange:lookup(XName) of
         {ok, X} ->
-            UParams = rabbit_federation_upstream:to_params(Upstream, X),
+            DeobfuscatedUpstream = rabbit_federation_util:deobfuscate_upstream(Upstream),
+            DeobfuscatedUParams = rabbit_federation_upstream:to_params(DeobfuscatedUpstream, X),
+            UParams = rabbit_federation_util:obfuscate_upstream_params(DeobfuscatedUParams),
             rabbit_federation_status:report(Upstream, UParams, XName, starting),
             join(rabbit_federation_exchanges),
             join({rabbit_federation_exchange, XName}),
@@ -141,21 +138,21 @@ handle_info({#'basic.deliver'{routing_key  = Key,
                               redelivered  = Redelivered} = DeliverMethod, Msg},
             State = #state{
               upstream            = Upstream = #upstream{max_hops = MaxH},
-              upstream_params     = UParams,
+              upstream_params     = UParams = #upstream_params{x_or_q = UpstreamX},
               upstream_name       = UName,
-              downstream_exchange = #resource{name = XNameBin},
+              downstream_exchange = #resource{name = XNameBin, virtual_host = DVhost},
               downstream_channel  = DCh,
               channel             = Ch,
               unacked             = Unacked}) ->
+    UVhost = vhost(UpstreamX),
     PublishMethod = #'basic.publish'{exchange    = XNameBin,
                                      routing_key = Key},
-    %% TODO add user information here?
-    HeadersFun = fun (H) -> update_headers(UParams, UName, Redelivered, H) end,
+    HeadersFun = fun (H) -> update_routing_headers(UParams, UName, UVhost, Redelivered, H) end,
     %% We need to check should_forward/2 here in case the upstream
     %% does not have federation and thus is using a fanout exchange.
     ForwardFun = fun (H) ->
                          DName = rabbit_nodes:cluster_name(),
-                         rabbit_federation_util:should_forward(H, MaxH, DName)
+                         rabbit_federation_util:should_forward(H, MaxH, DName, DVhost)
                  end,
     Unacked1 = rabbit_federation_link_util:forward(
                  Upstream, DeliverMethod, Ch, DCh, PublishMethod,
@@ -171,19 +168,22 @@ handle_info(#'basic.cancel'{}, State = #state{upstream            = Upstream,
 handle_info({'DOWN', _Ref, process, Pid, Reason},
             State = #state{downstream_channel  = DCh,
                            channel             = Ch,
+                           cmd_channel         = CmdCh,
                            upstream            = Upstream,
                            upstream_params     = UParams,
                            downstream_exchange = XName}) ->
-    rabbit_federation_link_util:handle_down(
-      Pid, Reason, Ch, DCh, {Upstream, UParams, XName}, State);
+    handle_down(Pid, Reason, Ch, CmdCh, DCh,
+                {Upstream, UParams, XName}, State);
 
 handle_info(check_internal_exchange, State = #state{internal_exchange = IntXNameBin,
-                                                    internal_exchange_interval = Int}) ->
+                                                    internal_exchange_interval = Interval}) ->
     case check_internal_exchange(IntXNameBin, State) of
         upstream_not_found ->
+            rabbit_log_federation:warning("Federation link could not find upstream exchange '~s' and will restart",
+                                          [IntXNameBin]),
             {stop, {shutdown, restart}, State};
         _ ->
-            TRef = erlang:send_after(Int, self(), check_internal_exchange),
+            TRef = erlang:send_after(Interval, self(), check_internal_exchange),
             {noreply, State#state{internal_exchange_timer = TRef}}
     end;
 
@@ -192,7 +192,6 @@ handle_info(Msg, State) ->
 
 terminate(_Reason, {not_started, _}) ->
     ok;
-
 terminate(Reason, #state{downstream_connection = DConn,
                          connection            = Conn,
                          upstream              = Upstream,
@@ -200,15 +199,39 @@ terminate(Reason, #state{downstream_connection = DConn,
                          downstream_exchange   = XName,
                          internal_exchange_timer = TRef,
                          internal_exchange     = IntExchange,
-                         queue                 = Queue}) ->
+                         queue                 = Queue}) when Reason =:= shutdown;
+                                                              Reason =:= {shutdown, restart};
+                                                              Reason =:= gone ->
     timer:cancel(TRef),
-
-    %% Terminate the direct connection
     rabbit_federation_link_util:ensure_connection_closed(DConn),
 
-    %% Cleanup of internal queue and exchange
-    delete_upstream_queue(Conn, Queue),
-    delete_upstream_exchange(Conn, IntExchange),
+    rabbit_log:debug("Exchange federation: link is shutting down, resource cleanup mode: ~p", [Upstream#upstream.resource_cleanup_mode]),
+    case Upstream#upstream.resource_cleanup_mode of
+        never -> ok;
+        _     ->
+            %% This is a normal shutdown and we are allowed to clean up the internally used queue and exchange
+            rabbit_log:debug("Federated exchange '~s' link will delete its internal queue '~s'", [Upstream#upstream.exchange_name, Queue]),
+            delete_upstream_queue(Conn, Queue),
+            rabbit_log:debug("Federated exchange '~s' link will delete its upstream exchange", [Upstream#upstream.exchange_name]),
+            delete_upstream_exchange(Conn, IntExchange)
+    end,
+
+    rabbit_federation_link_util:ensure_connection_closed(Conn),
+    rabbit_federation_link_util:log_terminate(Reason, Upstream, UParams, XName),
+    ok;
+%% unexpected shutdown
+terminate(Reason, #state{downstream_connection = DConn,
+                         connection            = Conn,
+                         upstream              = Upstream,
+                         upstream_params       = UParams,
+                         downstream_exchange   = XName,
+                         internal_exchange_timer = TRef}) ->
+    timer:cancel(TRef),
+
+    rabbit_federation_link_util:ensure_connection_closed(DConn),
+
+    %% unlike in the clean shutdown case above, we keep the queue
+    %% and exchange around
 
     rabbit_federation_link_util:ensure_connection_closed(Conn),
     rabbit_federation_link_util:log_terminate(Reason, Upstream, UParams, XName),
@@ -292,7 +315,7 @@ forget_binding(B = #binding{destination = Dest},
     {DoIt, State#state{bindings = Bs1}}.
 
 binding_op(UpdateFun, Cmd, B = #binding{args = Args},
-           State = #state{channel = Ch}) ->
+           State = #state{cmd_channel = Ch}) ->
     {DoIt, State1} =
         case rabbit_misc:table_lookup(Args, ?BINDING_HEADER) of
             undefined  -> UpdateFun(B, State);
@@ -372,14 +395,16 @@ bind_cmd0(unbind, Source, Destination, RoutingKey, Arguments, Nowait) ->
 
 update_binding(Args, #state{downstream_exchange = X,
                             upstream            = Upstream,
+                            upstream_params     = #upstream_params{x_or_q = UpstreamX},
                             upstream_name       = UName}) ->
     #upstream{max_hops = MaxHops} = Upstream,
+    UVhost = vhost(UpstreamX),
     Hops = case rabbit_misc:table_lookup(Args, ?BINDING_HEADER) of
                undefined    -> MaxHops;
                {array, All} -> [{table, Prev} | _] = All,
                                PrevHops = get_hops(Prev),
                                case rabbit_federation_util:already_seen(
-                                      UName, All) of
+                                      UName, UVhost, All) of
                                    true  -> 0;
                                    false -> lists:min([PrevHops - 1, MaxHops])
                                end
@@ -389,10 +414,11 @@ update_binding(Args, #state{downstream_exchange = X,
         _ -> Cluster = rabbit_nodes:cluster_name(),
              ABSuffix = rabbit_federation_db:get_active_suffix(
                           X, Upstream, <<"A">>),
-             DVHost = vhost(X),
+             DVhost = vhost(X),
              DName = name(X),
-             Down = <<DVHost/binary,":", DName/binary, " ", ABSuffix/binary>>,
+             Down = <<DVhost/binary,":", DName/binary, " ", ABSuffix/binary>>,
              Info = [{<<"cluster-name">>, longstr, Cluster},
+                     {<<"vhost">>,        longstr, DVhost},
                      {<<"exchange">>,     longstr, Down},
                      {<<"hops">>,         short,   Hops}],
              rabbit_basic:prepend_table_header(?BINDING_HEADER, Info, Args)
@@ -404,8 +430,12 @@ key(#binding{key = Key, args = Args}) -> {Key, Args}.
 
 go(S0 = {not_started, {Upstream, UParams, DownXName}}) ->
     Unacked = rabbit_federation_link_util:unacked_new(),
+
+    log_link_startup_attempt(Upstream, DownXName),
     rabbit_federation_link_util:start_conn_ch(
       fun (Conn, Ch, DConn, DCh) ->
+              {ok, CmdCh} = open_cmd_channel(Conn, Upstream, UParams, DownXName, S0),
+              erlang:monitor(process, CmdCh),
               Props = pget(server_properties,
                            amqp_connection:info(Conn, [server_properties])),
               UName = case rabbit_misc:table_lookup(
@@ -436,6 +466,7 @@ go(S0 = {not_started, {Upstream, UParams, DownXName}}) ->
                                  upstream_name         = UName,
                                  connection            = Conn,
                                  channel               = Ch,
+                                 cmd_channel           = CmdCh,
                                  next_serial           = Serial,
                                  downstream_connection = DConn,
                                  downstream_channel    = DCh,
@@ -443,9 +474,29 @@ go(S0 = {not_started, {Upstream, UParams, DownXName}}) ->
                                  unacked               = Unacked,
                                  internal_exchange_interval = Interval}),
                         Bindings),
+              rabbit_log_federation:info("Federation link for ~s (upstream: ~s) will perform internal exchange checks "
+                                         "every ~b seconds", [rabbit_misc:rs(DownXName), UName, round(Interval / 1000)]),
               TRef = erlang:send_after(Interval, self(), check_internal_exchange),
               {noreply, State#state{internal_exchange_timer = TRef}}
       end, Upstream, UParams, DownXName, S0).
+
+log_link_startup_attempt(OUpstream, DownXName) ->
+    rabbit_log_federation:debug("Will try to start a federation link for ~s, upstream: '~s'",
+                                [rabbit_misc:rs(DownXName), OUpstream#upstream.name]).
+
+open_cmd_channel(Conn, Upstream = #upstream{name = UName}, UParams, DownXName, S0) ->
+    rabbit_log_federation:debug("Will open a command channel to upstream '~s' for downstream federated ~s",
+                                [UName, rabbit_misc:rs(DownXName)]),
+    case amqp_connection:open_channel(Conn) of
+        {ok, CCh} ->
+            erlang:monitor(process, CCh),
+            {ok, CCh};
+        E ->
+            rabbit_federation_link_util:ensure_connection_closed(Conn),
+            rabbit_federation_link_util:connection_error(command_channel, E,
+                                                         Upstream, UParams, DownXName, S0),
+            E
+    end.
 
 consume_from_upstream_queue(
   State = #state{upstream            = Upstream,
@@ -523,19 +574,25 @@ ensure_upstream_exchange(#state{upstream_params = UParams,
       end).
 
 ensure_internal_exchange(IntXNameBin,
-                         #state{upstream        = #upstream{max_hops = MaxHops},
-                                upstream_params = UParams,
-                                connection      = Conn,
-                                channel         = Ch}) ->
-    #upstream_params{params = Params} = UParams,
+                         #state{upstream            = #upstream{max_hops = MaxHops, name = UName},
+                                upstream_params     = UParams,
+                                connection          = Conn,
+                                channel             = Ch,
+                                downstream_exchange = #resource{virtual_host = DVhost}}) ->
+    rabbit_log_federation:debug("Exchange federation will set up exchange '~s' in upstream '~s'",
+                                [IntXNameBin, UName]),
+    #upstream_params{params = Params} = rabbit_federation_util:deobfuscate_upstream_params(UParams),
+    rabbit_log_federation:debug("Will delete upstream exchange '~s'", [IntXNameBin]),
     delete_upstream_exchange(Conn, IntXNameBin),
+    rabbit_log_federation:debug("Will declare an internal upstream exchange '~s'", [IntXNameBin]),
     Base = #'exchange.declare'{exchange    = IntXNameBin,
                                durable     = true,
                                internal    = true,
                                auto_delete = true},
     Purpose = [{<<"x-internal-purpose">>, longstr, <<"federation">>}],
     XFUArgs = [{?MAX_HOPS_ARG,  long,    MaxHops},
-               {?NODE_NAME_ARG, longstr, rabbit_nodes:cluster_name()}
+               {?DOWNSTREAM_NAME_ARG,  longstr, cycle_detection_node_identifier()},
+               {?DOWNSTREAM_VHOST_ARG, longstr, DVhost}
                | Purpose],
     XFU = Base#'exchange.declare'{type      = <<"x-federation-upstream">>,
                                   arguments = XFUArgs},
@@ -547,10 +604,13 @@ ensure_internal_exchange(IntXNameBin,
                    end).
 
 check_internal_exchange(IntXNameBin,
-                         #state{upstream        = #upstream{max_hops = MaxHops},
+                         #state{upstream        = #upstream{max_hops = MaxHops, name = UName},
                                 upstream_params = UParams,
-                                downstream_exchange = XName}) ->
-    #upstream_params{params = Params} = UParams,
+                                downstream_exchange = XName = #resource{virtual_host = DVhost}}) ->
+    #upstream_params{params = Params} =
+        rabbit_federation_util:deobfuscate_upstream_params(UParams),
+    rabbit_log_federation:debug("Exchange federation will check on exchange '~s' in upstream '~s'",
+                                [IntXNameBin, UName]),
     Base = #'exchange.declare'{exchange    = IntXNameBin,
                                passive     = true,
                                durable     = true,
@@ -558,7 +618,8 @@ check_internal_exchange(IntXNameBin,
                                auto_delete = true},
     Purpose = [{<<"x-internal-purpose">>, longstr, <<"federation">>}],
     XFUArgs = [{?MAX_HOPS_ARG,  long,    MaxHops},
-               {?NODE_NAME_ARG, longstr, rabbit_nodes:cluster_name()}
+               {?DOWNSTREAM_NAME_ARG,  longstr, cycle_detection_node_identifier()},
+               {?DOWNSTREAM_VHOST_ARG, longstr, DVhost}
                | Purpose],
     XFU = Base#'exchange.declare'{type      = <<"x-federation-upstream">>,
                                   arguments = XFUArgs},
@@ -588,6 +649,9 @@ upstream_queue_name(XNameBin, VHost, #resource{name         = DownXNameBin,
                end,
     <<"federation: ", XNameBin/binary, " -> ", Node/binary, DownPart/binary>>.
 
+cycle_detection_node_identifier() ->
+    rabbit_nodes:cluster_name().
+
 upstream_exchange_name(UpstreamQName, Suffix) ->
     <<UpstreamQName/binary, " ", Suffix/binary>>.
 
@@ -599,14 +663,18 @@ delete_upstream_queue(Conn, Queue) ->
     rabbit_federation_link_util:disposable_channel_call(
       Conn, #'queue.delete'{queue = Queue}).
 
-update_headers(#upstream_params{table = Table}, UName, Redelivered, Headers) ->
-    rabbit_basic:prepend_table_header(
-      ?ROUTING_HEADER, Table ++ [{<<"redelivered">>, bool, Redelivered}] ++
-          header_for_name(UName),
-      Headers).
+update_routing_headers(#upstream_params{table = Table}, UpstreamName, UVhost, Redelivered, Headers) ->
+    NewValue = Table ++
+        [{<<"redelivered">>, bool, Redelivered}] ++
+        header_for_upstream_name(UpstreamName) ++
+        header_for_upstream_vhost(UVhost),
+    rabbit_basic:prepend_table_header(?ROUTING_HEADER, NewValue, Headers).
 
-header_for_name(unknown) -> [];
-header_for_name(Name)    -> [{<<"cluster-name">>, longstr, Name}].
+header_for_upstream_name(unknown) -> [];
+header_for_upstream_name(Name)    -> [{<<"cluster-name">>, longstr, Name}].
+
+header_for_upstream_vhost(unknown) -> [];
+header_for_upstream_vhost(Name)    -> [{<<"vhost">>, longstr, Name}].
 
 get_hops(Table) ->
   case rabbit_misc:table_lookup(Table, <<"hops">>) of
@@ -620,3 +688,9 @@ get_hops(Table) ->
     {unsignedint, N}   -> N;
     {_, N} when is_integer(N) andalso N >= 0 -> N
   end.
+
+handle_down(DCh, Reason, _Ch, _CmdCh, DCh, Args, State) ->
+    rabbit_federation_link_util:handle_downstream_down(Reason, Args, State);
+handle_down(ChPid, Reason, Ch, CmdCh, _DCh, Args, State)
+  when ChPid =:= Ch; ChPid =:= CmdCh ->
+    rabbit_federation_link_util:handle_upstream_down(Reason, Args, State).

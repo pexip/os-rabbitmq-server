@@ -1,17 +1,8 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ Management Plugin.
-%%
-%%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_connection).
@@ -26,7 +17,7 @@
 %%--------------------------------------------------------------------
 
 init(Req, _State) ->
-    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
+    {cowboy_rest, rabbit_mgmt_headers:set_common_permission_headers(Req, ?MODULE), #context{}}.
 
 variances(Req, Context) ->
     {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
@@ -44,8 +35,14 @@ resource_exists(ReqData, Context) ->
     end.
 
 to_json(ReqData, Context) ->
-    rabbit_mgmt_util:reply(
-      maps:from_list(rabbit_mgmt_format:strip_pids(conn(ReqData))), ReqData, Context).
+    case rabbit_mgmt_util:disable_stats(ReqData) of
+        false ->
+            rabbit_mgmt_util:reply(
+              maps:from_list(rabbit_mgmt_format:strip_pids(conn_stats(ReqData))), ReqData, Context);
+        true ->
+            rabbit_mgmt_util:reply([{name, rabbit_mgmt_util:id(connection, ReqData)}],
+                                   ReqData, Context)
+    end.
 
 delete_resource(ReqData, Context) ->
     case conn(ReqData) of
@@ -70,6 +67,19 @@ is_authorized(ReqData, Context) ->
 %%--------------------------------------------------------------------
 
 conn(ReqData) ->
+    case rabbit_mgmt_util:disable_stats(ReqData) of
+        false ->
+            conn_stats(ReqData);
+        true ->
+            case rabbit_connection_tracking:lookup(rabbit_mgmt_util:id(connection, ReqData)) of
+                #tracked_connection{name = Name, pid = Pid, username = Username, type = Type} ->
+                    [{name, Name}, {pid, Pid}, {user, Username}, {type, Type}];
+                not_found ->
+                    not_found
+            end
+    end.
+
+conn_stats(ReqData) ->
     rabbit_mgmt_db:get_connection(rabbit_mgmt_util:id(connection, ReqData),
                                   rabbit_mgmt_util:range_ceil(ReqData)).
 

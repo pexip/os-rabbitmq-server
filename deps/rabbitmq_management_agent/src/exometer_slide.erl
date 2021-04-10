@@ -20,7 +20,7 @@
 %%
 %%   This Source Code Form is subject to the terms of the Mozilla Public
 %%   License, v. 2.0. If a copy of the MPL was not distributed with this
-%%   file, You can obtain one at http://mozilla.org/MPL/2.0/.
+%%   file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
 %% -------------------------------------------------------------------
 %%
@@ -44,7 +44,7 @@
 %% @end
 %%
 %%
-%% All modifications are (C) 2007-2016 Pivotal Software, Inc. All rights reserved.
+%% All modifications are (C) 2007-2020 VMware, Inc. or its affiliates. All rights reserved.
 %% The Initial Developer of the Original Code is Basho Technologies, Inc.
 
 -module(exometer_slide).
@@ -55,6 +55,7 @@
          to_list/2,
          to_list/3,
          foldl/5,
+         map/2,
          to_normalized_list/5]).
 
 -export([timestamp/0,
@@ -213,10 +214,18 @@ add_to_total({A0, A1}, {B0, B1}) ->
     {B0 + A0, B1 + A1};
 add_to_total({A0, A1, A2}, {B0, B1, B2}) ->
     {B0 + A0, B1 + A1, B2 + A2};
+add_to_total({A0, A1, A2, A3}, {B0, B1, B2, B3}) ->
+    {B0 + A0, B1 + A1, B2 + A2, B3 + A3};
+add_to_total({A0, A1, A2, A3, A4}, {B0, B1, B2, B3, B4}) ->
+    {B0 + A0, B1 + A1, B2 + A2, B3 + A3, B4 + A4};
+add_to_total({A0, A1, A2, A3, A4, A5}, {B0, B1, B2, B3, B4, B5}) ->
+    {B0 + A0, B1 + A1, B2 + A2, B3 + A3, B4 + A4, B5 + A5};
 add_to_total({A0, A1, A2, A3, A4, A5, A6}, {B0, B1, B2, B3, B4, B5, B6}) ->
     {B0 + A0, B1 + A1, B2 + A2, B3 + A3, B4 + A4, B5 + A5, B6 + A6};
 add_to_total({A0, A1, A2, A3, A4, A5, A6, A7}, {B0, B1, B2, B3, B4, B5, B6, B7}) ->
     {B0 + A0, B1 + A1, B2 + A2, B3 + A3, B4 + A4, B5 + A5, B6 + A6, B7 + A7};
+add_to_total({A0, A1, A2, A3, A4, A5, A6, A7, A8}, {B0, B1, B2, B3, B4, B5, B6, B7, B8}) ->
+    {B0 + A0, B1 + A1, B2 + A2, B3 + A3, B4 + A4, B5 + A5, B6 + A6, B7 + A7, B8 + A8};
 add_to_total({A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14,
           A15, A16, A17, A18, A19},
          {B0, B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12, B13, B14,
@@ -231,9 +240,15 @@ is_zeros({0, 0}) ->
     true;
 is_zeros({0, 0, 0}) ->
     true;
+is_zeros({0, 0, 0, 0}) ->
+    true;
+is_zeros({0, 0, 0, 0, 0}) ->
+    true;
+is_zeros({0, 0, 0, 0, 0, 0}) ->
+    true;
 is_zeros({0, 0, 0, 0, 0, 0, 0}) ->
     true;
-is_zeros({0, 0, 0, 0, 0, 0, 0, 0}) ->
+is_zeros({0, 0, 0, 0, 0, 0, 0, 0, 0}) ->
     true;
 is_zeros({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}) ->
     true;
@@ -337,6 +352,15 @@ foldl(Now, Start0, Fun, Acc, #slide{max_n = _MaxN, buf2 = _Buf2,
                                     interval = _Interval} = Slide) ->
     lists:foldl(Fun, Acc, element(2, to_list_from(Now, Start0, Slide)) ++ [last]).
 
+map(Fun, #slide{buf1 = Buf1, buf2 = Buf2, total = Total} = Slide) ->
+    BufFun = fun({Timestamp, Value}) ->
+                     {Timestamp, Fun(Value)}
+             end,
+    MappedBuf1 = lists:map(BufFun, Buf1),
+    MappedBuf2 = lists:map(BufFun, Buf2),
+    MappedTotal = Fun(Total),
+    Slide#slide{buf1 = MappedBuf1, buf2 = MappedBuf2, total = MappedTotal}.
+
 maybe_add_last_sample(_Now, #slide{total = T, n = N,
                                    buf1 = [{_, T} | _] = Buf1}) ->
     {N, Buf1};
@@ -352,14 +376,17 @@ maybe_add_last_sample(_Now, #slide{buf1 = Buf1, n = N}) ->
 
 
 create_normalized_lookup(Start, Interval, RoundFun, Samples) ->
-    lists:foldl(fun({TS, Value}, Dict) when TS - Start >= 0 ->
-                          NewTS = map_timestamp(TS, Start, Interval, RoundFun),
-                          orddict:update(NewTS, fun({T, V}) when T > TS ->
-                                                        {T, V};
-                                                   (_) -> {TS, Value}
-                                                end, {TS, Value}, Dict);
-                        (_, Dict) -> Dict end, orddict:new(),
-                     Samples).
+    lists:foldl(fun({TS, Value}, Acc) when TS - Start >= 0 ->
+                        NewTS = map_timestamp(TS, Start, Interval, RoundFun),
+                        maps:update_with(NewTS,
+                                         fun({T, V}) when T > TS ->
+                                                 {T, V};
+                                            (_) ->
+                                                 {TS, Value}
+                                         end, {TS, Value}, Acc);
+                   (_, Acc) ->
+                        Acc
+                end, #{}, Samples).
 
 -spec to_normalized_list(timestamp(), timestamp(), integer(), slide(),
                          no_pad | tuple()) -> [tuple()].
@@ -399,7 +426,7 @@ to_normalized_list(Now, Start, Interval, #slide{first = FirstTS0,
 
     {_, Res1} = lists:foldl(
                   fun(T, {Last, Acc}) ->
-                          case orddict:find(T, Lookup) of
+                          case maps:find(T, Lookup) of
                               {ok, {_, V}} ->
                                   {V, [{T, V} | Acc]};
                               error when Last =:= undefined ->
@@ -407,7 +434,8 @@ to_normalized_list(Now, Start, Interval, #slide{first = FirstTS0,
                               error -> % this pads the last value into the future
                                   {Last, [{T, Last} | Acc]}
                           end
-                  end, {undefined, []}, lists:seq(Start, NowRound, Interval)),
+                  end, {undefined, []},
+                  lists:seq(Start, NowRound, Interval)),
     Res1 ++ Pad.
 
 
@@ -428,9 +456,9 @@ sum([#slide{size = Size, interval = Interval} | _] = Slides, Pad) ->
 
 
 sum(Now, Start, Interval, [Slide | _ ] = All, Pad) ->
-    Fun = fun({TS, Value}, Dict) ->
-                  orddict:update(TS, fun(V) -> add_to_total(V, Value) end,
-                                 Value, Dict)
+    Fun = fun({TS, Value}, Acc) ->
+                  maps:update_with(TS, fun(V) -> add_to_total(V, Value) end,
+                                   Value, Acc)
           end,
     {Total, Dict} =
         lists:foldl(fun(#slide{total = T} = S, {Tot, Acc}) ->
@@ -439,9 +467,9 @@ sum(Now, Start, Interval, [Slide | _ ] = All, Pad) ->
                            Total = add_to_total(T, Tot),
                            Folded = lists:foldl(Fun, Acc, Samples),
                            {Total, Folded}
-                    end, {undefined, orddict:new()}, All),
+                    end, {undefined, #{}}, All),
 
-    {First, Buffer} = case orddict:to_list(Dict) of
+    {First, Buffer} = case lists:sort(maps:to_list(Dict)) of
                           [] ->
                               F = case [TS || #slide{first = TS} <- All,
                                               is_integer(TS)] of

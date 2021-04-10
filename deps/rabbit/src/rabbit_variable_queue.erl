@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_variable_queue).
@@ -321,7 +312,7 @@
           mode,
           %% number of reduce_memory_usage executions, once it
           %% reaches a threshold the queue will manually trigger a runtime GC
-	        %% see: maybe_execute_gc/1
+          %% see: maybe_execute_gc/1
           memory_reduction_run_count,
           %% Queue data is grouped by VHost. We need to store it
           %% to work with queue index.
@@ -356,8 +347,9 @@
 
 -define(QUEUE, lqueue).
 
--include("rabbit.hrl").
--include("rabbit_framing.hrl").
+-include_lib("rabbit_common/include/rabbit.hrl").
+-include_lib("rabbit_common/include/rabbit_framing.hrl").
+-include("amqqueue.hrl").
 
 %%----------------------------------------------------------------------------
 
@@ -427,10 +419,6 @@
              io_batch_size         :: pos_integer(),
              mode                  :: 'default' | 'lazy',
              memory_reduction_run_count :: non_neg_integer()}.
-%% Duplicated from rabbit_backing_queue
--spec ack([ack()], state()) -> {[rabbit_guid:guid()], state()}.
-
--spec multiple_routing_keys() -> 'ok'.
 
 -define(BLANK_DELTA, #delta { start_seq_id = undefined,
                               count        = 0,
@@ -532,8 +520,9 @@ init(Queue, Recover, Callback) ->
       fun (MsgIds) -> msg_indices_written_to_disk(Callback, MsgIds) end,
       fun (MsgIds) -> msgs_and_indices_written_to_disk(Callback, MsgIds) end).
 
-init(#amqqueue { name = QueueName, durable = IsDurable }, new,
-     AsyncCallback, MsgOnDiskFun, MsgIdxOnDiskFun, MsgAndIdxOnDiskFun) ->
+init(Q, new, AsyncCallback, MsgOnDiskFun, MsgIdxOnDiskFun, MsgAndIdxOnDiskFun) when ?is_amqqueue(Q) ->
+    QueueName = amqqueue:get_name(Q),
+    IsDurable = amqqueue:is_durable(Q),
     IndexState = rabbit_queue_index:init(QueueName,
                                          MsgIdxOnDiskFun, MsgAndIdxOnDiskFun),
     VHost = QueueName#resource.virtual_host,
@@ -547,8 +536,9 @@ init(#amqqueue { name = QueueName, durable = IsDurable }, new,
                                AsyncCallback, VHost), VHost);
 
 %% We can be recovering a transient queue if it crashed
-init(#amqqueue { name = QueueName, durable = IsDurable }, Terms,
-     AsyncCallback, MsgOnDiskFun, MsgIdxOnDiskFun, MsgAndIdxOnDiskFun) ->
+init(Q, Terms, AsyncCallback, MsgOnDiskFun, MsgIdxOnDiskFun, MsgAndIdxOnDiskFun) when ?is_amqqueue(Q) ->
+    QueueName = amqqueue:get_name(Q),
+    IsDurable = amqqueue:is_durable(Q),
     {PRef, RecoveryTerms} = process_recovery_terms(Terms),
     VHost = QueueName#resource.virtual_host,
     {PersistentClient, ContainsCheckFun} =
@@ -620,7 +610,8 @@ delete_and_terminate(_Reason, State) ->
     rabbit_msg_store:client_delete_and_terminate(MSCStateT),
     a(State2 #vqstate { msg_store_clients = undefined }).
 
-delete_crashed(#amqqueue{name = QName}) ->
+delete_crashed(Q) when ?is_amqqueue(Q) ->
+    QName = amqqueue:get_name(Q),
     ok = rabbit_queue_index:erase(QName).
 
 purge(State = #vqstate { len = Len }) ->
@@ -700,6 +691,9 @@ drop(AckRequired, State) ->
             {{MsgStatus#msg_status.msg_id, AckTag}, a(State2)}
     end.
 
+%% Duplicated from rabbit_backing_queue
+-spec ack([ack()], state()) -> {[rabbit_guid:guid()], state()}.
+
 ack([], State) ->
     {[], State};
 %% optimisation: this head is essentially a partial evaluation of the
@@ -707,7 +701,7 @@ ack([], State) ->
 ack([SeqId], State) ->
     case remove_pending_ack(true, SeqId, State) of
         {none, _} ->
-            State;
+            {[], State};
         {#msg_status { msg_id        = MsgId,
                        is_persistent = IsPersistent,
                        msg_in_store  = MsgInStore,
@@ -1732,7 +1726,7 @@ purge_and_index_reset(State) ->
 %%
 %% purge_betas_and_deltas/2 loads messages from the queue index,
 %% filling up q3 and in some cases moving messages form q2 to q3 while
-%% reseting q2 to an empty queue (see maybe_deltas_to_betas/2). The
+%% resetting q2 to an empty queue (see maybe_deltas_to_betas/2). The
 %% messages loaded into q3 are removed by calling
 %% remove_queue_entries/3 until there are no more messages to be read
 %% from the queue index. Messages are read in batches from the queue
@@ -1936,7 +1930,7 @@ maybe_write_msg_to_disk(Force, MsgStatus = #msg_status {
 maybe_write_msg_to_disk(_Force, MsgStatus, State) ->
     {MsgStatus, State}.
 
-%% Due to certain optimizations made inside
+%% Due to certain optimisations made inside
 %% rabbit_queue_index:pre_publish/7 we need to have two separate
 %% functions for index persistence. This one is only used when paging
 %% during memory pressure. We didn't want to modify
@@ -2396,7 +2390,7 @@ ifold(Fun, Acc, Its, State) ->
 maybe_reduce_memory_use(State = #vqstate {memory_reduction_run_count = MRedRunCount,
                                           mode = Mode}) ->
     case MRedRunCount >= ?EXPLICIT_GC_RUN_OP_THRESHOLD(Mode) of
-	true -> State1 = reduce_memory_use(State),
+        true -> State1 = reduce_memory_use(State),
                 State1#vqstate{memory_reduction_run_count =  0};
         false -> State#vqstate{memory_reduction_run_count =  MRedRunCount + 1}
     end.
@@ -2788,6 +2782,8 @@ ui(#vqstate{index_state      = IndexState,
 %% Upgrading
 %%----------------------------------------------------------------------------
 
+-spec multiple_routing_keys() -> 'ok'.
+
 multiple_routing_keys() ->
     transform_storage(
       fun ({basic_message, ExchangeName, Routing_Key, Content,
@@ -2825,7 +2821,7 @@ move_messages_to_vhost_store(Queues) ->
     %% Move the queue index for each persistent queue to the new store
     lists:foreach(
         fun(Queue) ->
-            #amqqueue{name = QueueName} = Queue,
+            QueueName = amqqueue:get_name(Queue),
             rabbit_queue_index:move_to_per_vhost_stores(QueueName)
         end,
         Queues),
@@ -2836,12 +2832,12 @@ move_messages_to_vhost_store(Queues) ->
 
     OldStore = run_old_persistent_store(RecoveryRefs, StartFunState),
 
-    VHosts = rabbit_vhost:list(),
+    VHosts = rabbit_vhost:list_names(),
 
     %% New store should not be recovered.
     NewMsgStore = start_new_store(VHosts),
     %% Recovery terms should be started for all vhosts for new store.
-    [{ok, _} = rabbit_recovery_terms:open_table(VHost) || VHost <- VHosts],
+    [ok = rabbit_recovery_terms:open_table(VHost) || VHost <- VHosts],
 
     MigrationBatchSize = application:get_env(rabbit, queue_migration_batch_size,
                                              ?QUEUE_MIGRATION_BATCH_SIZE),
@@ -2938,17 +2934,16 @@ list_persistent_queues() ->
     Node = node(),
     mnesia:async_dirty(
       fun () ->
-              qlc:e(qlc:q([Q || Q = #amqqueue{name = Name,
-                                              pid  = Pid}
-                                    <- mnesia:table(rabbit_durable_queue),
-                                node(Pid) == Node,
-                                mnesia:read(rabbit_queue, Name, read) =:= []]))
+              qlc:e(qlc:q([Q || Q <- mnesia:table(rabbit_durable_queue),
+                                ?amqqueue_is_classic(Q),
+                                amqqueue:qnode(Q) == Node,
+                                mnesia:read(rabbit_queue, amqqueue:get_name(Q), read) =:= []]))
       end).
 
 read_old_recovery_terms([]) ->
     {[], [], ?EMPTY_START_FUN_STATE};
 read_old_recovery_terms(Queues) ->
-    QueueNames = [Name || #amqqueue{name = Name} <- Queues],
+    QueueNames = [amqqueue:get_name(Q) || Q <- Queues],
     {AllTerms, StartFunState} = rabbit_queue_index:read_global_recovery_terms(QueueNames),
     Refs = [Ref || Terms <- AllTerms,
                    Terms /= non_clean_shutdown,

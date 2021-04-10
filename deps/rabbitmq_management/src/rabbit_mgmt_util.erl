@@ -1,17 +1,8 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ Management Plugin.
-%%
-%%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_util).
@@ -19,8 +10,9 @@
 %% TODO sort all this out; maybe there's scope for rabbit_mgmt_request?
 
 -export([is_authorized/2, is_authorized_admin/2, is_authorized_admin/4,
-         vhost/1, vhost_from_headers/1]).
+         is_authorized_admin/3, vhost/1, vhost_from_headers/1]).
 -export([is_authorized_vhost/2, is_authorized_user/3,
+         is_authorized_user/4,
          is_authorized_monitor/2, is_authorized_policies/2,
          is_authorized_vhost_visible/2,
          is_authorized_global_parameters/2]).
@@ -32,14 +24,17 @@
 -export([props_to_method/2, props_to_method/4]).
 -export([all_or_one_vhost/2, reply/3, responder_map/1,
          filter_vhost/3]).
--export([filter_conn_ch_list/3, filter_user/2, list_login_vhosts/2]).
+-export([filter_conn_ch_list/3, filter_user/2, list_login_vhosts/2,
+         list_login_vhosts_names/2]).
+-export([filter_tracked_conn_list/3]).
 -export([with_decode/5, decode/1, decode/2, set_resp_header/3,
-         args/1]).
+         args/1, read_complete_body/1]).
 -export([reply_list/3, reply_list/5, reply_list/4,
          sort_list/2, destination_type/1, reply_list_or_paginate/3
          ]).
 -export([post_respond/1, columns/1, is_monitor/1]).
--export([list_visible_vhosts/1, b64decode_or_throw/1, no_range/0, range/1,
+-export([list_visible_vhosts/1, list_visible_vhosts_names/1,
+         b64decode_or_throw/1, no_range/0, range/1,
          range_ceil/1, floor/2, ceil/1, ceil/2]).
 -export([pagination_params/1,
          maybe_filter_by_keyword/4,
@@ -49,6 +44,9 @@
 -export([direct_request/6]).
 -export([qs_val/2]).
 -export([get_path_prefix/0]).
+-export([catch_no_such_user_or_vhost/2]).
+
+-export([disable_stats/1, enable_queue_totals/1]).
 
 -import(rabbit_misc, [pget/2]).
 
@@ -81,10 +79,24 @@ is_authorized_admin(ReqData, Context) ->
                   <<"Not administrator user">>,
                   fun(#user{tags = Tags}) -> is_admin(Tags) end).
 
-is_authorized_admin(ReqData, Context, Username, Password) ->
-    is_authorized(ReqData, Context, Username, Password,
-                  <<"Not administrator user">>,
+is_authorized_admin(ReqData, Context, Token) ->
+    is_authorized(ReqData, Context,
+                  rabbit_data_coercion:to_binary(
+                    application:get_env(rabbitmq_management, uaa_client_id, "")),
+                  Token, <<"Not administrator user">>,
                   fun(#user{tags = Tags}) -> is_admin(Tags) end).
+
+is_authorized_admin(ReqData, Context, Username, Password) ->
+    case is_basic_auth_disabled() of
+        true ->
+            Msg = "HTTP access denied: basic auth disabled",
+            rabbit_log:warning(Msg),
+            not_authorised(Msg, ReqData, Context);
+        false ->
+            is_authorized(ReqData, Context, Username, Password,
+                          <<"Not administrator user">>,
+                          fun(#user{tags = Tags}) -> is_admin(Tags) end)
+    end.
 
 is_authorized_monitor(ReqData, Context) ->
     is_authorized(ReqData, Context,
@@ -105,13 +117,38 @@ is_authorized_vhost_visible(ReqData, Context) ->
                           is_admin(Tags) orelse user_matches_vhost_visible(ReqData, User)
                   end).
 
+disable_stats(ReqData) ->
+    MgmtOnly = case qs_val(<<"disable_stats">>, ReqData) of
+                   <<"true">> -> true;
+                   _ -> false
+               end,
+    MgmtOnly orelse get_bool_env(rabbitmq_management, disable_management_stats, false)
+        orelse get_bool_env(rabbitmq_management_agent, disable_metrics_collector, false).
+
+enable_queue_totals(ReqData) ->
+    EnableTotals = case qs_val(<<"enable_queue_totals">>, ReqData) of
+                       <<"true">> -> true;
+                       _ -> false
+                   end,
+    EnableTotals orelse get_bool_env(rabbitmq_management, enable_queue_totals, false).
+
+get_bool_env(Application, Par, Default) ->
+    case application:get_env(Application, Par, Default) of
+        true -> true;
+        false -> false;
+        Other ->
+            rabbit_log:warning("Invalid configuration for application ~p: ~p set to ~p",
+                               [Application, Par, Other]),
+            Default
+    end.
+
 user_matches_vhost(ReqData, User) ->
     case vhost(ReqData) of
         not_found -> true;
         none      -> true;
         V         ->
-            SocketInfo = authz_socket_info(ReqData),
-            lists:member(V, list_login_vhosts(User, SocketInfo))
+            AuthzData = get_authz_data(ReqData),
+            lists:member(V, list_login_vhosts_names(User, AuthzData))
     end.
 
 user_matches_vhost_visible(ReqData, User) ->
@@ -119,16 +156,13 @@ user_matches_vhost_visible(ReqData, User) ->
         not_found -> true;
         none      -> true;
         V         ->
-            SocketInfo = authz_socket_info(ReqData),
-            lists:member(V, list_visible_vhosts(User, SocketInfo))
+            AuthzData = get_authz_data(ReqData),
+            lists:member(V, list_visible_vhosts_names(User, AuthzData))
     end.
 
-authz_socket_info(ReqData) ->
-    Host = cowboy_req:host(ReqData),
-    Port = cowboy_req:port(ReqData),
-    Peer = cowboy_req:peer(ReqData),
-    #authz_socket_info{ sockname = {Host, Port},
-                        peername = Peer}.
+get_authz_data(ReqData) ->
+    {PeerAddress, _PeerPort} = cowboy_req:peer(ReqData),
+    {ip, PeerAddress}.
 
 %% Used for connections / channels. A normal user can only see / delete
 %% their own stuff. Monitors can see other users' and delete their
@@ -162,6 +196,9 @@ is_authorized_global_parameters(ReqData, Context) ->
                            is_policymaker(Tags)
                   end).
 
+is_basic_auth_disabled() ->
+    get_bool_env(rabbitmq_management, disable_basic_auth, false).
+
 is_authorized(ReqData, Context, ErrorMsg, Fun) ->
     case cowboy_req:method(ReqData) of
         <<"OPTIONS">> -> {true, ReqData, Context};
@@ -171,12 +208,35 @@ is_authorized(ReqData, Context, ErrorMsg, Fun) ->
 is_authorized1(ReqData, Context, ErrorMsg, Fun) ->
     case cowboy_req:parse_header(<<"authorization">>, ReqData) of
         {basic, Username, Password} ->
-            is_authorized(ReqData, Context,
-                Username, Password,
-                ErrorMsg, Fun);
+            case is_basic_auth_disabled() of
+                true ->
+                    Msg = "HTTP access denied: basic auth disabled",
+                    rabbit_log:warning(Msg),
+                    not_authorised(Msg, ReqData, Context);
+                false ->
+                    is_authorized(ReqData, Context,
+                                  Username, Password,
+                                  ErrorMsg, Fun)
+            end;
+        {bearer, Token} ->
+            Username = rabbit_data_coercion:to_binary(
+                         application:get_env(rabbitmq_management, uaa_client_id, "")),
+            is_authorized(ReqData, Context, Username, Token, ErrorMsg, Fun);
         _ ->
-            {{false, ?AUTH_REALM}, ReqData, Context}
+            case is_basic_auth_disabled() of
+                true ->
+                    Msg = "HTTP access denied: basic auth disabled",
+                    rabbit_log:warning(Msg),
+                    not_authorised(Msg, ReqData, Context);
+                false ->
+                    {{false, ?AUTH_REALM}, ReqData, Context}
+            end
     end.
+
+is_authorized_user(ReqData, Context, Username, Password) ->
+    Msg = <<"User not authorized">>,
+    Fun = fun(_) -> true end,
+    is_authorized(ReqData, Context, Username, Password, Msg, Fun).
 
 is_authorized(ReqData, Context, Username, Password, ErrorMsg, Fun) ->
     ErrFun = fun (Msg) ->
@@ -382,7 +442,7 @@ augment_resources0(Resources, DefaultSort, BasicColumns, Pagination, ReqData,
                 [AugFun, SortFun, PageFun];
             {true, basic, extended} ->
                 % pagination with extended columns and sorting on basic
-                % here we can reduce the augementation set before
+                % here we can reduce the augmentation set before
                 % augmenting
                 [SortFun, PageFun, AugFun]
         end,
@@ -452,7 +512,7 @@ sort_list(Facts, Sorts) -> sort_list_and_paginate(Facts, Sorts, undefined, false
       Fact :: [{atom(), term()}],
       SortColumn :: string().
 sort_list(Facts, _, [], _) ->
-    %% Do not sort when we are explicitly requsted to sort with an
+    %% Do not sort when we are explicitly requested to sort with an
     %% empty sort columns list. Note that this clause won't match when
     %% 'sort' parameter is not provided in a HTTP request at all.
     Facts;
@@ -710,8 +770,16 @@ id0(Key, ReqData) ->
         Id        -> Id
     end.
 
+read_complete_body(Req) ->
+    read_complete_body(Req, <<"">>).
+read_complete_body(Req0, Acc) ->
+    case cowboy_req:read_body(Req0) of
+        {ok, Data, Req}   -> {ok, <<Acc/binary, Data/binary>>, Req};
+        {more, Data, Req} -> read_complete_body(Req, <<Acc/binary, Data/binary>>)
+    end.
+
 with_decode(Keys, ReqData, Context, Fun) ->
-    {ok, Body, ReqData1} = cowboy_req:read_body(ReqData),
+    {ok, Body, ReqData1} = read_complete_body(ReqData),
     with_decode(Keys, Body, ReqData1, Context, Fun).
 
 with_decode(Keys, Body, ReqData, Context, Fun) ->
@@ -727,23 +795,29 @@ with_decode(Keys, Body, ReqData, Context, Fun) ->
 decode(Keys, Body) ->
     case decode(Body) of
         {ok, J0} ->
-                    J = maps:fold(fun(K, V, Acc) ->
-                        Acc#{binary_to_atom(K, utf8) => V}
-                    end, J0, J0),
-                    Results = [get_or_missing(K, J) || K <- Keys],
-                    case [E || E = {key_missing, _} <- Results] of
-                        []      -> {ok, Results, J};
-                        Errors  -> {error, Errors}
-                    end;
-        Else     -> Else
+            J = maps:fold(fun(K, V, Acc) ->
+                    Acc#{binary_to_atom(K, utf8) => V}
+                end, J0, J0),
+                Results = [get_or_missing(K, J) || K <- Keys],
+                case [E || E = {key_missing, _} <- Results] of
+                    []      -> {ok, Results, J};
+                    Errors  -> {error, Errors}
+                end;
+        Else -> Else
     end.
 
 decode(<<"">>) ->
     {ok, #{}};
-
 decode(Body) ->
     try
-        {ok, rabbit_json:decode(Body)}
+        %% handle double encoded JSON, see rabbitmq/rabbitmq-management#839
+        case rabbit_json:decode(Body) of
+            Val when is_map(Val)    -> {ok, Val};
+            Val when is_list(Val)   -> {ok, maps:from_list(Val)};
+            Bin when is_binary(Bin) -> {error, "invalid payload: the request body JSON-decoded to a string. "
+                                               "Is the input doubly-JSON-encoded?"};
+            _                       -> {error, not_json}
+        end
     catch error:_ -> {error, not_json}
     end.
 
@@ -767,7 +841,7 @@ direct_request(MethodName, Transformers, Extra, ErrorMsg, ReqData,
               Method = props_to_method(MethodName, Props, Transformers, Extra),
               Node = get_node(Props),
               case rabbit_misc:rpc_call(Node, rabbit_channel, handle_method,
-                                        [Method, none, none,
+                                        [Method, none, #{}, none,
                                          VHost, User]) of
                   {badrpc, nodedown} ->
                       Msg = io_lib:format("Node ~p could not be contacted", [Node]),
@@ -807,7 +881,7 @@ with_vhost_and_props(Fun, ReqData, Context) ->
             not_found(rabbit_data_coercion:to_binary("vhost_not_found"),
                       ReqData, Context);
         VHost ->
-            {ok, Body, ReqData1} = cowboy_req:read_body(ReqData),
+            {ok, Body, ReqData1} = read_complete_body(ReqData),
             case decode(Body) of
                 {ok, Props} ->
                     try
@@ -845,20 +919,9 @@ props_to_method(MethodName, Props) ->
                     FieldNames),
     Res.
 
-parse_bool(<<"true">>)  -> true;
-parse_bool(<<"false">>) -> false;
-parse_bool(true)        -> true;
-parse_bool(false)       -> false;
-parse_bool(undefined)   -> undefined;
-parse_bool(V)           -> throw({error, {not_boolean, V}}).
+parse_bool(V) -> rabbit_misc:parse_bool(V).
 
-parse_int(I) when is_integer(I) -> I;
-parse_int(F) when is_number(F)  -> trunc(F);
-parse_int(S)                    -> try
-                                       list_to_integer(binary_to_list(S))
-                                   catch error:badarg ->
-                                           throw({error, {not_integer, S}})
-                                   end.
+parse_int(V) -> rabbit_misc:parse_int(V).
 
 with_channel(VHost, ReqData, Context, Fun) ->
     with_channel(VHost, ReqData, Context, node(), Fun).
@@ -915,7 +978,7 @@ bad_request_exception(Code, Reason, ReqData, Context) ->
 
 all_or_one_vhost(ReqData, Fun) ->
     case vhost(ReqData) of
-        none      -> lists:append([Fun(V) || V <- rabbit_vhost:list()]);
+        none      -> lists:append([Fun(V) || V <- rabbit_vhost:list_names()]);
         not_found -> vhost_not_found;
         VHost     -> Fun(VHost)
     end.
@@ -923,11 +986,11 @@ all_or_one_vhost(ReqData, Fun) ->
 filter_vhost(List, ReqData, Context) ->
     User = #user{tags = Tags} = Context#context.user,
     Fn   = case is_admin(Tags) of
-               true  -> fun list_visible_vhosts/2;
-               false -> fun list_login_vhosts/2
+               true  -> fun list_visible_vhosts_names/2;
+               false -> fun list_login_vhosts_names/2
            end,
-    SocketInfo = authz_socket_info(ReqData),
-    VHosts = Fn(User, SocketInfo),
+    AuthzData = get_authz_data(ReqData),
+    VHosts = Fn(User, AuthzData),
     [I || I <- List, lists:member(pget(vhost, I), VHosts)].
 
 filter_user(List, _ReqData, #context{user = User}) ->
@@ -946,6 +1009,31 @@ filter_conn_ch_list(List, ReqData, Context) ->
             none  -> List;
             VHost -> [I || I <- List, pget(vhost, I) =:= VHost]
         end, ReqData, Context)).
+
+filter_tracked_conn_list(List, ReqData, #context{user = #user{username = FilterUsername, tags = Tags}}) ->
+    %% A bit of duplicated code, but we only go through the list once
+    case {vhost(ReqData), is_monitor(Tags)} of
+        {none, true} ->
+            [[{name, Name},
+              {vhost, VHost},
+              {user, Username},
+              {node, Node}] || #tracked_connection{name = Name, vhost = VHost, username = Username, node = Node} <- List];
+        {FilterVHost, true} ->
+            [[{name, Name},
+              {vhost, VHost},
+              {user, Username},
+              {node, Node}] || #tracked_connection{name = Name, vhost = VHost, username = Username, node = Node} <- List, VHost == FilterVHost];
+        {none, false} ->
+            [[{name, Name},
+              {vhost, VHost},
+              {user, Username},
+              {node, Node}] || #tracked_connection{name = Name, vhost = VHost, username = Username, node = Node} <- List, Username == FilterUsername];
+        {FilterVHost, false} ->
+            [[{name, Name},
+              {vhost, VHost},
+              {user, Username},
+              {node, Node}] || #tracked_connection{name = Name, vhost = VHost, username = Username, node = Node} <- List, VHost == FilterVHost, Username == FilterUsername]
+    end.
 
 set_resp_header(K, V, ReqData) ->
     cowboy_req:set_resp_header(K, strip_crlf(V), ReqData).
@@ -976,30 +1064,47 @@ intersects(A, B) -> lists:any(fun(I) -> lists:member(I, B) end, A).
 %% existence of all vhosts, and can always see their contribution to
 %% global stats.
 
+list_visible_vhosts_names(User) ->
+    list_visible_vhosts(User, undefined).
+
+list_visible_vhosts_names(User, AuthzData) ->
+    list_visible_vhosts(User, AuthzData).
+
 list_visible_vhosts(User) ->
     list_visible_vhosts(User, undefined).
 
-list_visible_vhosts(User = #user{tags = Tags}, Sock) ->
+list_visible_vhosts(User = #user{tags = Tags}, AuthzData) ->
     case is_monitor(Tags) of
-        true  -> rabbit_vhost:list();
-        false -> list_login_vhosts(User, Sock)
+        true  -> rabbit_vhost:list_names();
+        false -> list_login_vhosts_names(User, AuthzData)
     end.
 
-list_login_vhosts(User, Sock) ->
-    [V || V <- rabbit_vhost:list(),
-          case catch rabbit_access_control:check_vhost_access(User, V, Sock) of
+list_login_vhosts_names(User, AuthzData) ->
+    [V || V <- rabbit_vhost:list_names(),
+          case catch rabbit_access_control:check_vhost_access(User, V, AuthzData, #{}) of
               ok -> true;
-              _  -> false
+              NotOK ->
+                  log_access_control_result(NotOK),
+                  false
           end].
 
-%% Wow, base64:decode throws lots of weird errors. Catch and convert to one
+list_login_vhosts(User, AuthzData) ->
+    [V || V <- rabbit_vhost:all(),
+          case catch rabbit_access_control:check_vhost_access(User, vhost:get_name(V), AuthzData, #{}) of
+              ok -> true;
+              NotOK ->
+                  log_access_control_result(NotOK),
+                  false
+          end].
+
+% rabbitmq/rabbitmq-auth-backend-http#100
+log_access_control_result(NotOK) ->
+    rabbit_log:debug("rabbit_access_control:check_vhost_access result: ~p", [NotOK]).
+
+%% base64:decode throws lots of weird errors. Catch and convert to one
 %% that will cause a bad_request.
 b64decode_or_throw(B64) ->
-    try
-        base64:decode(B64)
-    catch error:_ ->
-            throw({error, {not_base64, B64}})
-    end.
+    rabbit_misc:b64decode_or_throw(B64).
 
 no_range() -> {no_range, no_range, no_range, no_range}.
 
@@ -1083,3 +1188,11 @@ def(V, _) -> V.
 qs_val(Name, ReqData) ->
     Qs = cowboy_req:parse_qs(ReqData),
     proplists:get_value(Name, Qs, undefined).
+
+-spec catch_no_such_user_or_vhost(fun(() -> Result), Replacement) -> Result | Replacement.
+catch_no_such_user_or_vhost(Fun, Replacement) ->
+    try
+        Fun()
+    catch throw:{error, {E, _}} when E =:= no_such_user; E =:= no_such_vhost ->
+        Replacement()
+    end.

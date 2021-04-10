@@ -13,7 +13,9 @@ function message_rates(id, stats) {
                  ['Redelivered', 'redeliver'],
                  ['Get (manual ack)', 'get'],
                  ['Get (auto ack)', 'get_no_ack'],
-                 ['Return', 'return_unroutable'],
+                 ['Get (empty)', 'get_empty'],
+                 ['Unroutable (return)', 'return_unroutable'],
+                 ['Unroutable (drop)', 'drop_unroutable'],
                  ['Disk read', 'disk_reads'],
                  ['Disk write', 'disk_writes']];
     return rates_chart_or_text(id, stats, items, fmt_rate, fmt_rate_axis, true, 'Message rates', 'message-rates');
@@ -77,7 +79,7 @@ function chart_h3(id, heading, heading_help) {
 }
 
 function prefix_title(mode, range) {
-    var desc = CHART_PERIODS[range];
+    var desc = ALL_CHART_RANGES[range];
     if (mode == 'chart') {
         return desc.toLowerCase();
     }
@@ -250,7 +252,7 @@ function render_charts() {
     });
 }
 
-var chart_colors = {full: ['#edc240', '#afd8f8', '#cb4b4b', '#4da74d', '#9440ed', '#666666', '#aaaaaa', 
+var chart_colors = {full: ['#edc240', '#afd8f8', '#cb4b4b', '#4da74d', '#9440ed', '#666666', '#aaaaaa',
                            '#7c79c3', '#8e6767', '#67808e', '#e5e4ae', '#4b4a55', '#bba0c1'],
                     node: ['#6ae26a', '#e24545']};
 

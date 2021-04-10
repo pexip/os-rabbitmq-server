@@ -1,17 +1,8 @@
-##  The contents of this file are subject to the Mozilla Public License
-##  Version 1.1 (the "License"); you may not use this file except in
-##  compliance with the License. You may obtain a copy of the License
-##  at http://www.mozilla.org/MPL/
+## This Source Code Form is subject to the terms of the Mozilla Public
+## License, v. 2.0. If a copy of the MPL was not distributed with this
+## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-##  Software distributed under the License is distributed on an "AS IS"
-##  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-##  the License for the specific language governing rights and
-##  limitations under the License.
-##
-##  The Original Code is RabbitMQ.
-##
-##  The Initial Developer of the Original Code is GoPivotal, Inc.
-##  Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
+## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 ##
 
 from __future__ import nested_scopes, print_function
@@ -37,7 +28,7 @@ except ImportError:
     print("   - by running 'yum install python-simplejson' on Fedora/Red Hat system,", file = sys.stderr)
     print("   - by running 'port install py25-simplejson' on Macports on OS X", file = sys.stderr)
     print("     (you may need to say 'make PYTHON=python2.5', as well),", file = sys.stderr)
-    print("   - from sources from 'http://pypi.python.org/pypi/simplejson'", file = sys.stderr)
+    print("   - from sources from 'https://pypi.python.org/pypi/simplejson'", file = sys.stderr)
     print("   - simplejson is a standard json library in the Python core since 2.6", file = sys.stderr)
     sys.exit(1)
 

@@ -1,17 +1,8 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ Management Plugin.
-%%
-%%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_queues).
@@ -23,6 +14,7 @@
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
+-include_lib("rabbit/include/amqqueue.hrl").
 
 -define(BASIC_COLUMNS, ["vhost", "name", "durable", "auto_delete", "exclusive",
                        "owner_pid", "arguments", "pid", "state"]).
@@ -32,7 +24,7 @@
 %%--------------------------------------------------------------------
 
 init(Req, _State) ->
-    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
+    {cowboy_rest, rabbit_mgmt_headers:set_common_permission_headers(Req, ?MODULE), #context{}}.
 
 variances(Req, Context) ->
     {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
@@ -66,9 +58,23 @@ is_authorized(ReqData, Context) ->
 %% Exported functions
 
 basic(ReqData) ->
-    [rabbit_mgmt_format:queue(Q) || Q <- queues0(ReqData)] ++
-        [rabbit_mgmt_format:queue(Q#amqqueue{state = down}) ||
-            Q <- down_queues(ReqData)].
+    case rabbit_mgmt_util:disable_stats(ReqData) of
+        false ->
+            [rabbit_mgmt_format:queue(Q) || Q <- queues0(ReqData)] ++
+                [rabbit_mgmt_format:queue(amqqueue:set_state(Q, down)) ||
+                    Q <- down_queues(ReqData)];
+        true ->
+            case rabbit_mgmt_util:enable_queue_totals(ReqData) of
+                false ->
+                    [rabbit_mgmt_format:queue(Q) ++ policy(Q) || Q <- queues0(ReqData)] ++
+                        [rabbit_mgmt_format:queue(amqqueue:set_state(Q, down)) ||
+                            Q <- down_queues(ReqData)];
+                true ->
+                    [rabbit_mgmt_format:queue_info(Q) || Q <- queues_with_totals(ReqData)] ++
+                        [rabbit_mgmt_format:queue(amqqueue:set_state(Q, down)) ||
+                            Q <- down_queues(ReqData)]
+            end
+    end.
 
 augmented(ReqData, Context) ->
     augment(rabbit_mgmt_util:filter_vhost(basic(ReqData), ReqData, Context), ReqData).
@@ -77,8 +83,13 @@ augmented(ReqData, Context) ->
 %% Private helpers
 
 augment(Basic, ReqData) ->
-    rabbit_mgmt_db:augment_queues(Basic, rabbit_mgmt_util:range_ceil(ReqData),
-                                  basic).
+    case rabbit_mgmt_util:disable_stats(ReqData) of
+        false ->
+            rabbit_mgmt_db:augment_queues(Basic, rabbit_mgmt_util:range_ceil(ReqData),
+                                          basic);
+        true ->
+            Basic
+    end.
 
 basic_vhost_filtered(ReqData, Context) ->
     rabbit_mgmt_util:filter_vhost(basic(ReqData), ReqData, Context).
@@ -86,5 +97,17 @@ basic_vhost_filtered(ReqData, Context) ->
 queues0(ReqData) ->
     rabbit_mgmt_util:all_or_one_vhost(ReqData, fun rabbit_amqqueue:list/1).
 
+queues_with_totals(ReqData) ->
+    rabbit_mgmt_util:all_or_one_vhost(ReqData, fun collect_info_all/1).
+
+collect_info_all(VHostPath) ->
+    rabbit_amqqueue:collect_info_all(VHostPath, [name, durable, auto_delete, exclusive, owner_pid, arguments, type, state, policy, totals, type_specific]).
+
 down_queues(ReqData) ->
     rabbit_mgmt_util:all_or_one_vhost(ReqData, fun rabbit_amqqueue:list_down/1).
+
+policy(Q) ->
+    case rabbit_policy:name(Q) of
+        none -> [];
+        Policy -> [{policy, Policy}]
+    end.

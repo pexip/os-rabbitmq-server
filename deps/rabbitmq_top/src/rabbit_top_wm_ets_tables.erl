@@ -1,17 +1,8 @@
-%%  The contents of this file are subject to the Mozilla Public License
-%%  Version 1.1 (the "License"); you may not use this file except in
-%%  compliance with the License. You may obtain a copy of the License
-%%  at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Software distributed under the License is distributed on an "AS IS"
-%%  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%  the License for the specific language governing rights and
-%%  limitations under the License.
-%%
-%%  The Original Code is RabbitMQ.
-%%
-%%  The Initial Developer of the Original Code is VMware, Inc.
-%%  Copyright (c) 2007-2012 VMware, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_top_wm_ets_tables).
@@ -55,9 +46,12 @@ ets_tables(Node, Sort, Order, RowCount) ->
     end.
 
 fmt(Info) ->
-    {owner, Pid} = lists:keyfind(owner, 1, Info),
+    {owner, OPid} = lists:keyfind(owner, 1, Info),
+    {heir, HPid} = lists:keyfind(heir, 1, Info),
     %% OTP 21 introduced the 'id' element that contains a reference.
     %% These cannot be serialised and must be removed from the proplist
     Info1 = lists:keydelete(owner, 1,
                             lists:keydelete(id, 1, Info)),
-    [{owner,  rabbit_top_util:fmt(Pid)} | Info1].
+    Info2 = lists:keydelete(heir, 1, Info1),
+    [{owner,  rabbit_top_util:fmt(OPid)},
+     {heir, rabbit_top_util:fmt(HPid)} | Info2].

@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_trace).
@@ -28,19 +19,9 @@
 
 -type state() :: rabbit_types:exchange() | 'none'.
 
--spec init(rabbit_types:vhost()) -> state().
--spec enabled(rabbit_types:vhost()) -> boolean().
--spec tap_in(rabbit_types:basic_message(), [rabbit_amqqueue:name()],
-                   binary(), rabbit_channel:channel_number(),
-                   rabbit_types:username(), state()) -> 'ok'.
--spec tap_out(rabbit_amqqueue:qmsg(), binary(),
-                    rabbit_channel:channel_number(),
-                    rabbit_types:username(), state()) -> 'ok'.
-
--spec start(rabbit_types:vhost()) -> 'ok'.
--spec stop(rabbit_types:vhost()) -> 'ok'.
-
 %%----------------------------------------------------------------------------
+
+-spec init(rabbit_types:vhost()) -> state().
 
 init(VHost) ->
     case enabled(VHost) of
@@ -50,9 +31,15 @@ init(VHost) ->
                  X
     end.
 
+-spec enabled(rabbit_types:vhost()) -> boolean().
+
 enabled(VHost) ->
     {ok, VHosts} = application:get_env(rabbit, ?TRACE_VHOSTS),
     lists:member(VHost, VHosts).
+
+-spec tap_in(rabbit_types:basic_message(), [rabbit_amqqueue:name()],
+                   binary(), rabbit_channel:channel_number(),
+                   rabbit_types:username(), state()) -> 'ok'.
 
 tap_in(_Msg, _QNames, _ConnName, _ChannelNum, _Username, none) -> ok;
 tap_in(Msg = #basic_message{exchange_name = #resource{name         = XName,
@@ -65,6 +52,10 @@ tap_in(Msg = #basic_message{exchange_name = #resource{name         = XName,
            {<<"user">>,          longstr,   Username},
            {<<"routed_queues">>, array,
             [{longstr, QName#resource.name} || QName <- QNames]}]).
+
+-spec tap_out(rabbit_amqqueue:qmsg(), binary(),
+                    rabbit_channel:channel_number(),
+                    rabbit_types:username(), state()) -> 'ok'.
 
 tap_out(_Msg, _ConnName, _ChannelNum, _Username, none) -> ok;
 tap_out({#resource{name = QName, virtual_host = VHost},
@@ -80,9 +71,13 @@ tap_out({#resource{name = QName, virtual_host = VHost},
 
 %%----------------------------------------------------------------------------
 
+-spec start(rabbit_types:vhost()) -> 'ok'.
+
 start(VHost) ->
     rabbit_log:info("Enabling tracing for vhost '~s'~n", [VHost]),
     update_config(fun (VHosts) -> [VHost | VHosts -- [VHost]] end).
+
+-spec stop(rabbit_types:vhost()) -> 'ok'.
 
 stop(VHost) ->
     rabbit_log:info("Disabling tracing for vhost '~s'~n", [VHost]),
@@ -102,7 +97,7 @@ trace(#exchange{name = Name}, #basic_message{exchange_name = Name},
     ok;
 trace(X, Msg = #basic_message{content = #content{payload_fragments_rev = PFR}},
       RKPrefix, RKSuffix, Extra) ->
-    {ok, _} = rabbit_basic:publish(
+    ok = rabbit_basic:publish(
                 X, <<RKPrefix/binary, ".", RKSuffix/binary>>,
                 #'P_basic'{headers = msg_to_table(Msg) ++ Extra}, PFR),
     ok.

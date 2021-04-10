@@ -1,37 +1,33 @@
 # RabbitMQ Web MQTT plugin
 
-
-This plugin provides a support for MQTT-over-WebSockets to
-RabbitMQ.
-
-
-## Supported RabbitMQ Versions
-
-This plugin supports RabbitMQ `3.6.x` and later releases starting with `3.6.1`.
-
+This plugin provides support for MQTT-over-WebSockets to RabbitMQ.
 
 ## Installation
 
-### Binary Builds
+This plugin ships with modern versions of RabbitMQ.
+Like all plugins, it [must be enabled](https://www.rabbitmq.com/plugins.html) before it can be used:
 
-Binary build is available from the [RabbitMQ Community Plugins page](http://www.rabbitmq.com/community-plugins.html).
+``` bash
+# this might require sudo
+rabbitmq-plugins enable rabbitmq_web_stomp
+```
 
-### From Source
+## Documentation
 
- * [Generic plugin build instructions](http://www.rabbitmq.com/plugin-development.html)
- * Instructions on [how to install a plugin into RabbitMQ broker](http://www.rabbitmq.com/plugins.html#installing-plugins)
+Please refer to the [RabbitMQ Web MQTT guide](https://www.rabbitmq.com/web-mqtt.html).
+
+
+## Building From Source
+
+ * [Generic plugin build instructions](https://www.rabbitmq.com/plugin-development.html)
+ * Instructions on [how to install a plugin into RabbitMQ broker](https://www.rabbitmq.com/plugins.html#installing-plugins)
 
 Note that release branches (`stable` vs. `master`) and target RabbitMQ version need to be taken into account
 when building plugins from source.
 
 
-## Documentation
-
-Please refer to the [RabbitMQ Web MQTT guide](http://www.rabbitmq.com/web-mqtt.html).
-
-
 ## Copyright and License
 
-(c) Pivotal Software Inc, 2007-2017.
+(c) 2007-2020 VMware, Inc. or its affiliates.
 
 Released under the same license as RabbitMQ. See LICENSE for details.

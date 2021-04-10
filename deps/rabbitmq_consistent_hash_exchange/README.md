@@ -32,7 +32,7 @@ their bindings.
 new topology still distributes messages between the different queues
 evenly.
 
-[Consistent Hashing](http://en.wikipedia.org/wiki/Consistent_hashing)
+[Consistent Hashing](https://en.wikipedia.org/wiki/Consistent_hashing)
 is a hashing technique whereby each bucket appears at multiple points
 throughout the hash space, and the bucket selected is the nearest
 higher (or lower, it doesn't matter, provided it's consistent) bucket
@@ -48,22 +48,35 @@ This plugin ships with RabbitMQ.
 
 This plugin supports the same [Erlang versions](https://rabbitmq.com/which-erlang.html) as RabbitMQ core.
 
-## Installation
+## Enabling the Plugin
 
-This plugin ships with RabbitMQ. Like all other [RabbitMQ plugins](http://www.rabbitmq.com/plugins.html), it has to be enabled before it can be used:
+This plugin ships with RabbitMQ. Like all other [RabbitMQ plugins](https://www.rabbitmq.com/plugins.html),
+it has to be enabled before it can be used:
 
 ``` sh
 rabbitmq-plugins enable rabbitmq_consistent_hash_exchange
 ```
 
+## Provided Exchange Type
+
+The exchange type is `"x-consistent-hash"`.
 
 ## How It Works
 
 In the case of Consistent Hashing as an exchange type, the hash is
 calculated from a message property (most commonly the routing key).
-Thus messages that have the same routing key will have the
-same hash value computed for them, and thus will be routed to the same queue,
-assuming no bindings have changed.
+
+When a queue is bound to this exchange, it is assigned one or more
+partitions on the consistent hashing ring depending on its binding weight
+(covered below).
+
+For every property hash (e.g. routing key), a hash position computed
+and a corresponding hash ring partition is picked. That partition corresponds
+to a bound queue, and the message is routed to that queue.
+
+Assuming a reasonably even routing key distribution of inbound messages,
+routed messages should be reasonably evenly distributed across all
+ring partitions, and thus queues according to their binding weights.
 
 ### Binding Weights
 
@@ -88,14 +101,22 @@ other queues have higher values in their binding key.  With a larger
 set of routing keys used, the statistical distribution of routing
 keys approaches the ratios of the binding keys.
 
-Each message gets delivered to at most one queue. Normally, each
-message gets delivered to exactly one queue, but there is a race
-between the determination of which queue to send a message to, and the
-deletion/death of that queue that does permit the possibility of the
-message being sent to a queue which then disappears before the message
-is processed. Hence in general, at most one queue.
+Each message gets delivered to at most one queue. On average, a
+message gets delivered to exactly one queue. Concurrent binding changes
+and queue primary replica failures can affect this but on average.
 
-The exchange type is `"x-consistent-hash"`.
+### Node Restart Effects
+
+Consistent hashing ring is stored in memory and will be re-populated
+from exchange bindings when the node boots. Relative positioning of queues
+on the ring is not guaranteed to be the same between restarts. In practice
+this means that after a restart, all queues will still receive roughly
+the same number of messages routed to them (assuming routing key distribution
+does not change) but a given routing key now **may route to a different queue**.
+
+In other words, this exchange type provides consistent message distribution
+between queues but cannot guarantee stable routing [queue] locality for a message
+with a fixed routing key.
 
 
 ## Usage Example
@@ -794,7 +815,7 @@ The state of the hash space is distributed across all cluster nodes.
 
 ## Copyright and License
 
-(c) 2013-2018 Pivotal Software Inc.
+(c) 2013-2020 VMware, Inc. or its affiliates.
 
-Released under the Mozilla Public License 1.1, same as RabbitMQ.
+Released under the Mozilla Public License 2.0, same as RabbitMQ.
 See [LICENSE](./LICENSE) for details.

@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% @private
@@ -62,8 +53,9 @@ init() ->
 open_channel_args(#state{node = Node,
                          user = User,
                          vhost = VHost,
-                         collector = Collector}) ->
-    [self(), Node, User, VHost, Collector].
+                         collector = Collector,
+                         params = Params}) ->
+    [self(), Node, User, VHost, Collector, Params].
 
 do(_Method, _State) ->
     ok.
@@ -88,7 +80,7 @@ closing(_ChannelCloseType, Reason, State) ->
 
 channels_terminated(State = #state{closing_reason = Reason,
                                    collector = Collector}) ->
-    rabbit_queue_collector_common:delete_all(Collector),
+    rabbit_queue_collector:delete_all(Collector),
     {stop, {shutdown, Reason}, State}.
 
 terminate(_Reason, #state{node = Node} = State) ->
@@ -148,8 +140,9 @@ connect(Params = #amqp_params_direct{username     = Username,
                          adapter_info = ensure_adapter_info(Info),
                          connected_at =
                            os:system_time(milli_seconds)},
+    DecryptedPassword = credentials_obfuscation:decrypt(Password),
     case rpc:call(Node, rabbit_direct, connect,
-                  [{Username, Password}, VHost, ?PROTOCOL, self(),
+                  [{Username, DecryptedPassword}, VHost, ?PROTOCOL, self(),
                    connection_info(State1)]) of
         {ok, {User, ServerProperties}} ->
             {ok, ChMgr, Collector} = SIF(i(name, State1)),
@@ -212,10 +205,11 @@ ssl_info(Sock) ->
         case rabbit_net:ssl_info(Sock) of
             {ok, Infos} ->
                 {_, P} = lists:keyfind(protocol, 1, Infos),
-                case lists:keyfind(cipher_suite, 1, Infos) of
-                    {_,{K, C, H}}    -> {P, K, C, H};
-                    {_,{K, C, H, _}} -> {P, K, C, H}
-                end;
+                #{cipher := C,
+                  key_exchange := K,
+                  mac := H} = proplists:get_value(
+                                selected_cipher_suite, Infos),
+                {P, K, C, H};
             _           ->
                 {unknown, unknown, unknown, unknown}
         end,

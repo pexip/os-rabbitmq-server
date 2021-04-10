@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_msg_file).
@@ -41,15 +32,10 @@
         fun (({rabbit_types:msg_id(), msg_size(), position(), binary()}, A) ->
             A).
 
+%%----------------------------------------------------------------------------
+
 -spec append(io_device(), rabbit_types:msg_id(), msg()) ->
           rabbit_types:ok_or_error2(msg_size(), any()).
--spec read(io_device(), msg_size()) ->
-          rabbit_types:ok_or_error2({rabbit_types:msg_id(), msg()},
-                                    any()).
--spec scan(io_device(), file_size(), message_accumulator(A), A) ->
-          {'ok', A, position()}.
-
-%%----------------------------------------------------------------------------
 
 append(FileHdl, MsgId, MsgBody)
   when is_binary(MsgId) andalso size(MsgId) =:= ?MSG_ID_SIZE_BYTES ->
@@ -65,6 +51,10 @@ append(FileHdl, MsgId, MsgBody)
         KO -> KO
     end.
 
+-spec read(io_device(), msg_size()) ->
+          rabbit_types:ok_or_error2({rabbit_types:msg_id(), msg()},
+                                    any()).
+
 read(FileHdl, TotalSize) ->
     Size = TotalSize - ?FILE_PACKING_ADJUSTMENT,
     BodyBinSize = Size - ?MSG_ID_SIZE_BYTES,
@@ -76,6 +66,9 @@ read(FileHdl, TotalSize) ->
             {ok, {MsgId, binary_to_term(MsgBodyBin)}};
         KO -> KO
     end.
+
+-spec scan(io_device(), file_size(), message_accumulator(A), A) ->
+          {'ok', A, position()}.
 
 scan(FileHdl, FileSize, Fun, Acc) when FileSize >= 0 ->
     scan(FileHdl, FileSize, <<>>, 0, 0, Fun, Acc).
@@ -104,7 +97,7 @@ scanner(<<Size:?INTEGER_SIZE_BITS, MsgIdAndMsg:Size/binary,
     case WriteMarker of
         ?WRITE_OK_MARKER ->
             %% Here we take option 5 from
-            %% http://www.erlang.org/cgi-bin/ezmlm-cgi?2:mss:1569 in
+            %% https://www.erlang.org/cgi-bin/ezmlm-cgi?2:mss:1569 in
             %% which we read the MsgId as a number, and then convert it
             %% back to a binary in order to work around bugs in
             %% Erlang's GC.

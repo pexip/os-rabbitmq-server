@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_vhost_sup_sup).
@@ -30,6 +21,7 @@
          save_vhost_process/2]).
 -export([delete_on_all_nodes/1, start_on_all_nodes/1]).
 -export([is_vhost_alive/1]).
+-export([check/0]).
 
 %% Internal
 -export([stop_and_delete_vhost/1]).
@@ -53,7 +45,6 @@ init([]) ->
     %% unless the operator opts in.
     RestartStrategy = vhost_restart_strategy(),
     ets:new(?MODULE, [named_table, public, {keypos, #vhost_sup.vhost}]),
-
     {ok, {{simple_one_for_one, 0, 5},
           [{rabbit_vhost, {rabbit_vhost_sup_wrapper, start_link, []},
             RestartStrategy, ?SUPERVISOR_WAIT, supervisor,
@@ -261,3 +252,20 @@ vhost_restart_strategy() ->
         transient -> transient;
         permanent -> permanent
     end.
+
+check() ->
+    VHosts = rabbit_vhost:list_names(),
+    lists:filter(
+      fun(V) ->
+              case rabbit_vhost_sup_sup:get_vhost_sup(V) of
+                  {ok, Sup} ->
+                      MsgStores = [Pid || {Name, Pid, _, _} <- supervisor:which_children(Sup),
+                                         lists:member(Name, [msg_store_persistent,
+                                                             msg_store_transient])],
+                      not is_vhost_alive(V) orelse (not lists:all(fun(P) ->
+                                                                          erlang:is_process_alive(P)
+                                                                  end, MsgStores));
+                  {error, _} ->
+                      true
+              end
+      end, VHosts).

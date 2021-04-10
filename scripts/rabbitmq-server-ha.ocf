@@ -3,7 +3,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+# https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -52,6 +52,7 @@ OCF_RESKEY_policy_file_default="/usr/local/sbin/set_rabbitmq_policy"
 OCF_RESKEY_rmq_feature_health_check_default=true
 OCF_RESKEY_rmq_feature_local_list_queues_default=true
 OCF_RESKEY_limit_nofile_default=65535
+OCF_RESKEY_avoid_using_iptables_default=false
 
 : ${HA_LOGTAG="lrmd"}
 : ${HA_LOGFACILITY="daemon"}
@@ -78,6 +79,7 @@ OCF_RESKEY_limit_nofile_default=65535
 : ${OCF_RESKEY_rmq_feature_health_check=${OCF_RESKEY_rmq_feature_health_check_default}}
 : ${OCF_RESKEY_rmq_feature_local_list_queues=${OCF_RESKEY_rmq_feature_local_list_queues_default}}
 : ${OCF_RESKEY_limit_nofile=${OCF_RESKEY_limit_nofile_default}}
+: ${OCF_RESKEY_avoid_using_iptables=${OCF_RESKEY_avoid_using_iptables_default}}
 
 #######################################################################
 
@@ -357,6 +359,15 @@ Soft and hard limit for NOFILE
 <content type="string" default="${OCF_RESKEY_limit_nofile_default}" />
 </parameter>
 
+<parameter name="avoid_using_iptables" unique="0" required="0">
+<longdesc lang="en">
+When set to true the iptables calls to block client access become
+noops. This is useful when we run inside containers.
+</longdesc>
+<shortdesc lang="en">Disable iptables use entirely</shortdesc>
+<content type="boolean" default="${OCF_RESKEY_avoid_using_iptables_default}" />
+</parameter>
+
 $EXTENDED_OCF_PARAMS
 
 </parameters>
@@ -595,7 +606,7 @@ master_score() {
         score=0
     fi
     ocf_log info "${LH} Updating master score attribute with ${score}"
-    ocf_run crm_master -l reboot -v $score || return $OCF_ERR_GENERIC
+    ocf_run crm_master -N $THIS_PCMK_NODE -l reboot -v $score || return $OCF_ERR_GENERIC
     return $OCF_SUCCESS
 }
 
@@ -660,7 +671,7 @@ get_node_master_score() {
 
 # Return either rabbit node name as FQDN or shortname, depends on the OCF_RESKEY_use_fqdn.
 rabbit_node_name() {
-    echo "rabbit@$(process_fqdn $1)"
+    echo "rabbit@$(process_fqdn $(ocf_attribute_target $1))"
 }
 
 rmq_setup_env() {
@@ -673,7 +684,7 @@ rmq_setup_env() {
     MNESIA_FILES="${OCF_RESKEY_mnesia_base}/$(rabbit_node_name $H)"
     RMQ_START_TIME="${MNESIA_FILES}/ocf_server_start_time.txt"
     MASTER_FLAG_FILE="${MNESIA_FILES}/ocf_master_for_${OCF_RESOURCE_INSTANCE}"
-    THIS_PCMK_NODE=`crm_node -n`
+    THIS_PCMK_NODE=$(ocf_attribute_target)
     TOTALVMEM=`free -mt | awk '/Total:/ {print $2}'`
     # check and make PID file dir
     local PID_DIR=$( dirname $OCF_RESKEY_pid_file )
@@ -764,6 +775,10 @@ reset_mnesia() {
 
 block_client_access()
 {
+    # When OCF_RESKEY_avoid_using_iptables is true iptables calls are noops
+    if [ "${OCF_RESKEY_avoid_using_iptables}" == 'true' ] ; then
+        return $OCF_SUCCESS
+    fi
     # do not add temporary RMQ blocking rule, if it is already exist
     # otherwise, try to add a blocking rule with max of 5 retries
     local tries=5
@@ -782,6 +797,10 @@ block_client_access()
 
 unblock_client_access()
 {
+    # When OCF_RESKEY_avoid_using_iptables is true iptables calls are noops
+    if [ "${OCF_RESKEY_avoid_using_iptables}" == 'true' ] ; then
+        return
+    fi
     # remove all temporary RMQ blocking rules, if there are more than one exist
     for i in $(iptables -nvL --wait --line-numbers | awk '/temporary RMQ block/ {print $1}'); do
       iptables --wait -D INPUT -p tcp -m tcp --dport ${OCF_RESKEY_node_port} -m state --state NEW,RELATED,ESTABLISHED \

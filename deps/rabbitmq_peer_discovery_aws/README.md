@@ -1,6 +1,6 @@
 # RabbitMQ Peer Discovery AWS
 
-This is an AWS-based implementation of RabbitMQ [peer discovery interface](http://www.rabbitmq.com/blog/2018/02/12/peer-discovery-subsystem-in-rabbitmq-3-7/)
+This is an AWS-based implementation of RabbitMQ [peer discovery interface](https://www.rabbitmq.com/blog/2018/02/12/peer-discovery-subsystem-in-rabbitmq-3-7/)
 (new in 3.7.0, previously available in the [rabbitmq-autocluster plugin](https://github.com/rabbitmq/rabbitmq-autocluster)
 by Gavin Roy).
 
@@ -24,8 +24,12 @@ mechanism that supports 3.6.x, see [rabbitmq-autocluster](https://github.com/rab
 
 ## Installation
 
-This plugin ships with RabbitMQ as of 3.7.0. There is no need to install it separately.
-Enable the plugin in offline mode before the node is first started:
+This plugin ships with [supported RabbitMQ versions](https://www.rabbitmq.com/versions.html).
+There is no need to install it separately.
+
+As with any [plugin](https://rabbitmq.com/plugins.html), it must be enabled before it
+can be used. For peer discovery plugins it means they must be [enabled](https://rabbitmq.com//plugins.html#basics) or [preconfigured](https://rabbitmq.com//plugins.html#enabled-plugins-file)
+before first node boot:
 
 ```
 rabbitmq-plugins --offline enable rabbitmq_peer_discovery_aws
@@ -34,12 +38,12 @@ rabbitmq-plugins --offline enable rabbitmq_peer_discovery_aws
 
 ## Documentation
 
-See [RabbitMQ Cluster Formation guide](http://www.rabbitmq.com/cluster-formation.html).
+See [RabbitMQ Cluster Formation guide](https://www.rabbitmq.com/cluster-formation.html).
 
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) and our [development process overview](http://www.rabbitmq.com/github.html).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) and our [development process overview](https://www.rabbitmq.com/github.html).
 
 
 ## License
@@ -49,4 +53,4 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and our [development process overview](
 
 ## Copyright
 
-(c) Pivotal Software Inc., 2007-2018.
+(c) 2007-2020 VMware, Inc. or its affiliates.

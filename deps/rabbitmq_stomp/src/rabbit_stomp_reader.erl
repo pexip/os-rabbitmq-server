@@ -1,28 +1,20 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_stomp_reader).
 -behaviour(gen_server2).
 
--export([start_link/4]).
+-export([start_link/3]).
 -export([conserve_resources/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          code_change/3, terminate/2]).
 -export([start_heartbeats/2]).
--export([info/2]).
+-export([info/2, close_connection/2]).
+-export([ssl_login_name/2]).
 
 -include("rabbit_stomp.hrl").
 -include("rabbit_stomp_frame.hrl").
@@ -41,9 +33,9 @@
 
 %%----------------------------------------------------------------------------
 
-start_link(SupHelperPid, Ref, Sock, Configuration) ->
+start_link(SupHelperPid, Ref, Configuration) ->
     Pid = proc_lib:spawn_link(?MODULE, init,
-                              [[SupHelperPid, Ref, Sock, Configuration]]),
+                              [[SupHelperPid, Ref, Configuration]]),
     {ok, Pid}.
 
 info(Pid, InfoItems) ->
@@ -53,10 +45,15 @@ info(Pid, InfoItems) ->
         UnknownItems -> throw({bad_argument, UnknownItems})
     end.
 
-init([SupHelperPid, Ref, Sock, Configuration]) ->
+close_connection(Pid, Reason) ->
+    gen_server:cast(Pid, {close_connection, Reason}).
+
+
+init([SupHelperPid, Ref, Configuration]) ->
     process_flag(trap_exit, true),
+    {ok, Sock} = rabbit_networking:handshake(Ref,
+        application:get_env(rabbitmq_stomp, proxy_protocol, false)),
     RealSocket = rabbit_net:unwrap_socket(Sock),
-    rabbit_networking:accept_ack(Ref, RealSocket),
 
     case rabbit_net:connection_string(Sock, inbound) of
         {ok, ConnStr} ->
@@ -104,22 +101,27 @@ handle_call({info, InfoItems}, _From, State) ->
 handle_call(Msg, From, State) ->
     {stop, {stomp_unexpected_call, Msg, From}, State}.
 
+handle_cast({close_connection, Reason}, State) ->
+    {stop, {shutdown, {server_initiated_close, Reason}}, State};
 handle_cast(client_timeout, State) ->
     {stop, {shutdown, client_heartbeat_timeout}, State};
 handle_cast(Msg, State) ->
     {stop, {stomp_unexpected_cast, Msg}, State}.
 
 
-handle_info({inet_async, _Sock, _Ref, {ok, Data}}, State) ->
+handle_info({Tag, Sock, Data}, State=#reader_state{socket=Sock})
+        when Tag =:= tcp; Tag =:= ssl ->
     case process_received_bytes(Data, State#reader_state{recv_outstanding = false}) of
       {ok, NewState} ->
           {noreply, ensure_stats_timer(run_socket(control_throttle(NewState))), hibernate};
       {stop, Reason, NewState} ->
           {stop, Reason, NewState}
     end;
-handle_info({inet_async, _Sock, _Ref, {error, closed}}, State) ->
+handle_info({Tag, Sock}, State=#reader_state{socket=Sock})
+        when Tag =:= tcp_closed; Tag =:= ssl_closed ->
     {stop, normal, State};
-handle_info({inet_async, _Sock, _Ref, {error, Reason}}, State) ->
+handle_info({Tag, Sock, Reason}, State=#reader_state{socket=Sock})
+        when Tag =:= tcp_error; Tag =:= ssl_error ->
     {stop, {inet_error, Reason}, State};
 handle_info({inet_reply, _Sock, {error, closed}}, State) ->
     {stop, normal, State};
@@ -153,6 +155,12 @@ handle_info(#'basic.ack'{delivery_tag = Tag, multiple = IsMulti}, State) ->
                                                                  IsMulti,
                                                                  ProcState),
     {noreply, processor_state(NewProcState, State), hibernate};
+handle_info({Delivery = #'basic.deliver'{},
+             Message = #amqp_msg{}},
+             State) ->
+    %% receiving a message from a quorum queue
+    %% no delivery context
+    handle_info({Delivery, Message, undefined}, State);
 handle_info({Delivery = #'basic.deliver'{},
              #amqp_msg{props = Props, payload = Payload},
              DeliveryCtx},
@@ -263,14 +271,14 @@ run_socket(State = #reader_state{state = blocked}) ->
 run_socket(State = #reader_state{recv_outstanding = true}) ->
     State;
 run_socket(State = #reader_state{socket = Sock}) ->
-    _ = rabbit_net:async_recv(Sock, 0, infinity),
+    rabbit_net:setopts(Sock, [{active, once}]),
     State#reader_state{recv_outstanding = true}.
 
 
 terminate(Reason, undefined) ->
     log_reason(Reason, undefined),
     {stop, Reason};
-terminate(Reason, State = #reader_state{ processor_state = ProcState }) ->
+terminate(Reason, State = #reader_state{processor_state = ProcState}) ->
   maybe_emit_stats(State),
   log_reason(Reason, State),
   _ = rabbit_stomp_processor:flush_and_die(ProcState),
@@ -284,24 +292,23 @@ log_reason({network_error, {ssl_upgrade_error, closed}, ConnStr}, _State) ->
     rabbit_log_connection:error("STOMP detected TLS upgrade error on ~s: connection closed~n",
         [ConnStr]);
 
-log_reason({network_error,
-           {ssl_upgrade_error,
-            {tls_alert, "handshake failure"}}, ConnStr}, _State) ->
-    rabbit_log_connection:error("STOMP detected TLS upgrade error on ~s: handshake failure~n",
-        [ConnStr]);
 
 log_reason({network_error,
-           {ssl_upgrade_error,
-            {tls_alert, "unknown ca"}}, ConnStr}, _State) ->
-    rabbit_log_connection:error("STOMP detected TLS certificate verification error on ~s: alert 'unknown CA'~n",
-        [ConnStr]);
-
+            {ssl_upgrade_error,
+             {tls_alert, "handshake failure"}}, ConnStr}, _State) ->
+    log_tls_alert(handshake_failure, ConnStr);
 log_reason({network_error,
-           {ssl_upgrade_error,
-            {tls_alert, Alert}}, ConnStr}, _State) ->
-    rabbit_log_connection:error("STOMP detected TLS upgrade error on ~s: alert ~s~n",
-        [ConnStr, Alert]);
-
+            {ssl_upgrade_error,
+             {tls_alert, "unknown ca"}}, ConnStr}, _State) ->
+    log_tls_alert(unknown_ca, ConnStr);
+log_reason({network_error,
+            {ssl_upgrade_error,
+             {tls_alert, {Err, _}}}, ConnStr}, _State) ->
+    log_tls_alert(Err, ConnStr);
+log_reason({network_error,
+            {ssl_upgrade_error,
+             {tls_alert, Alert}}, ConnStr}, _State) ->
+    log_tls_alert(Alert, ConnStr);
 log_reason({network_error, {ssl_upgrade_error, Reason}, ConnStr}, _State) ->
     rabbit_log_connection:error("STOMP detected TLS upgrade error on ~s: ~p~n",
         [ConnStr, Reason]);
@@ -316,19 +323,35 @@ log_reason({network_error, Reason}, _State) ->
 log_reason({shutdown, client_heartbeat_timeout},
            #reader_state{ processor_state = ProcState }) ->
     AdapterName = rabbit_stomp_processor:adapter_name(ProcState),
-    rabbit_log:warning("STOMP detected missed client heartbeat(s) "
-                       "on connection ~s, closing it~n", [AdapterName]);
+    rabbit_log_connection:warning("STOMP detected missed client heartbeat(s) "
+                                  "on connection ~s, closing it~n", [AdapterName]);
 
-log_reason(normal, #reader_state{ conn_name  = ConnName}) ->
+log_reason({shutdown, {server_initiated_close, Reason}},
+           #reader_state{conn_name = ConnName}) ->
+    rabbit_log_connection:info("closing STOMP connection ~p (~s), reason: ~s~n",
+                               [self(), ConnName, Reason]);
+
+log_reason(normal, #reader_state{conn_name  = ConnName}) ->
     rabbit_log_connection:info("closing STOMP connection ~p (~s)~n", [self(), ConnName]);
 
 log_reason(shutdown, undefined) ->
     rabbit_log_connection:error("closing STOMP connection that never completed connection handshake (negotiation)~n", []);
 
-log_reason(Reason, #reader_state{ processor_state = ProcState }) ->
+log_reason(Reason, #reader_state{processor_state = ProcState}) ->
     AdapterName = rabbit_stomp_processor:adapter_name(ProcState),
-    rabbit_log:warning("STOMP connection ~s terminated"
-                       " with reason ~p, closing it~n", [AdapterName, Reason]).
+    rabbit_log_connection:warning("STOMP connection ~s terminated"
+                                  " with reason ~p, closing it~n", [AdapterName, Reason]).
+
+log_tls_alert(handshake_failure, ConnStr) ->
+    rabbit_log_connection:error("STOMP detected TLS upgrade error on ~s: handshake failure~n",
+        [ConnStr]);
+log_tls_alert(unknown_ca, ConnStr) ->
+    rabbit_log_connection:error("STOMP detected TLS certificate verification error on ~s: alert 'unknown CA'~n",
+        [ConnStr]);
+log_tls_alert(Alert, ConnStr) ->
+    rabbit_log_connection:error("STOMP detected TLS upgrade error on ~s: alert ~s~n",
+        [ConnStr, Alert]).
+
 
 %%----------------------------------------------------------------------------
 

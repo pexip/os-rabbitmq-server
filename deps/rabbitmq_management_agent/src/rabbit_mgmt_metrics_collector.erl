@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(rabbit_mgmt_metrics_collector).
 
@@ -129,7 +120,8 @@ retention_policy(queue_coarse_metrics) -> basic;
 retention_policy(node_persister_metrics) -> global;
 retention_policy(node_coarse_metrics) -> global;
 retention_policy(node_metrics) -> basic;
-retention_policy(node_node_metrics) -> global.
+retention_policy(node_node_metrics) -> global;
+retention_policy(connection_churn_metrics) -> basic.
 
 take_smaller(Policies) ->
     Intervals = [I || {_, I} <- Policies],
@@ -253,14 +245,14 @@ aggregate_entry({Id, Metrics}, NextStats, Ops0,
     Entry = ?channel_stats(Id, Ftd),
     Ops = insert_op(channel_stats, Id, Entry, Ops0),
     {NextStats, Ops, State};
-aggregate_entry({{Ch, X} = Id, Publish0, Confirm, ReturnUnroutable, 0},
+aggregate_entry({{Ch, X} = Id, Publish0, Confirm, ReturnUnroutable, DropUnroutable, 0},
                 NextStats, Ops0,
                 #state{table = channel_exchange_metrics,
                        policies = {BPolicies, DPolicies, GPolicies},
                        rates_mode = RatesMode,
                        lookup_exchange = ExchangeFun} = State) ->
-    Stats = ?channel_stats_fine_stats(Publish0, Confirm, ReturnUnroutable),
-    {Publish, _, _} = Diff = get_difference(Id, Stats, State),
+    Stats = ?channel_stats_fine_stats(Publish0, Confirm, ReturnUnroutable, DropUnroutable),
+    {Publish, _, _, _} = Diff = get_difference(Id, Stats, State),
 
     Ops1 = insert_entry_ops(channel_stats_fine_stats, Ch, true, Diff, Ops0,
                             BPolicies),
@@ -281,13 +273,13 @@ aggregate_entry({{Ch, X} = Id, Publish0, Confirm, ReturnUnroutable, 0},
                    Ops2
            end,
     {insert_old_aggr_stats(NextStats, Id, Stats), Ops3, State};
-aggregate_entry({{_Ch, X} = Id, Publish0, Confirm, ReturnUnroutable, 1},
+aggregate_entry({{_Ch, X} = Id, Publish0, Confirm, ReturnUnroutable, DropUnroutable, 1},
                 NextStats, Ops0,
                 #state{table = channel_exchange_metrics,
                        policies = {_BPolicies, DPolicies, GPolicies},
                        lookup_exchange = ExchangeFun} = State) ->
-    Stats = ?channel_stats_fine_stats(Publish0, Confirm, ReturnUnroutable),
-    {Publish, _, _} = Diff = get_difference(Id, Stats, State),
+    Stats = ?channel_stats_fine_stats(Publish0, Confirm, ReturnUnroutable, DropUnroutable),
+    {Publish, _, _, _} = Diff = get_difference(Id, Stats, State),
     Ops1 = insert_entry_ops(vhost_stats_fine_stats, vhost(X), true, Diff, Ops0,
                             GPolicies),
     Ops2 = case ExchangeFun(X) of
@@ -301,14 +293,15 @@ aggregate_entry({{_Ch, X} = Id, Publish0, Confirm, ReturnUnroutable, 1},
     rabbit_core_metrics:delete(channel_exchange_metrics, Id),
     {NextStats, Ops2, State};
 aggregate_entry({{Ch, Q} = Id, Get, GetNoAck, Deliver, DeliverNoAck,
-                     Redeliver, Ack, 0}, NextStats, Ops0,
+                     Redeliver, Ack, GetEmpty, 0}, NextStats, Ops0,
                 #state{table = channel_queue_metrics,
                        policies = {BPolicies, DPolicies, GPolicies},
                        rates_mode = RatesMode,
                        lookup_queue = QueueFun} = State) ->
     Stats = ?vhost_stats_deliver_stats(Get, GetNoAck, Deliver, DeliverNoAck,
                                        Redeliver, Ack,
-                                       Deliver + DeliverNoAck + Get + GetNoAck),
+                                       Deliver + DeliverNoAck + Get + GetNoAck,
+                                       GetEmpty),
     Diff = get_difference(Id, Stats, State),
 
     Ops1 = insert_entry_ops(vhost_stats_deliver_stats, vhost(Q), true, Diff,
@@ -331,13 +324,14 @@ aggregate_entry({{Ch, Q} = Id, Get, GetNoAck, Deliver, DeliverNoAck,
            end,
      {insert_old_aggr_stats(NextStats, Id, Stats), Ops3, State};
 aggregate_entry({{_, Q} = Id, Get, GetNoAck, Deliver, DeliverNoAck,
-                     Redeliver, Ack, 1}, NextStats, Ops0,
+                     Redeliver, Ack, GetEmpty, 1}, NextStats, Ops0,
                 #state{table = channel_queue_metrics,
                        policies = {BPolicies, _, GPolicies},
                        lookup_queue = QueueFun} = State) ->
     Stats = ?vhost_stats_deliver_stats(Get, GetNoAck, Deliver, DeliverNoAck,
                                        Redeliver, Ack,
-                                       Deliver + DeliverNoAck + Get + GetNoAck),
+                                       Deliver + DeliverNoAck + Get + GetNoAck,
+                                       GetEmpty),
     Diff = get_difference(Id, Stats, State),
 
     Ops1 = insert_entry_ops(vhost_stats_deliver_stats, vhost(Q), true, Diff,
@@ -400,7 +394,8 @@ aggregate_entry({Id, Reductions}, NextStats, Ops0,
     Ops = insert_entry_ops(channel_process_stats, Id, false,
                            Entry, Ops0, BPolicies),
     {NextStats, Ops, State};
-aggregate_entry({Id, Exclusive, AckRequired, PrefetchCount, Args},
+aggregate_entry({Id, Exclusive, AckRequired, PrefetchCount,
+                 Active, ActivityStatus, Args},
                 NextStats, Ops0,
                 #state{table = consumer_created} = State) ->
     case ets:lookup(consumer_stats, Id) of
@@ -408,10 +403,28 @@ aggregate_entry({Id, Exclusive, AckRequired, PrefetchCount, Args},
             Fmt = rabbit_mgmt_format:format([{exclusive, Exclusive},
                                              {ack_required, AckRequired},
                                              {prefetch_count, PrefetchCount},
+                                             {active, Active},
+                                             {activity_status, ActivityStatus},
                                              {arguments, Args}], {[], false}),
             Entry = ?consumer_stats(Id, Fmt),
             Ops = insert_with_index_op(consumer_stats, Id, Entry, Ops0),
-            {NextStats, Ops ,State};
+            {NextStats, Ops , State};
+        [{_K, V}] ->
+            CurrentActive = proplists:get_value(active, V, undefined),
+            case Active =:= CurrentActive of
+                false ->
+                    Fmt = rabbit_mgmt_format:format([{exclusive, Exclusive},
+                                                     {ack_required, AckRequired},
+                                                     {prefetch_count, PrefetchCount},
+                                                     {active, Active},
+                                                     {activity_status, ActivityStatus},
+                                                     {arguments, Args}], {[], false}),
+                    Entry = ?consumer_stats(Id, Fmt),
+                    Ops = insert_with_index_op(consumer_stats, Id, Entry, Ops0),
+                    {NextStats, Ops , State};
+                _ ->
+                    {NextStats, Ops0, State}
+            end;
         _ ->
             {NextStats, Ops0, State}
     end;
@@ -514,7 +527,18 @@ aggregate_entry({Id, Metrics}, NextStats, Ops0,
                      Ops0),
     Ops = insert_entry_ops(node_node_coarse_stats, Id, false, Stats, Ops1,
                            GPolicies),
-    {NextStats, Ops, State}.
+    {NextStats, Ops, State};
+aggregate_entry({Id, ConnCreated, ConnClosed, ChCreated, ChClosed,
+                 QueueDeclared, QueueCreated, QueueDeleted}, NextStats, Ops0,
+                #state{table = connection_churn_metrics,
+                       policies = {_, _, GPolicies}} = State) ->
+    %% Id is the local node. There is only one entry on every ETS table.
+    Stats = ?connection_churn_rates(ConnCreated, ConnClosed, ChCreated, ChClosed,
+                                    QueueDeclared, QueueCreated, QueueDeleted),
+    Diff = get_difference(Id, Stats, State),
+    Ops = insert_entry_ops(connection_churn_rates, Id, true, Diff, Ops0,
+                           GPolicies),
+    {insert_old_aggr_stats(NextStats, Id, Stats), Ops, State}.
 
 insert_entry(Table, Id, TS, Entry, Size, Interval0, Incremental) ->
     Key = {Id, Interval0},
@@ -579,8 +603,16 @@ sum_entry({A0, A1}, {B0, B1}) ->
     {B0 + A0, B1 + A1};
 sum_entry({A0, A1, A2}, {B0, B1, B2}) ->
     {B0 + A0, B1 + A1, B2 + A2};
+sum_entry({A0, A1, A2, A3}, {B0, B1, B2, B3}) ->
+    {B0 + A0, B1 + A1, B2 + A2, B3 + A3};
+sum_entry({A0, A1, A2, A3, A4}, {B0, B1, B2, B3, B4}) ->
+    {B0 + A0, B1 + A1, B2 + A2, B3 + A3, B4 + A4};
+sum_entry({A0, A1, A2, A3, A4, A5}, {B0, B1, B2, B3, B4, B5}) ->
+    {B0 + A0, B1 + A1, B2 + A2, B3 + A3, B4 + A4, B5 + A5};
 sum_entry({A0, A1, A2, A3, A4, A5, A6}, {B0, B1, B2, B3, B4, B5, B6}) ->
-    {B0 + A0, B1 + A1, B2 + A2, B3 + A3, B4 + A4, B5 + A5, B6 + A6}.
+    {B0 + A0, B1 + A1, B2 + A2, B3 + A3, B4 + A4, B5 + A5, B6 + A6};
+sum_entry({A0, A1, A2, A3, A4, A5, A6, A7}, {B0, B1, B2, B3, B4, B5, B6, B7}) ->
+    {B0 + A0, B1 + A1, B2 + A2, B3 + A3, B4 + A4, B5 + A5, B6 + A6, B7 + A7}.
 
 difference({A0}, {B0}) ->
     {B0 - A0};
@@ -588,8 +620,16 @@ difference({A0, A1}, {B0, B1}) ->
     {B0 - A0, B1 - A1};
 difference({A0, A1, A2}, {B0, B1, B2}) ->
     {B0 - A0, B1 - A1, B2 - A2};
+difference({A0, A1, A2, A3}, {B0, B1, B2, B3}) ->
+    {B0 - A0, B1 - A1, B2 - A2, B3 - A3};
+difference({A0, A1, A2, A3, A4}, {B0, B1, B2, B3, B4}) ->
+    {B0 - A0, B1 - A1, B2 - A2, B3 - A3, B4 - A4};
+difference({A0, A1, A2, A3, A4, A5}, {B0, B1, B2, B3, B4, B5}) ->
+    {B0 - A0, B1 - A1, B2 - A2, B3 - A3, B4 - A4, B5 - A5};
 difference({A0, A1, A2, A3, A4, A5, A6}, {B0, B1, B2, B3, B4, B5, B6}) ->
-    {B0 - A0, B1 - A1, B2 - A2, B3 - A3, B4 - A4, B5 - A5, B6 - A6}.
+    {B0 - A0, B1 - A1, B2 - A2, B3 - A3, B4 - A4, B5 - A5, B6 - A6};
+difference({A0, A1, A2, A3, A4, A5, A6, A7}, {B0, B1, B2, B3, B4, B5, B6, B7}) ->
+    {B0 - A0, B1 - A1, B2 - A2, B3 - A3, B4 - A4, B5 - A5, B6 - A6, B7 - A7}.
 
 vhost(#resource{virtual_host = VHost}) ->
     VHost;

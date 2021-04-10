@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is Pivotal Software, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_peer_discovery).
@@ -23,21 +14,28 @@
 -export([maybe_init/0, discover_cluster_nodes/0, backend/0, node_type/0,
          normalize/1, format_discovered_nodes/1, log_configured_backend/0,
          register/0, unregister/0, maybe_register/0, maybe_unregister/0,
-         maybe_inject_randomized_delay/0, lock/0, unlock/1]).
--export([append_node_prefix/1, node_prefix/0, retry_timeout/0,
+         maybe_inject_randomized_delay/0, lock/0, unlock/1,
+         discovery_retries/0]).
+-export([append_node_prefix/1, node_prefix/0, locking_retry_timeout/0,
          lock_acquisition_failure_mode/0]).
 
 -define(DEFAULT_BACKEND,   rabbit_peer_discovery_classic_config).
+
 %% what node type is used by default for this node when joining
 %% a new cluster as a virgin node
 -define(DEFAULT_NODE_TYPE, disc).
+
 %% default node prefix to attach to discovered hostnames
 -define(DEFAULT_PREFIX, "rabbit").
+
 %% default randomized delay range, in seconds
 -define(DEFAULT_STARTUP_RANDOMIZED_DELAY, {5, 60}).
 
--define(NODENAME_PART_SEPARATOR, "@").
+%% default discovery retries and interval.
+-define(DEFAULT_DISCOVERY_RETRY_COUNT, 10).
+-define(DEFAULT_DISCOVERY_RETRY_INTERVAL_MS, 500).
 
+-define(NODENAME_PART_SEPARATOR, "@").
 
 -spec backend() -> atom().
 
@@ -61,9 +59,9 @@ node_type() ->
       ?DEFAULT_NODE_TYPE
   end.
 
--spec retry_timeout() -> {Retries :: integer(), Timeout :: integer()}.
+-spec locking_retry_timeout() -> {Retries :: integer(), Timeout :: integer()}.
 
-retry_timeout() ->
+locking_retry_timeout() ->
     case application:get_env(rabbit, cluster_formation) of
         {ok, Proplist} ->
             Retries = proplists:get_value(lock_retry_limit, Proplist, 10),
@@ -90,24 +88,33 @@ log_configured_backend() ->
 
 maybe_init() ->
     Backend = backend(),
+    code:ensure_loaded(Backend),
     case erlang:function_exported(Backend, init, 0) of
         true  ->
-            rabbit_log:debug("Peer discovery backend supports initialisation."),
+            rabbit_log:debug("Peer discovery backend supports initialisation"),
             case Backend:init() of
                 ok ->
-                    rabbit_log:debug("Peer discovery backend initialisation succeeded."),
+                    rabbit_log:debug("Peer discovery backend initialisation succeeded"),
                     ok;
                 {error, Error} ->
                     rabbit_log:warning("Peer discovery backend initialisation failed: ~p.", [Error]),
                     ok
             end;
-        false -> ok
+        false ->
+            rabbit_log:debug("Peer discovery backend does not support initialisation"),
+            ok
     end.
 
 
--spec discover_cluster_nodes() -> {ok, Nodes :: list()} |
-                                  {ok, {Nodes :: list(), NodeType :: rabbit_types:node_type()}} |
-                                  {error, Reason :: string()}.
+%% This module doesn't currently sanity-check the return value of
+%% `Backend:list_nodes()`. Therefore, it could return something invalid:
+%% thus the `{œk, any()} in the spec.
+%%
+%% `rabbit_mnesia:init_from_config()` does some verifications.
+
+-spec discover_cluster_nodes() ->
+    {ok, {Nodes :: [node()], NodeType :: rabbit_types:node_type()} | any()} |
+    {error, Reason :: string()}.
 
 discover_cluster_nodes() ->
     Backend = backend(),
@@ -140,6 +147,18 @@ maybe_unregister() ->
       ok
   end.
 
+-spec discovery_retries() -> {Retries :: integer(), Interval :: integer()}.
+
+discovery_retries() ->
+    case application:get_env(rabbit, cluster_formation) of
+        {ok, Proplist} ->
+            Retries  = proplists:get_value(discovery_retry_limit,    Proplist, ?DEFAULT_DISCOVERY_RETRY_COUNT),
+            Interval = proplists:get_value(discovery_retry_interval, Proplist, ?DEFAULT_DISCOVERY_RETRY_INTERVAL_MS),
+            {Retries, Interval};
+        undefined ->
+            {?DEFAULT_DISCOVERY_RETRY_COUNT, ?DEFAULT_DISCOVERY_RETRY_INTERVAL_MS}
+    end.
+
 
 -spec maybe_inject_randomized_delay() -> ok.
 maybe_inject_randomized_delay() ->
@@ -156,10 +175,7 @@ maybe_inject_randomized_delay() ->
 -spec inject_randomized_delay() -> ok.
 
 inject_randomized_delay() ->
-    {Min, Max} = case randomized_delay_range_in_ms() of
-                     {A, B} -> {A, B};
-                     [A, B] -> {A, B}
-                 end,
+    {Min, Max} = randomized_delay_range_in_ms(),
     case {Min, Max} of
         %% When the max value is set to 0, consider the delay to be disabled.
         %% In addition, `rand:uniform/1` will fail with a "no function clause"
@@ -184,11 +200,16 @@ inject_randomized_delay() ->
 -spec randomized_delay_range_in_ms() -> {integer(), integer()}.
 
 randomized_delay_range_in_ms() ->
+  Backend    = backend(),
+  Default    = case erlang:function_exported(Backend, randomized_startup_delay_range, 0) of
+                   true  -> Backend:randomized_startup_delay_range();
+                   false -> ?DEFAULT_STARTUP_RANDOMIZED_DELAY
+               end,
   {Min, Max} = case application:get_env(rabbit, cluster_formation) of
                    {ok, Proplist} ->
-                       proplists:get_value(randomized_startup_delay_range, Proplist, ?DEFAULT_STARTUP_RANDOMIZED_DELAY);
+                       proplists:get_value(randomized_startup_delay_range, Proplist, Default);
                    undefined      ->
-                       ?DEFAULT_STARTUP_RANDOMIZED_DELAY
+                       Default
                end,
     {Min * 1000, Max * 1000}.
 
@@ -220,7 +241,7 @@ unregister() ->
       ok
   end.
 
--spec lock() -> ok | {ok, Data :: term()} | not_supported | {error, Reason :: string()}.
+-spec lock() -> {ok, Data :: term()} | not_supported | {error, Reason :: string()}.
 
 lock() ->
     Backend = backend(),
@@ -253,12 +274,15 @@ unlock(Data) ->
 %% Implementation
 %%
 
--spec normalize(Nodes :: list() |
-                {Nodes :: list(), NodeType :: rabbit_types:node_type()} |
-                {ok, Nodes :: list()} |
-                {ok, {Nodes :: list(), NodeType :: rabbit_types:node_type()}} |
-                {error, Reason :: string()}) -> {ok, {Nodes :: list(), NodeType :: rabbit_types:node_type()}} |
-                                                {error, Reason :: string()}.
+-spec normalize(Nodes :: [node()] |
+                {Nodes :: [node()],
+                 NodeType :: rabbit_types:node_type()} |
+                {ok, Nodes :: [node()]} |
+                {ok, {Nodes :: [node()],
+                      NodeType :: rabbit_types:node_type()}} |
+                {error, Reason :: string()}) ->
+    {ok, {Nodes :: [node()], NodeType :: rabbit_types:node_type()}} |
+    {error, Reason :: string()}.
 
 normalize(Nodes) when is_list(Nodes) ->
   {ok, {Nodes, disc}};
@@ -291,14 +315,12 @@ node_prefix() ->
 
 
 
--spec append_node_prefix(Value :: binary() | list()) -> atom().
+-spec append_node_prefix(Value :: binary() | string()) -> string().
 
-append_node_prefix(Value) ->
+append_node_prefix(Value) when is_binary(Value) orelse is_list(Value) ->
     Val = rabbit_data_coercion:to_list(Value),
     Hostname = case string:tokens(Val, ?NODENAME_PART_SEPARATOR) of
-                   [_ExistingPrefix, Val] ->
-                       Val;
-                   [Val]                  ->
-                       Val
+                   [_ExistingPrefix, HN] -> HN;
+                   [HN]                  -> HN
                end,
     string:join([node_prefix(), Hostname], ?NODENAME_PART_SEPARATOR).

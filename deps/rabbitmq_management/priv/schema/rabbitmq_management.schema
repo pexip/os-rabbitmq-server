@@ -1,14 +1,14 @@
 %% ----------------------------------------------------------------------------
 %% RabbitMQ Management Plugin
 %%
-%% See http://www.rabbitmq.com/management.html for details
+%% See https://www.rabbitmq.com/management.html for details
 %% ----------------------------------------------------------------------------
 
- % {rabbitmq_management,
-  % [%% Pre-Load schema definitions from the following JSON file. See
-%% http://www.rabbitmq.com/management.html#load-definitions
+%% Load definitions from a JSON file or directory of files. See
+%% https://www.rabbitmq.com/management.html#load-definitions
 %%
 %% {load_definitions, "/path/to/schema.json"},
+%% {load_definitions, "/path/to/schemas"},
 {mapping, "management.load_definitions", "rabbitmq_management.load_definitions",
     [{datatype, string},
      {validators, ["file_accessible"]}]}.
@@ -20,10 +20,118 @@
 {mapping, "management.http_log_dir", "rabbitmq_management.http_log_dir",
     [{datatype, string}]}.
 
+%% HTTP (TCP) listener options ========================================================
 
-%% Change the port on which the HTTP listener listens,
-%% specifying an interface for the web server to bind to.
-%% Also set the listener to use SSL and provide SSL options.
+%% HTTP listener consistent with Web STOMP and Web MQTT.
+%%
+%% {tcp_config, [{port,     15672},
+%%               {ip,       "127.0.0.1"}]}
+
+{mapping, "management.tcp.port", "rabbitmq_management.tcp_config.port",
+    [{datatype, integer}]}.
+{mapping, "management.tcp.ip", "rabbitmq_management.tcp_config.ip",
+    [{datatype, string},
+     {validators, ["is_ip"]}]}.
+
+{mapping, "management.tcp.compress", "rabbitmq_management.tcp_config.cowboy_opts.compress",
+    [{datatype, {enum, [true, false]}}]}.
+{mapping, "management.tcp.idle_timeout", "rabbitmq_management.tcp_config.cowboy_opts.idle_timeout",
+    [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+{mapping, "management.tcp.inactivity_timeout", "rabbitmq_management.tcp_config.cowboy_opts.inactivity_timeout",
+    [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+{mapping, "management.tcp.request_timeout", "rabbitmq_management.tcp_config.cowboy_opts.request_timeout",
+    [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+{mapping, "management.tcp.shutdown_timeout", "rabbitmq_management.tcp_config.cowboy_opts.shutdown_timeout",
+    [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+{mapping, "management.tcp.max_keepalive", "rabbitmq_management.tcp_config.cowboy_opts.max_keepalive",
+    [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+
+
+%% HTTPS (TLS) listener options ========================================================
+
+%% HTTPS listener consistent with Web STOMP and Web MQTT.
+%%
+%% {ssl_config, [{port,       15671},
+%%               {ip,         "127.0.0.1"},
+%%               {cacertfile, "/path/to/cacert.pem"},
+%%               {certfile,   "/path/to/cert.pem"},
+%%               {keyfile,    "/path/to/key.pem"}]}
+
+{mapping, "management.ssl.port", "rabbitmq_management.ssl_config.port",
+    [{datatype, integer}]}.
+{mapping, "management.ssl.backlog", "rabbitmq_management.ssl_config.backlog",
+    [{datatype, integer}]}.
+{mapping, "management.ssl.ip", "rabbitmq_management.ssl_config.ip",
+    [{datatype, string}, {validators, ["is_ip"]}]}.
+{mapping, "management.ssl.certfile", "rabbitmq_management.ssl_config.certfile",
+    [{datatype, string}, {validators, ["file_accessible"]}]}.
+{mapping, "management.ssl.keyfile", "rabbitmq_management.ssl_config.keyfile",
+    [{datatype, string}, {validators, ["file_accessible"]}]}.
+{mapping, "management.ssl.cacertfile", "rabbitmq_management.ssl_config.cacertfile",
+    [{datatype, string}, {validators, ["file_accessible"]}]}.
+{mapping, "management.ssl.password", "rabbitmq_management.ssl_config.password",
+    [{datatype, string}]}.
+
+{mapping, "management.ssl.verify", "rabbitmq_management.ssl_config.verify", [
+    {datatype, {enum, [verify_peer, verify_none]}}]}.
+
+{mapping, "management.ssl.fail_if_no_peer_cert", "rabbitmq_management.ssl_config.fail_if_no_peer_cert", [
+    {datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.ssl.honor_cipher_order", "rabbitmq_management.ssl_config.honor_cipher_order",
+    [{datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.ssl.honor_ecc_order", "rabbitmq_management.ssl_config.honor_ecc_order",
+    [{datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.ssl.reuse_sessions", "rabbitmq_management.ssl_config.reuse_sessions",
+    [{datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.ssl.secure_renegotiate", "rabbitmq_management.ssl_config.secure_renegotiate",
+    [{datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.ssl.client_renegotiation", "rabbitmq_management.ssl_config.client_renegotiation",
+    [{datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.ssl.depth", "rabbitmq_management.ssl_config.depth",
+    [{datatype, integer}, {validators, ["byte"]}]}.
+
+{mapping, "management.ssl.versions.$version", "rabbitmq_management.ssl_config.versions",
+    [{datatype, atom}]}.
+
+{translation, "rabbitmq_management.ssl_config.versions",
+fun(Conf) ->
+    Settings = cuttlefish_variable:filter_by_prefix("management.ssl.versions", Conf),
+    [V || {_, V} <- Settings]
+end}.
+
+{mapping, "management.ssl.ciphers.$cipher", "rabbitmq_management.ssl_config.ciphers",
+    [{datatype, string}]}.
+
+{translation, "rabbitmq_management.ssl_config.ciphers",
+fun(Conf) ->
+    Settings = cuttlefish_variable:filter_by_prefix("management.ssl.ciphers", Conf),
+    lists:reverse([V || {_, V} <- Settings])
+end}.
+
+{mapping, "management.ssl.compress", "rabbitmq_management.ssl_config.cowboy_opts.compress",
+    [{datatype, {enum, [true, false]}}]}.
+{mapping, "management.ssl.idle_timeout", "rabbitmq_management.ssl_config.cowboy_opts.idle_timeout",
+    [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+{mapping, "management.ssl.inactivity_timeout", "rabbitmq_management.ssl_config.cowboy_opts.inactivity_timeout",
+    [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+{mapping, "management.ssl.request_timeout", "rabbitmq_management.ssl_config.cowboy_opts.request_timeout",
+    [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+{mapping, "management.ssl.shutdown_timeout", "rabbitmq_management.ssl_config.cowboy_opts.shutdown_timeout",
+    [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+{mapping, "management.ssl.max_keepalive", "rabbitmq_management.ssl_config.cowboy_opts.max_keepalive",
+    [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+
+
+
+%% Legacy listener options ========================================================
+
+%% Legacy (pre-3.7.9) TCP listener format.
 %%
 %% {listener, [{port,     12345},
 %%             {ip,       "127.0.0.1"},
@@ -41,8 +149,6 @@
 
 {mapping, "management.listener.ssl", "rabbitmq_management.listener.ssl",
     [{datatype, {enum, [true, false]}}]}.
-
-%% Cowboy (HTTP server) options ========================================================
 
 {mapping, "management.listener.server.compress", "rabbitmq_management.listener.cowboy_opts.compress",
     [{datatype, {enum, [true, false]}}]}.
@@ -62,7 +168,7 @@
 {mapping, "management.listener.server.max_keepalive", "rabbitmq_management.listener.cowboy_opts.max_keepalive",
     [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
 
-%% HTTPS (TLS) options ========================================================
+%% Legacy HTTPS listener options ========================================================
 
 {mapping, "management.listener.ssl_opts", "rabbitmq_management.listener.ssl_opts", [
     {datatype, {enum, [none]}}
@@ -97,6 +203,32 @@ fun(Conf) ->
     [ list_to_binary(V) || {_, V} <- Settings ]
 end}.
 
+{mapping, "management.listener.ssl_opts.honor_cipher_order", "rabbitmq_management.listener.ssl_opts.honor_cipher_order",
+    [{datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.listener.ssl_opts.honor_ecc_order", "rabbitmq_management.listener.ssl_opts.honor_ecc_order",
+    [{datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.listener.ssl_opts.reuse_sessions", "rabbitmq_management.listener.ssl_opts.reuse_sessions",
+    [{datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.listener.ssl_opts.secure_renegotiate", "rabbitmq_management.listener.ssl_opts.secure_renegotiate",
+    [{datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.listener.ssl_opts.client_renegotiation", "rabbitmq_management.listener.ssl_opts.client_renegotiation",
+    [{datatype, {enum, [true, false]}}]}.
+
+
+{mapping, "management.listener.ssl_opts.versions.$version", "rabbitmq_management.listener.ssl_opts.versions",
+    [{datatype, atom}]}.
+
+{translation, "rabbitmq_management.listener.ssl_opts.versions",
+fun(Conf) ->
+    Settings = cuttlefish_variable:filter_by_prefix("management.listener.ssl_opts.versions", Conf),
+    [ V || {_, V} <- Settings ]
+end}.
+
+
 {mapping, "management.listener.ssl_opts.cert", "rabbitmq_management.listener.ssl_opts.cert",
     [{datatype, string}]}.
 
@@ -104,9 +236,6 @@ end}.
 fun(Conf) ->
     list_to_binary(cuttlefish:conf_get("management.listener.ssl_opts.cert", Conf))
 end}.
-
-{mapping, "management.listener.ssl_opts.client_renegotiation", "rabbitmq_management.listener.ssl_opts.client_renegotiation",
-    [{datatype, {enum, [true, false]}}]}.
 
 {mapping, "management.listener.ssl_opts.crl_check", "rabbitmq_management.listener.ssl_opts.crl_check",
     [{datatype, [{enum, [true, false, peer, best_effort]}]}]}.
@@ -124,9 +253,6 @@ end}.
 
 {mapping, "management.listener.ssl_opts.dhfile", "rabbitmq_management.listener.ssl_opts.dhfile",
     [{datatype, string}, {validators, ["file_accessible"]}]}.
-
-{mapping, "management.listener.ssl_opts.honor_cipher_order", "rabbitmq_management.listener.ssl_opts.honor_cipher_order",
-    [{datatype, {enum, [true, false]}}]}.
 
 {mapping, "management.listener.ssl_opts.key.RSAPrivateKey", "rabbitmq_management.listener.ssl_opts.key",
     [{datatype, string}]}.
@@ -157,21 +283,6 @@ end}.
 {mapping, "management.listener.ssl_opts.psk_identity", "rabbitmq_management.listener.ssl_opts.psk_identity",
     [{datatype, string}]}.
 
-{mapping, "management.listener.ssl_opts.reuse_sessions", "rabbitmq_management.listener.ssl_opts.reuse_sessions",
-    [{datatype, {enum, [true, false]}}]}.
-
-{mapping, "management.listener.ssl_opts.secure_renegotiate", "rabbitmq_management.listener.ssl_opts.secure_renegotiate",
-    [{datatype, {enum, [true, false]}}]}.
-
-{mapping, "management.listener.ssl_opts.versions.$version", "rabbitmq_management.listener.ssl_opts.versions",
-    [{datatype, atom}]}.
-
-{translation, "rabbitmq_management.listener.ssl_opts.versions",
-fun(Conf) ->
-    Settings = cuttlefish_variable:filter_by_prefix("management.listener.ssl_opts.versions", Conf),
-    [ V || {_, V} <- Settings ]
-end}.
-
 
 %% A custom path prefix for all HTTP request handlers.
 %%
@@ -186,7 +297,18 @@ end}.
     {datatype, integer}, {validators, ["non_negative_integer"]}
 ]}.
 
+%%
+%% Inter-node query result caching
+%%
+
+{mapping, "management.db_cache_multiplier", "rabbitmq_management.management_db_cache_multiplier", [
+    {datatype, integer}, {validators, ["non_negative_integer"]}
+]}.
+
+
+%%
 %% CORS
+%%
 
 {mapping, "management.cors.allow_origins", "rabbitmq_management.cors_allow_origins", [
     {datatype, {enum, [none]}}
@@ -220,19 +342,73 @@ fun(Conf) ->
 end}.
 
 
+%% CSP (https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP)
+
+{mapping, "management.csp.policy", "rabbitmq_management.content_security_policy", [
+    {datatype, string}
+]}.
+
+{translation, "rabbitmq_management.content_security_policy",
+fun(Conf) ->
+    case cuttlefish:conf_get("management.csp.policy", Conf, undefined) of
+        undefined -> cuttlefish:unset();
+        Value     -> Value
+    end
+end}.
+
+
+%% HSTS (https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security)
+
+{mapping, "management.hsts.policy", "rabbitmq_management.strict_transport_security", [
+    {datatype, string}
+]}.
+
+{translation, "rabbitmq_management.strict_transport_security",
+fun(Conf) ->
+    case cuttlefish:conf_get("management.hsts.policy", Conf, undefined) of
+        undefined -> cuttlefish:unset();
+        Value     -> Value
+    end
+end}.
+
+%% OAuth 2/SSO access only
+
+{mapping, "management.disable_basic_auth", "rabbitmq_management.disable_basic_auth",
+    [{datatype, {enum, [true, false]}}]}.
+
+%% Management only
+
+{mapping, "management.disable_stats", "rabbitmq_management.disable_management_stats", [
+    {datatype, {enum, [true, false]}}
+]}.
+
+{mapping, "management.enable_queue_totals", "rabbitmq_management.enable_queue_totals", [
+    {datatype, {enum, [true, false]}}]}.
+
+%% ===========================================================================
+%% Authorization
+
+{mapping, "management.enable_uaa", "rabbitmq_management.enable_uaa",
+    [{datatype, {enum, [true, false]}}]}.
+
+{mapping, "management.uaa_client_id", "rabbitmq_management.uaa_client_id",
+    [{datatype, string}]}.
+
+{mapping, "management.uaa_location", "rabbitmq_management.uaa_location",
+    [{datatype, string}]}.
 
 %% ===========================================================================
 
 
 %% One of 'basic', 'detailed' or 'none'. See
-%% http://www.rabbitmq.com/management.html#fine-stats for more details.
+%% https://www.rabbitmq.com/management.html#fine-stats for more details.
 %% {rates_mode, basic},
 {mapping, "management.rates_mode", "rabbitmq_management.rates_mode",
     [{datatype, {enum, [basic, detailed, none]}}]}.
 
 %% Configure how long aggregated data (such as message rates and queue
 %% lengths) is retained. Please read the plugin's documentation in
-%% http://www.rabbitmq.com/management.html#configuration for more
+%% https://www.rabbitmq.com/management.html#configuration for more
 %% details.
 %%
 %% {sample_retention_policies,

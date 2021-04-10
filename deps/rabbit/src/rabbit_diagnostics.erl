@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_diagnostics).
@@ -94,9 +85,12 @@ top_binary_refs(Count) ->
     io:format("~s ~p~n", [get_time(), Sorted]).
 
 binary_refs(Pid) ->
-    {binary, Refs} = info(Pid, binary, []),
-    lists:sum([Sz || {_Ptr, Sz} <- lists:usort([{Ptr, Sz} ||
-                                                   {Ptr, Sz, _Cnt} <- Refs])]).
+    case info(Pid, binary, []) of
+        {binary, Refs} ->
+            lists:sum([Sz || {_Ptr, Sz} <- lists:usort([{Ptr, Sz} ||
+                                                           {Ptr, Sz, _Cnt} <- Refs])]);
+        _ -> 0
+    end.
 
 info(Pid) ->
     [{pid, Pid} | info(Pid, ?PROCESS_INFO, [])].
@@ -113,12 +107,12 @@ info(Pid, Infos, Default) ->
 
 get_time() ->
     {{Y,M,D}, {H,Min,Sec}} = calendar:local_time(),
-    [ integer_to_list(Y), "-", 
-      prefix_zero(integer_to_list(M)), "-", 
+    [ integer_to_list(Y), "-",
+      prefix_zero(integer_to_list(M)), "-",
       prefix_zero(integer_to_list(D)), " ",
-      prefix_zero(integer_to_list(H)), ":", 
-      prefix_zero(integer_to_list(Min)), ":", 
-      prefix_zero(integer_to_list(Sec)) 
+      prefix_zero(integer_to_list(H)), ":",
+      prefix_zero(integer_to_list(Min)), ":",
+      prefix_zero(integer_to_list(Sec))
       ].
 
 prefix_zero([C]) -> [$0, C];

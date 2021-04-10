@@ -1,17 +1,8 @@
-%%  The contents of this file are subject to the Mozilla Public License
-%%  Version 1.1 (the "License"); you may not use this file except in
-%%  compliance with the License. You may obtain a copy of the License
-%%  at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Software distributed under the License is distributed on an "AS IS"
-%%  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%  the License for the specific language governing rights and
-%%  limitations under the License.
-%%
-%%  The Original Code is RabbitMQ.
-%%
-%%  The Initial Developer of the Original Code is VMware, Inc.
-%%  Copyright (c) 2007-2011 VMware, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_top_worker).
@@ -113,22 +104,29 @@ reductions(Props) ->
     R.
 
 ets_tables(_OldTables) ->
-    lists:filtermap(
-        fun(Table) ->
-            case table_info(Table) of
-                undefined -> false;
-                Info      -> {true, Info}
-            end
+    F = fun
+            (Table) ->
+                case table_info(Table) of
+                    undefined -> false;
+                    Info      -> {true, Info}
+                end
         end,
-        ets:all()).
+    lists:filtermap(F, ets:all()).
 
-table_info(Table) when not is_atom(Table) -> undefined;
-table_info(TableName) when is_atom(TableName) ->
-    Info = lists:map(fun
-                        ({memory, MemWords}) -> {memory, bytes(MemWords)};
-                        (Other) -> Other
-                     end,
-                     ets:info(TableName)),
+table_info(Table) ->
+    TableInfo = ets:info(Table),
+    map_table_info(Table, TableInfo).
+
+map_table_info(_Table, undefined) ->
+    undefined;
+map_table_info(_Table, TableInfo) ->
+    F = fun
+            ({memory, MemWords}) ->
+                {memory, bytes(MemWords)};
+            (Other) ->
+                Other
+        end,
+    Info = lists:map(F, TableInfo),
     {owner, OwnerPid} = lists:keyfind(owner, 1, Info),
     case process_info(OwnerPid, registered_name) of
         []                           -> Info;

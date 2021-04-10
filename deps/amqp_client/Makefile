@@ -6,21 +6,18 @@ PROJECT_REGISTERED = amqp_sup
 define PROJECT_ENV
 [
 	    {prefer_ipv6, false},
-	    {ssl_options, []}
+	    {ssl_options, []},
+	    {writer_gc_threshold, 1000000000}
 	  ]
 endef
 
 define PROJECT_APP_EXTRA_KEYS
 %% Hex.pm package informations.
-	{maintainers, [
-	    "RabbitMQ Team <info@rabbitmq.com>",
-	    "Jean-Sebastien Pedron <jean-sebastien@rabbitmq.com>"
-	  ]},
-	{licenses, ["MPL 1.1"]},
+	{licenses, ["MPL 2.0"]},
 	{links, [
-	    {"Website", "http://www.rabbitmq.com/"},
+	    {"Website", "https://www.rabbitmq.com/"},
 	    {"GitHub", "https://github.com/rabbitmq/rabbitmq-erlang-client"},
-	    {"User guide", "http://www.rabbitmq.com/erlang-client-user-guide.html"}
+	    {"User guide", "https://www.rabbitmq.com/erlang-client-user-guide.html"}
 	  ]},
 	{build_tools, ["make", "rebar3"]},
 	{files, [
@@ -42,6 +39,8 @@ DEP_PLUGINS = rabbit_common/mk/rabbitmq-build.mk \
 	      rabbit_common/mk/rabbitmq-run.mk \
 	      rabbit_common/mk/rabbitmq-test.mk \
 	      rabbit_common/mk/rabbitmq-tools.mk
+
+PLT_APPS = ssl public_key
 
 # FIXME: Use erlang.mk patched for RabbitMQ, while waiting for PRs to be
 # reviewed and merged.

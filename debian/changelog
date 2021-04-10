@@ -1,3 +1,99 @@
+rabbitmq-server (3.8.9-3) unstable; urgency=medium
+
+  [ Adam Cecile ]
+  * Merge upstream PR #2965 fixing rabbitmqctl parsing bug. (Closes: #986734)
+
+ -- Thomas Goirand <zigo@debian.org>  Sat, 10 Apr 2021 22:59:57 +0200
+
+rabbitmq-server (3.8.9-2) unstable; urgency=medium
+
+  * Do not use the /usr/sbin/rabbitmq-server wrapper in systemd service file
+    (Closes: #947873).
+  * Use logrotate daily instead of weekly, and do not override the number of
+    logs, so we don't keep too much of them.
+  * Do not use a sharedscripts, as rabbitmq-server detects the log rotation
+    by itself (LP: #1921425).
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 26 Mar 2021 14:24:52 +0100
+
+rabbitmq-server (3.8.9-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Rebased lets-use-python3-not-python-binary.patch.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 01 Oct 2020 09:30:46 +0200
+
+rabbitmq-server (3.8.5-1) unstable; urgency=medium
+
+  * New upstream release:
+    - Ships new version of the Prometheus plugin that works with Erlang
+      version 23 (Closes: #964038).
+  * Re-add debian/gbp.conf as the package is using pristine-tar.
+  * Rebased lets-use-python3-not-python-binary.patch.
+  * Add rabbitmq-dist.mk.patch to fix build with make 4.3 (Closes: #964636).
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 10 Jul 2020 12:57:57 +0200
+
+rabbitmq-server (3.8.3-1) unstable; urgency=medium
+
+  [ Ondřej Nový ]
+  * Remove gbp.conf, not used anymore or should be specified in the
+    developers dotfiles.
+
+  [ Thomas Goirand ]
+  * Resolve issues with startup of RabbitMQ with erlang provided
+    epmd daemon. See Ubuntu bug:
+    https://bugs.launchpad.net/ubuntu/+source/rabbitmq-server/+bug/1808766
+
+  [ James Page ]
+  * Merge changes from Ubuntu.
+  * New upstream release (3.8.2):
+    - d/rules: Install new scripts.
+  * d/rules: Drop --parallel usage, no longer needed.
+  * d/control: Bump minimum erlang version inline with upstream
+    requirements.
+
+  [ Nicolas Bock ]
+  * New upstream release (3.8.3).
+  * d/watch: Fix watch file to download from GitHub
+  * Fix timeout discrepancy between SysV and systemd (LP: #1874075)
+    upstream, rabbitmq-server-release - 694540270c8
+    - d/rabbitmq-server.init: Add RABBITMQ_STARTUP_TIMEOUT and default
+      to 600.
+    - d/rabbitmq-server.service: Default TimeoutStartSec to 600
+
+  [ James Page ]
+  * d/rules: Drop use of --with=systemd as its no longer needed.
+  * d/rabbitmq-server.postinst,rabbitmq-server.postrm: Drop execute
+    permission - debhelper deals with this as part of package build.
+  * d/missing-sources: Add missing un-minified sources files for JS
+    assets.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 14 May 2020 12:02:04 +0100
+
+rabbitmq-server (3.7.18-1) unstable; urgency=medium
+
+  * New upstream release.
+    - Can be built with Elixir 1.9.x (Closes: #939881).
+  * Re-add debian/gbp.conf, as this package must use pristine-tar.
+  * Fix display of version when doing rabbitmqadmin --version. Used a different
+    way from proposed patch which isn't invasive (Closes: #908690).
+  * Using python3 as binary, not python (Closes: #883192).
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 23 Sep 2019 10:05:48 +0200
+
+rabbitmq-server (3.7.8-5) unstable; urgency=medium
+
+  [ Ondřej Nový ]
+  * Removing gbp.conf, not used anymore or should be specified in the
+    developers dotfiles.
+  * Use debhelper-compat instead of debian/compat.
+
+  [ Thomas Goirand ]
+  * Also package rabbitmq-diagnostics.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 17 Jun 2019 22:59:25 +0200
+
 rabbitmq-server (3.7.8-4) unstable; urgency=medium
 
   * Remove Elixir version patch.

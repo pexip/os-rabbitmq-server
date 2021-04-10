@@ -54,8 +54,8 @@ We review PRs and issues at least once a month as described below.
 OTP Support Policy
 ------------------
 The lager maintainers intend to support the past three OTP releases from
-current on the main 3.x branch of the project. As of July 2017 that includes 
-20, 19, and 18. 
+current on the main 3.x branch of the project. As of December 2018 that includes
+21, 20, 19.
 
 Lager may or may not run on older OTP releases but it will only be guaranteed
 tested on the previous three OTP releases. If you need a version of lager
@@ -294,6 +294,14 @@ the lager application variable `error_logger_redirect` to `false`.
 You can also disable reformatting for OTP and Cowboy messages by setting variable
 `error_logger_format_raw` to `true`.
 
+If you installed your own handler(s) into `error_logger`, you can tell
+lager to leave it alone by using the `error_logger_whitelist` environment
+variable with a list of handlers to allow.
+
+```
+{error_logger_whitelist, [my_handler]}
+```
+
 The `error_logger` handler will also log more complete error messages (protected
 with use of `trunc_io`) to a "crash log" which can be referred to for further
 information. The location of the crash log can be specified by the `crash_log`
@@ -360,9 +368,9 @@ It is probably best to keep this number small.
 
 When the high-water mark is exceeded, lager can be configured to flush all
 event notifications in the message queue. This can have unintended consequences
-for other handlers in the same event manager (in e.g. the `error_logger'), as
+for other handlers in the same event manager (in e.g. the `error_logger`), as
 events they rely on may be wrongly discarded. By default, this behavior is enabled,
-but can be controlled, for the `error_logger' via:
+but can be controlled, for the `error_logger` via:
 
 ```erlang
 {error_logger_flush_queue, true | false}
@@ -372,6 +380,7 @@ or for a specific sink, using the option:
 
 ```erlang
 {flush_queue, true | false}
+```
 
 If `flush_queue` is true, a message queue length threshold can be set, at which
 messages will start being discarded. The default threshold is `0`, meaning that
@@ -592,6 +601,7 @@ on your favorite search engine is a good starting point.
 
 Exception Pretty Printing
 ----------------------
+Up to OTP 20:
 
 ```erlang
 try
@@ -601,6 +611,19 @@ catch
         lager:error(
             "~nStacktrace:~s",
             [lager:pr_stacktrace(erlang:get_stacktrace(), {Class, Reason})])
+end.
+```
+
+On OTP 21+:
+
+```erlang
+try
+    foo()
+catch
+    Class:Reason:Stacktrace ->
+        lager:error(
+            "~nStacktrace:~s",
+            [lager:pr_stacktrace(Stacktrace, {Class, Reason})])
 end.
 ```
 
@@ -934,8 +957,6 @@ will be impacted by what the functions you call do and how much latency they
 may introduce. This impact will even greater with `on_log` since the calls
 are injected at the point a message is logged.
 
-
-
 Setting the truncation limit at compile-time
 --------------------------------------------
 Lager defaults to truncating messages at 4096 bytes, you can alter this by
@@ -961,6 +982,71 @@ level of your application, you can use these configs to turn it off:
 {lager, [{suppress_application_start_stop, true},
          {suppress_supervisor_start_stop, true}]}
 ```
+
+Sys debug functions
+--------------------
+
+Lager provides an integrated way to use sys 'debug functions'. You can install a debug
+function in a target process by doing
+
+```erlang
+lager:install_trace(Pid, notice).
+```
+
+You can also customize the tracing somewhat:
+
+```erlang
+lager:install_trace(Pid, notice, [{count, 100}, {timeout, 5000}, {format_string, "my trace event ~p ~p"]}).
+```
+
+The trace options are currently:
+
+* timeout - how long the trace stays installed: `infinity` (the default) or a millisecond timeout
+* count - how many trace events to log: `infinity` (default) or a positive number
+* format_string - the format string to log the event with. *Must* have 2 format specifiers for the 2 parameters supplied.
+
+This will, on every 'system event' for an OTP process (usually inbound messages, replies
+and state changes) generate a lager message at the specified log level.
+
+You can remove the trace when you're done by doing:
+
+```erlang
+lager:remove_trace(Pid).
+```
+
+If you want to start an OTP process with tracing enabled from the very beginning, you can do something like this:
+
+```erlang
+gen_server:start_link(mymodule, [], [{debug, [{install, {fun lager:trace_func/3, lager:trace_state(undefined, notice, [])}}]}]).
+```
+
+The third argument to the trace_state function is the Option list documented above.
+
+Console output to another group leader process
+----------------------------------------------
+
+If you want to send your console output to another group_leader (typically on
+another node) you can provide a `{group_leader, Pid}` argument to the console
+backend. This can be combined with another console config option, `id` and
+gen_event's `{Module, ID}` to allow remote tracing of a node to standard out via
+nodetool:
+
+```erlang
+    GL = erlang:group_leader(),
+    Node = node(GL),
+    lager_app:start_handler(lager_event, {lager_console_backend, Node},
+         [{group_leader, GL}, {level, none}, {id, {lager_console_backend, Node}}]),
+    case lager:trace({lager_console_backend, Node}, Filter, Level) of
+         ...
+```
+
+In the above example, the code is assumed to be running via a `nodetool rpc`
+invocation so that the code is executing on the Erlang node, but the
+group_leader is that of the reltool node (eg. appname_maint_12345@127.0.0.1).
+
+If you intend to use tracing with this feature, make sure the second parameter
+to start_handler and the `id` parameter match. Thus when the custom group_leader
+process exits, lager will remove any associated traces for that handler.
 
 Elixir Support
 --------------
@@ -1054,6 +1140,66 @@ Example Usage:
 
 3.x Changelog
 -------------
+
+3.8.0 - 9 August 2019
+
+    * Breaking API change: Modify the `lager_rotator_behaviour` to pass in a
+      file's creation time to `ensure_logfile/5` to be used to determine if
+      file has changed on systems where inodes are not available (i.e.
+      `win32`). The return value from `create_logfile/2`, `open_logfile/2` and
+      `ensure_logfile/5` now requires ctime to be returned (#509)
+    * Bugfix: ensure log file rotation works on `win32` (#509)
+    * Bugfix: ensure test suite passes on `win32` (#509)
+    * Bugfix: ensure file paths with Unicode are formatted properly (#510)
+
+3.7.0 - 24 May 2019
+
+    * Policy: Officially ending support for OTP 19 (Support OTP 20, 21, 22)
+    * Cleanup: Fix all dialyzer errors
+    * Bugfix: Minor changes to FSM/statem exits in OTP 22.
+
+3.6.10 - 30 April 2019
+
+    * Documentation: Fix pr_stacktrace invocation example (#494)
+    * Bugfix: Do not count suppressed messages for message drop counts (#499)
+
+3.6.9 - 13 March 2019
+
+    * Bugfix: Fix file rotation on windows (#493)
+
+3.6.8 - 21 December 2018
+
+    * Documentation: Document the error_logger_whitelist environment variable. (#489)
+    * Bugfix: Remove the built in handler inside of OTP 21 `logger` system. (#488)
+    * Bugfix: Cleanup unneeded check for is_map (#486)
+    * Bugfix: Cleanup ranch errors treated as cowboy errors (#485)
+    * Testing: Remove OTP 18 from TravisCI testing matrix
+
+3.6.7 - 14 October 2018
+
+    * Bugfix: fix tracing to work with OTP21 #480
+
+3.6.6 - 24 September 2018
+
+    * Bugfix: When printing records, handle an improper list correctly. #478
+    * Bugfix: Fix various tests and make some rotation code more explicit. #476
+    * Bugfix: Make sure not to miscount messages during high-water mark check. #475
+
+3.6.5 - 3 September 2018
+
+    * Feature: Allow the console backend to redirect output to a remote node #469
+    * Feature: is_loggble - support for severity as atom #472
+    * Bugfix: Prevent silent dropping of messages when hwm is exceeded #467
+    * Bugfix: rotation - default log file not deleted #474
+    * Bugfix: Handle strange crash report from gen_statem #473
+    * Documentation: Various markup fixes: #468 #470
+
+3.6.4 - 11 July 2018
+
+    * Bugfix: Reinstall handlers after a sink is killed #459
+    * Bugfix: Fix platform_define matching not to break on OSX Mojave #461
+    * Feature: Add support for installing a sys trace function #462
+
 3.6.3 - 6 June 2018
 
     * OTP 21 support

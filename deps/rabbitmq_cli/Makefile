@@ -1,6 +1,9 @@
 PROJECT = rabbitmq_cli
 
+dep_observer_cli = git https://github.com/zhongwencool/observer_cli 1.4.4
+
 BUILD_DEPS = rabbit_common
+DEPS = observer_cli
 TEST_DEPS = amqp_client rabbit
 
 DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
@@ -13,6 +16,12 @@ MIX_TEST = mix test --trace
 else
 MIX_TEST = mix test --max-cases=1
 endif
+
+# FIXME: Use erlang.mk patched for RabbitMQ, while waiting for PRs to be
+# reviewed and merged.
+
+ERLANG_MK_REPO = https://github.com/rabbitmq/erlang.mk.git
+ERLANG_MK_COMMIT = rabbitmq-tmp
 
 WITHOUT = plugins/cover \
 	  plugins/ct \
@@ -29,22 +38,20 @@ include erlang.mk
 # rabbitmq_cli to build offline, using the bundled sources only.
 -include rabbitmq-mix.mk
 
-# FIXME: Use erlang.mk patched for RabbitMQ, while waiting for PRs to be
-# reviewed and merged.
-
-ERLANG_MK_REPO = https://github.com/rabbitmq/erlang.mk.git
-ERLANG_MK_COMMIT = rabbitmq-tmp
-
 ACTUAL_ESCRIPTS = escript/rabbitmqctl
 LINKED_ESCRIPTS = escript/rabbitmq-plugins \
-		  escript/rabbitmq-diagnostics
+		  escript/rabbitmq-diagnostics \
+		  escript/rabbitmq-queues \
+                  escript/rabbitmq-upgrade
 ESCRIPTS = $(ACTUAL_ESCRIPTS) $(LINKED_ESCRIPTS)
 
 # Record the build and link dependency: the target files are linked to
 # their first dependency.
 rabbitmq-plugins = escript/rabbitmqctl
 rabbitmq-diagnostics = escript/rabbitmqctl
-escript/rabbitmq-plugins escript/rabbitmq-diagnostics: escript/rabbitmqctl
+rabbitmq-queues = escript/rabbitmqctl
+rabbitmq-upgrade = escript/rabbitmqctl
+escript/rabbitmq-plugins escript/rabbitmq-diagnostics escript/rabbitmq-queues escript/rabbitmq-upgrade: escript/rabbitmqctl
 
 # We use hardlinks or symlinks in the `escript` directory and
 # install's PREFIX when a single escript can have several names (eg.
@@ -61,9 +68,9 @@ escript/rabbitmq-plugins escript/rabbitmq-diagnostics: escript/rabbitmqctl
 # the source was previously copied in that directory.
 
 ifdef USE_SYMLINKS_IN_ESCRIPTS_DIR
-link_escript = ln -s "$(notdir $(1))" "$(2)"
+link_escript = ln -sf "$(notdir $(1))" "$(2)"
 else
-link_escript = ln "$(dir $(2))$(notdir $(1))" "$(2)"
+link_escript = ln -f "$(dir $(2))$(notdir $(1))" "$(2)"
 endif
 
 app:: $(ESCRIPTS)
@@ -106,11 +113,13 @@ rel:: $(ESCRIPTS)
 tests:: $(ESCRIPTS)
 	$(gen_verbose) $(MIX_TEST) $(TEST_FILE)
 
+.PHONY: test
+
 test:: $(ESCRIPTS)
 ifdef TEST_FILE
 	$(gen_verbose) $(MIX_TEST) $(TEST_FILE)
 else
-	$(verbose) echo "TEST_FILE must be set, e.g. TEST_FILE=./test/close_all_connections_command_test.exs" 1>&2; false
+	$(verbose) echo "TEST_FILE must be set, e.g. TEST_FILE=./test/ctl" 1>&2; false
 endif
 
 dialyzer:: $(ESCRIPTS)
@@ -121,10 +130,9 @@ dialyzer:: $(ESCRIPTS)
 install: $(ESCRIPTS)
 ifdef PREFIX
 	$(gen_verbose) mkdir -p "$(DESTDIR)$(PREFIX)"
-	$(verbose) $(foreach script,$(ESCRIPTS), \
-		rm -f "$(DESTDIR)$(PREFIX)/$(notdir $(script))";)
 	$(verbose) $(foreach script,$(ACTUAL_ESCRIPTS), \
-		cp "$(script)" "$(DESTDIR)$(PREFIX)";)
+		cmp -s "$(script)" "$(DESTDIR)$(PREFIX)/$(notdir $(script))" || \
+		cp "$(script)" "$(DESTDIR)$(PREFIX)/$(notdir $(script))";)
 	$(verbose) $(foreach script,$(LINKED_ESCRIPTS), \
 		$(call link_escript,$($(notdir $(script))),$(DESTDIR)$(PREFIX)/$(notdir $(script)));)
 else
@@ -137,5 +145,8 @@ clean-mix:
 	$(gen_verbose) rm -f $(ESCRIPTS)
 	$(verbose) echo y | mix clean
 
+format:
+	$(verbose) mix format lib/**/*.ex
+
 repl:
-	$(verbose) iex -S mix
+	$(verbose) iex --sname repl -S mix

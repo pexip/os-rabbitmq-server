@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_queue_index).
@@ -258,46 +249,20 @@
                                {rabbit_types:msg_id(), non_neg_integer(), A}).
 -type shutdown_terms() :: [term()] | 'non_clean_shutdown'.
 
--spec erase(rabbit_amqqueue:name()) -> 'ok'.
--spec reset_state(qistate()) -> qistate().
--spec init(rabbit_amqqueue:name(),
-                 on_sync_fun(), on_sync_fun()) -> qistate().
--spec recover(rabbit_amqqueue:name(), shutdown_terms(), boolean(),
-                    contains_predicate(),
-                    on_sync_fun(), on_sync_fun()) ->
-                        {'undefined' | non_neg_integer(),
-                         'undefined' | non_neg_integer(), qistate()}.
--spec terminate(rabbit_types:vhost(), [any()], qistate()) -> qistate().
--spec delete_and_terminate(qistate()) -> qistate().
--spec publish(rabbit_types:msg_id(), seq_id(),
-                    rabbit_types:message_properties(), boolean(),
-                    non_neg_integer(), qistate()) -> qistate().
--spec deliver([seq_id()], qistate()) -> qistate().
--spec ack([seq_id()], qistate()) -> qistate().
--spec sync(qistate()) -> qistate().
--spec needs_sync(qistate()) -> 'confirms' | 'other' | 'false'.
--spec flush(qistate()) -> qistate().
--spec read(seq_id(), seq_id(), qistate()) ->
-                     {[{rabbit_types:msg_id(), seq_id(),
-                        rabbit_types:message_properties(),
-                        boolean(), boolean()}], qistate()}.
--spec next_segment_boundary(seq_id()) -> seq_id().
--spec bounds(qistate()) ->
-                       {non_neg_integer(), non_neg_integer(), qistate()}.
--spec start(rabbit_types:vhost(), [rabbit_amqqueue:name()]) -> {[[any()]], {walker(A), A}}.
-
--spec add_queue_ttl() -> 'ok'.
-
-
 %%----------------------------------------------------------------------------
 %% public API
 %%----------------------------------------------------------------------------
+
+-spec erase(rabbit_amqqueue:name()) -> 'ok'.
 
 erase(Name) ->
     #qistate { dir = Dir } = blank_state(Name),
     erase_index_dir(Dir).
 
 %% used during variable queue purge when there are no pending acks
+
+-spec reset_state(qistate()) -> qistate().
+
 reset_state(#qistate{ queue_name     = Name,
                       dir            = Dir,
                       on_sync        = OnSyncFun,
@@ -310,11 +275,20 @@ reset_state(#qistate{ queue_name     = Name,
     ok = erase_index_dir(Dir),
     blank_state_name_dir_funs(Name, Dir, OnSyncFun, OnSyncMsgFun).
 
+-spec init(rabbit_amqqueue:name(),
+                 on_sync_fun(), on_sync_fun()) -> qistate().
+
 init(Name, OnSyncFun, OnSyncMsgFun) ->
     State = #qistate { dir = Dir } = blank_state(Name),
     false = rabbit_file:is_file(Dir), %% is_file == is file or dir
     State#qistate{on_sync     = OnSyncFun,
                   on_sync_msg = OnSyncMsgFun}.
+
+-spec recover(rabbit_amqqueue:name(), shutdown_terms(), boolean(),
+                    contains_predicate(),
+                    on_sync_fun(), on_sync_fun()) ->
+                        {'undefined' | non_neg_integer(),
+                         'undefined' | non_neg_integer(), qistate()}.
 
 recover(Name, Terms, MsgStoreRecovered, ContainsCheckFun,
         OnSyncFun, OnSyncMsgFun) ->
@@ -328,11 +302,15 @@ recover(Name, Terms, MsgStoreRecovered, ContainsCheckFun,
         false -> init_dirty(CleanShutdown, ContainsCheckFun, State1)
     end.
 
+-spec terminate(rabbit_types:vhost(), [any()], qistate()) -> qistate().
+
 terminate(VHost, Terms, State = #qistate { dir = Dir }) ->
     {SegmentCounts, State1} = terminate(State),
     rabbit_recovery_terms:store(VHost, filename:basename(Dir),
                                 [{segments, SegmentCounts} | Terms]),
     State1.
+
+-spec delete_and_terminate(qistate()) -> qistate().
 
 delete_and_terminate(State) ->
     {_SegmentCounts, State1 = #qistate { dir = Dir }} = terminate(State),
@@ -352,7 +330,7 @@ pre_publish(MsgOrId, SeqId, MsgProps, IsPersistent, IsDelivered, JournalSizeHint
                 false -> ?PUB_TRANS_JPREFIX
             end):?JPREFIX_BITS,
            SeqId:?SEQ_BITS, Bin/binary,
-           (size(MsgBin)):?EMBEDDED_SIZE_BITS>>, MsgBin], PPC],
+           (size(MsgBin)):?EMBEDDED_SIZE_BITS>>, MsgBin] | PPC],
 
     DC1 =
         case IsDelivered of
@@ -362,13 +340,13 @@ pre_publish(MsgOrId, SeqId, MsgProps, IsPersistent, IsDelivered, JournalSizeHint
                 DC
         end,
 
-    add_to_journal(SeqId, {IsPersistent, Bin, MsgBin},
-                   maybe_flush_pre_publish_cache(
+    State2 = add_to_journal(SeqId, {IsPersistent, Bin, MsgBin}, State1),
+    maybe_flush_pre_publish_cache(
                      JournalSizeHint,
-                     State1#qistate{pre_publish_cache = PPC1,
-                                    delivered_cache   = DC1})).
+                     State2#qistate{pre_publish_cache = PPC1,
+                                    delivered_cache   = DC1}).
 
-%% pre_publish_cache is the entry with most elements when comapred to
+%% pre_publish_cache is the entry with most elements when compared to
 %% delivered_cache so we only check the former in the guard.
 maybe_flush_pre_publish_cache(JournalSizeHint,
                               #qistate{pre_publish_cache = PPC} = State)
@@ -395,6 +373,10 @@ flush_delivered_cache(#qistate{delivered_cache = []} = State) ->
 flush_delivered_cache(State = #qistate{delivered_cache = DC}) ->
     State1 = deliver(lists:reverse(DC), State),
     State1#qistate{delivered_cache = []}.
+
+-spec publish(rabbit_types:msg_id(), seq_id(),
+                    rabbit_types:message_properties(), boolean(),
+                    non_neg_integer(), qistate()) -> qistate().
 
 publish(MsgOrId, SeqId, MsgProps, IsPersistent, JournalSizeHint, State) ->
     {JournalHdl, State1} =
@@ -429,19 +411,28 @@ maybe_needs_confirming(MsgProps, MsgOrId,
       {false, _}     -> State
     end.
 
+-spec deliver([seq_id()], qistate()) -> qistate().
+
 deliver(SeqIds, State) ->
     deliver_or_ack(del, SeqIds, State).
+
+-spec ack([seq_id()], qistate()) -> qistate().
 
 ack(SeqIds, State) ->
     deliver_or_ack(ack, SeqIds, State).
 
 %% This is called when there are outstanding confirms or when the
 %% queue is idle and the journal needs syncing (see needs_sync/1).
+
+-spec sync(qistate()) -> qistate().
+
 sync(State = #qistate { journal_handle = undefined }) ->
     State;
 sync(State = #qistate { journal_handle = JournalHdl }) ->
     ok = file_handle_cache:sync(JournalHdl),
     notify_sync(State).
+
+-spec needs_sync(qistate()) -> 'confirms' | 'other' | 'false'.
 
 needs_sync(#qistate{journal_handle = undefined}) ->
     false;
@@ -456,8 +447,15 @@ needs_sync(#qistate{journal_handle  = JournalHdl,
         false -> confirms
     end.
 
+-spec flush(qistate()) -> qistate().
+
 flush(State = #qistate { dirty_count = 0 }) -> State;
 flush(State)                                -> flush_journal(State).
+
+-spec read(seq_id(), seq_id(), qistate()) ->
+                     {[{rabbit_types:msg_id(), seq_id(),
+                        rabbit_types:message_properties(),
+                        boolean(), boolean()}], qistate()}.
 
 read(StartEnd, StartEnd, State) ->
     {[], State};
@@ -472,9 +470,14 @@ read(Start, End, State = #qistate { segments = Segments,
                     end, {[], Segments}, lists:seq(StartSeg, EndSeg)),
     {Messages, State #qistate { segments = Segments1 }}.
 
+-spec next_segment_boundary(seq_id()) -> seq_id().
+
 next_segment_boundary(SeqId) ->
     {Seg, _RelSeq} = seq_id_to_seg_and_rel_seq_id(SeqId),
     reconstruct_seq_id(Seg + 1, 0).
+
+-spec bounds(qistate()) ->
+                       {non_neg_integer(), non_neg_integer(), qistate()}.
 
 bounds(State = #qistate { segments = Segments }) ->
     %% This is not particularly efficient, but only gets invoked on
@@ -497,6 +500,8 @@ bounds(State = #qistate { segments = Segments }) ->
                            reconstruct_seq_id(1 + lists:last(SegNums), 0)}
         end,
     {LowSeqId, NextSeqId, State}.
+
+-spec start(rabbit_types:vhost(), [rabbit_amqqueue:name()]) -> {[[any()]], {walker(A), A}}.
 
 start(VHost, DurableQueueNames) ->
     ok = rabbit_recovery_terms:start(VHost),
@@ -626,7 +631,8 @@ init_dirty(CleanShutdown, ContainsCheckFun, State) ->
                   {{Segment = #segment { unacked = UnackedCount }, Dirty},
                    UnackedBytes} =
                       recover_segment(ContainsCheckFun, CleanShutdown,
-                                      segment_find_or_new(Seg, Dir, Segments2)),
+                                      segment_find_or_new(Seg, Dir, Segments2),
+                                      State1#qistate.max_journal_entries),
                   {segment_store(Segment, Segments2),
                    CountAcc + UnackedCount,
                    BytesAcc + UnackedBytes, DirtyCount + Dirty}
@@ -650,7 +656,7 @@ terminate(State = #qistate { journal_handle = JournalHdl,
                                      segments = undefined }}.
 
 recover_segment(ContainsCheckFun, CleanShutdown,
-                Segment = #segment { journal_entries = JEntries }) ->
+                Segment = #segment { journal_entries = JEntries }, MaxJournal) ->
     {SegEntries, UnackedCount} = load_segment(false, Segment),
     {SegEntries1, UnackedCountDelta} =
         segment_plus_journal(SegEntries, JEntries),
@@ -659,7 +665,7 @@ recover_segment(ContainsCheckFun, CleanShutdown,
            {SegmentAndDirtyCount, Bytes}) ->
               {MsgOrId, MsgProps} = parse_pub_record_body(Bin, MsgBin),
               {recover_message(ContainsCheckFun(MsgOrId), CleanShutdown,
-                               Del, RelSeq, SegmentAndDirtyCount),
+                               Del, RelSeq, SegmentAndDirtyCount, MaxJournal),
                Bytes + case IsPersistent of
                            true  -> MsgProps#message_properties.size;
                            false -> 0
@@ -668,15 +674,16 @@ recover_segment(ContainsCheckFun, CleanShutdown,
       {{Segment #segment { unacked = UnackedCount + UnackedCountDelta }, 0}, 0},
       SegEntries1).
 
-recover_message( true,  true,   _Del, _RelSeq, SegmentAndDirtyCount) ->
+recover_message( true,  true,   _Del, _RelSeq, SegmentAndDirtyCount, _MaxJournal) ->
     SegmentAndDirtyCount;
-recover_message( true, false,    del, _RelSeq, SegmentAndDirtyCount) ->
+recover_message( true, false,    del, _RelSeq, SegmentAndDirtyCount, _MaxJournal) ->
     SegmentAndDirtyCount;
-recover_message( true, false, no_del,  RelSeq, {Segment, DirtyCount}) ->
-    {add_to_journal(RelSeq, del, Segment), DirtyCount + 1};
-recover_message(false,     _,    del,  RelSeq, {Segment, DirtyCount}) ->
+recover_message( true, false, no_del,  RelSeq, {Segment, _DirtyCount}, MaxJournal) ->
+    %% force to flush the segment
+    {add_to_journal(RelSeq, del, Segment), MaxJournal + 1}; 
+recover_message(false,     _,    del,  RelSeq, {Segment, DirtyCount}, _MaxJournal) ->
     {add_to_journal(RelSeq, ack, Segment), DirtyCount + 1};
-recover_message(false,     _, no_del,  RelSeq, {Segment, DirtyCount}) ->
+recover_message(false,     _, no_del,  RelSeq, {Segment, DirtyCount}, _MaxJournal) ->
     {add_to_journal(RelSeq, ack,
                     add_to_journal(RelSeq, del, Segment)),
      DirtyCount + 2}.
@@ -701,7 +708,6 @@ queue_index_walker({start, DurableQueues}) when is_list(DurableQueues) ->
 queue_index_walker({next, Gatherer}) when is_pid(Gatherer) ->
     case gatherer:out(Gatherer) of
         empty ->
-            unlink(Gatherer),
             ok = gatherer:stop(Gatherer),
             finished;
         {value, {MsgId, Count}} ->
@@ -1286,6 +1292,8 @@ journal_minus_segment1({no_pub, del, ack},         undefined) ->
 %% upgrade
 %%----------------------------------------------------------------------------
 
+-spec add_queue_ttl() -> 'ok'.
+
 add_queue_ttl() ->
     foreach_queue_index({fun add_queue_ttl_journal/1,
                          fun add_queue_ttl_segment/1}).
@@ -1414,7 +1422,6 @@ foreach_queue_index(Funs) ->
                 end)
      end || QueueDirName <- QueueDirNames],
     empty = gatherer:out(Gatherer),
-    unlink(Gatherer),
     ok = gatherer:stop(Gatherer).
 
 transform_queue(Dir, Gatherer, {JournalFun, SegmentFun}) ->
@@ -1456,14 +1463,18 @@ move_to_per_vhost_stores(#resource{} = QueueName) ->
     OldQueueDir = filename:join([queues_base_dir(), "queues",
                                  queue_name_to_dir_name_legacy(QueueName)]),
     NewQueueDir = queue_dir(QueueName),
+    rabbit_log_upgrade:info("About to migrate queue directory '~s' to '~s'",
+                            [OldQueueDir, NewQueueDir]),
     case rabbit_file:is_dir(OldQueueDir) of
         true  ->
             ok = rabbit_file:ensure_dir(NewQueueDir),
             ok = rabbit_file:rename(OldQueueDir, NewQueueDir),
             ok = ensure_queue_name_stub_file(NewQueueDir, QueueName);
         false ->
-            rabbit_log:info("Queue index directory not found for queue ~p~n",
-                            [QueueName])
+            Msg  = "Queue index directory '~s' not found for ~s~n",
+            Args = [OldQueueDir, rabbit_misc:rs(QueueName)],
+            rabbit_log_upgrade:error(Msg, Args),
+            rabbit_log:error(Msg, Args)
     end,
     ok.
 

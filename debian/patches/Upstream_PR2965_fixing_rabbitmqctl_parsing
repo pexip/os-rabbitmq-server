@@ -1,0 +1,44 @@
+Description: Fix incorrect parsing of vm_memory_high_watermark
+ Upstream bug:
+ https://github.com/rabbitmq/rabbitmq-server/issues/2964
+Author: Michael Klishin <michael@clojurewerkz.org>
+Origin: upstream, https://github.com/rabbitmq/rabbitmq-server/pull/2965
+Bug-Debian: https://bugs.debian.org/986734
+Reviewed-By: Adam Cecile <acecile@letz-it.lu>
+Last-Update: 2021-04-10
+
+--- rabbitmq-server-3.8.9.orig/deps/rabbit/src/rabbit_disk_monitor.erl
++++ rabbitmq-server-3.8.9/deps/rabbit/src/rabbit_disk_monitor.erl
+@@ -66,7 +66,7 @@
+ 
+ %%----------------------------------------------------------------------------
+ 
+--type disk_free_limit() :: (integer() | string() | {'mem_relative', float() | integer()}).
++-type disk_free_limit() :: integer() | {'absolute', integer()} | string() | {'mem_relative', float() | integer()}.
+ 
+ %%----------------------------------------------------------------------------
+ %% Public API
+@@ -272,6 +272,8 @@ parse_free_win32(CommandResult) ->
+ interpret_limit({mem_relative, Relative})
+     when is_number(Relative) ->
+     round(Relative * vm_memory_monitor:get_total_memory());
++interpret_limit({absolute, Absolute}) ->
++    interpret_limit(Absolute);
+ interpret_limit(Absolute) ->
+     case rabbit_resource_monitor_misc:parse_information_unit(Absolute) of
+         {ok, ParsedAbsolute} -> ParsedAbsolute;
+--- rabbitmq-server-3.8.9.orig/deps/rabbitmq_cli/lib/rabbitmq/cli/core/memory.ex
++++ rabbitmq-server-3.8.9/deps/rabbitmq_cli/lib/rabbitmq/cli/core/memory.ex
+@@ -56,6 +56,12 @@ defmodule RabbitMQ.CLI.Core.Memory do
+   def formatted_watermark(val) when is_float(val) do
+     %{relative: val}
+   end
++  def formatted_watermark({:relative, val}) when is_float(val) do
++    %{relative: val}
++  end
++  def formatted_watermark(:infinity) do
++    %{relative: 1.0}
++  end
+   def formatted_watermark({:absolute, val}) do
+     %{absolute: parse_watermark(val)}
+   end

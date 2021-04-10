@@ -6,6 +6,11 @@ Files: *
 Copyright: (c) 2007-2014 GoPivotal, Inc.
 License: MPL-1.1
 
+Files: debian/missing-sources/*
+Copyright: 2012-2015 Pivotal Software, Inc.
+           2015 CloudFoundry.org Foundation
+License: Apache-2.0
+
 Files: deps/rabbitmq_codegen/amqp-rabbitmq-*.json
 Copyright: (c) 2008-2013, GoPivotal Inc.
 License: Expat

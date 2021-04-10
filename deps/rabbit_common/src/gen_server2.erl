@@ -93,13 +93,13 @@
 %%
 %% 11) Internal buffer length is emitted as a core [RabbitMQ] metric.
 
-%% All modifications are (C) 2009-2017 Pivotal Software, Inc.
+%% All modifications are (C) 2009-2020 VMware, Inc. or its affiliates.
 
 %% ``The contents of this file are subject to the Erlang Public License,
 %% Version 1.1, (the "License"); you may not use this file except in
 %% compliance with the License. You should have received a copy of the
 %% Erlang Public License along with this software. If not, it can be
-%% retrieved via the world wide web at http://www.erlang.org/.
+%% retrieved via the world wide web at https://www.erlang.org/.
 %%
 %% Software distributed under the License is distributed on an "AS IS"
 %% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
@@ -113,6 +113,12 @@
 %%     $Id$
 %%
 -module(gen_server2).
+
+-ifdef(OTP_RELEASE).
+-if(?OTP_RELEASE >= 22).
+-compile(nowarn_deprecated_function).
+-endif.
+-endif.
 
 %%% ---------------------------------------------------
 %%%
@@ -198,6 +204,7 @@
 %% API
 -export([start/3, start/4,
          start_link/3, start_link/4,
+         stop/1, stop/3,
          call/2, call/3,
          cast/2, reply/2,
          abcast/2, abcast/3,
@@ -305,6 +312,16 @@ start_link(Mod, Args, Options) ->
 start_link(Name, Mod, Args, Options) ->
     gen:start(?MODULE, link, Name, Mod, Args, Options).
 
+%% -----------------------------------------------------------------
+%% Stop a generic server and wait for it to terminate.
+%% If the server is located at another node, that node will
+%% be monitored.
+%% -----------------------------------------------------------------
+stop(Name) ->
+    gen:stop(Name).
+
+stop(Name, Reason, Timeout) ->
+    gen:stop(Name, Reason, Timeout).
 
 %% -----------------------------------------------------------------
 %% Make a call to a generic server.
@@ -349,7 +366,7 @@ reply({To, Tag}, Reply) ->
     catch To ! {Tag, Reply}.
 
 %% -----------------------------------------------------------------
-%% Asyncronous broadcast, returns nothing, it's just send'n pray
+%% Asynchronous broadcast, returns nothing, it's just send'n pray
 %% -----------------------------------------------------------------
 abcast(Name, Request) when is_atom(Name) ->
     do_abcast([node() | nodes()], Name, {'$gen_cast', Request}).
@@ -828,7 +845,7 @@ do_multi_call(Nodes, Name, Req, Timeout) ->
         spawn(
           fun () ->
                   %% Middleman process. Should be unsensitive to regular
-                  %% exit signals. The sychronization is needed in case
+                  %% exit signals. The synchronization is needed in case
                   %% the receiver would exit before the caller started
                   %% the monitor.
                   process_flag(trap_exit, true),
@@ -1275,7 +1292,7 @@ name_to_pid(Name) ->
         undefined ->
             case whereis_name(Name) of
                 undefined ->
-                    exit(could_not_find_registerd_name);
+                    exit(could_not_find_registered_name);
                 Pid ->
                     Pid
             end;

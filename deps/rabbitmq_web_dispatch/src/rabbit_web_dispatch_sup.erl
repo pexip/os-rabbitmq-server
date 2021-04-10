@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_web_dispatch_sup).
@@ -48,7 +39,7 @@ ensure_listener(Listener) ->
                                 [rabbit_cowboy_middleware, cowboy_router, cowboy_handler],
                              stream_handlers => StreamHandlers},
                            ProtoOptsMap),
-            Child = ranch:child_spec(name(Listener), 100,
+            Child = ranch:child_spec(rabbit_networking:ranch_ref(Listener), 100,
                 Transport, TransportOpts,
                 cowboy_clear, CowboyOptsMap),
             case supervisor:start_child(?SUP, Child) of
@@ -59,7 +50,7 @@ ensure_listener(Listener) ->
     end.
 
 stop_listener(Listener) ->
-    Name = name(Listener),
+    Name = rabbit_networking:ranch_ref(Listener),
     ok = supervisor:terminate_child(?SUP, {ranch_listener_sup, Name}),
     ok = supervisor:delete_child(?SUP, {ranch_listener_sup, Name}).
 
@@ -74,11 +65,9 @@ init([]) ->
            permanent, 5000, worker, [dynamic]},
     {ok, {{one_for_one, 10, 10}, [Registry, Log]}}.
 
-%% ----------------------------------------------------------------------
-
-name(Listener) ->
-    Port = proplists:get_value(port, Listener),
-    list_to_atom(atom_to_list(?MODULE) ++ "_" ++ integer_to_list(Port)).
+%%
+%% Implementation
+%%
 
 preprocess_config(Options) ->
     case proplists:get_value(ssl, Options) of
@@ -107,10 +96,11 @@ fix_ssl(Options) ->
         protocol_config(Options)}.
 
 transport_config(Options0) ->
-    Options = proplists:delete(ssl,
+    Options = proplists:delete(protocol,
+        proplists:delete(ssl,
         proplists:delete(ssl_opts,
             proplists:delete(cowboy_opts,
-                Options0))),
+                Options0)))),
     case proplists:get_value(ip, Options) of
         undefined ->
             Options;

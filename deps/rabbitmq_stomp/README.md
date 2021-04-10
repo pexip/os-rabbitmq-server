@@ -1,7 +1,7 @@
 # RabbitMQ STOMP adapter
 
 The STOMP adapter is included in the RabbitMQ distribution.  To enable
-it, use <href="http://www.rabbitmq.com/man/rabbitmq-plugins.1.man.html">rabbitmq-plugins</a>:
+it, use [rabbitmq-plugins](https://www.rabbitmq.com/man/rabbitmq-plugins.1.man.html):
 
     rabbitmq-plugins enable rabbitmq_stomp
 
@@ -11,7 +11,7 @@ it, use <href="http://www.rabbitmq.com/man/rabbitmq-plugins.1.man.html">rabbitmq
 
 ## Documentation
 
-[RabbitMQ STOMP plugin documentation](http://www.rabbitmq.com/stomp.html).
+[RabbitMQ STOMP plugin documentation](https://www.rabbitmq.com/stomp.html).
 
 ## Continuous Integration
 

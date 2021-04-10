@@ -1,63 +1,57 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_table).
 
--export([create/0, create_local_copy/1, wait_for_replicated/1, wait/1,
-         force_load/0, is_present/0, is_empty/0, needs_default_data/0,
-         check_schema_integrity/1, clear_ram_only_tables/0, retry_timeout/0,
-         wait_for_replicated/0]).
+-export([
+    create/0, create/2, ensure_local_copies/1, ensure_table_copy/2,
+    wait_for_replicated/1, wait/1, wait/2,
+    force_load/0, is_present/0, is_empty/0, needs_default_data/0,
+    check_schema_integrity/1, clear_ram_only_tables/0, retry_timeout/0,
+    wait_for_replicated/0, exists/1]).
 
 %% for testing purposes
 -export([definitions/0]).
 
--include("rabbit.hrl").
+-include_lib("rabbit_common/include/rabbit.hrl").
 
 %%----------------------------------------------------------------------------
--type retry() :: boolean().
 
--spec create() -> 'ok'.
--spec create_local_copy('disc' | 'ram') -> 'ok'.
--spec wait_for_replicated(retry()) -> 'ok'.
--spec wait_for_replicated() -> 'ok'.
--spec wait([atom()]) -> 'ok'.
--spec retry_timeout() -> {non_neg_integer() | infinity, non_neg_integer()}.
--spec force_load() -> 'ok'.
--spec is_present() -> boolean().
--spec is_empty() -> boolean().
--spec needs_default_data() -> boolean().
--spec check_schema_integrity(retry()) -> rabbit_types:ok_or_error(any()).
--spec clear_ram_only_tables() -> 'ok'.
+-type retry() :: boolean().
 
 %%----------------------------------------------------------------------------
 %% Main interface
 %%----------------------------------------------------------------------------
 
+-spec create() -> 'ok'.
+
 create() ->
-    lists:foreach(fun ({Tab, TabDef}) ->
-                          TabDef1 = proplists:delete(match, TabDef),
-                          case mnesia:create_table(Tab, TabDef1) of
-                              {atomic, ok} -> ok;
-                              {aborted, Reason} ->
-                                  throw({error, {table_creation_failed,
-                                                 Tab, TabDef1, Reason}})
-                          end
-                  end, definitions()),
+    lists:foreach(
+        fun ({Table, Def}) -> create(Table, Def) end,
+        definitions()),
     ensure_secondary_indexes(),
     ok.
+
+-spec create(mnesia:table(), list()) -> rabbit_types:ok_or_error(any()).
+
+create(TableName, TableDefinition) ->
+    TableDefinition1 = proplists:delete(match, TableDefinition),
+    rabbit_log:debug("Will create a schema database table '~s'", [TableName]),
+    case mnesia:create_table(TableName, TableDefinition1) of
+        {atomic, ok}                              -> ok;
+        {aborted,{already_exists, TableName}}     -> ok;
+        {aborted, {already_exists, TableName, _}} -> ok;
+        {aborted, Reason}                         ->
+            throw({error, {table_creation_failed, TableName, TableDefinition1, Reason}})
+    end.
+
+-spec exists(mnesia:table()) -> boolean().
+exists(Table) ->
+    lists:member(Table, mnesia:system_info(tables)).
 
 %% Sets up secondary indexes in a blank node database.
 ensure_secondary_indexes() ->
@@ -70,25 +64,31 @@ ensure_secondary_index(Table, Field) ->
     {aborted, {already_exists, Table, _}} -> ok
   end.
 
-%% The sequence in which we delete the schema and then the other
-%% tables is important: if we delete the schema first when moving to
-%% RAM mnesia will loudly complain since it doesn't make much sense to
-%% do that. But when moving to disc, we need to move the schema first.
-create_local_copy(disc) ->
-    create_local_copy(schema, disc_copies),
-    create_local_copies(disc);
-create_local_copy(ram)  ->
-    create_local_copies(ram),
-    create_local_copy(schema, ram_copies).
+-spec ensure_table_copy(mnesia:table(), node()) -> ok | {error, any()}.
+ensure_table_copy(TableName, Node) ->
+    rabbit_log:debug("Will add a local schema database copy for table '~s'", [TableName]),
+    case mnesia:add_table_copy(TableName, Node, disc_copies) of
+        {atomic, ok}                              -> ok;
+        {aborted,{already_exists, TableName}}     -> ok;
+        {aborted, {already_exists, TableName, _}} -> ok;
+        {aborted, Reason}                         -> {error, Reason}
+    end.
 
 %% This arity only exists for backwards compatibility with certain
 %% plugins. See https://github.com/rabbitmq/rabbitmq-clusterer/issues/19.
+
+-spec wait_for_replicated() -> 'ok'.
+
 wait_for_replicated() ->
     wait_for_replicated(false).
+
+-spec wait_for_replicated(retry()) -> 'ok'.
 
 wait_for_replicated(Retry) ->
     wait([Tab || {Tab, TabDef} <- definitions(),
                  not lists:member({local_content, true}, TabDef)], Retry).
+
+-spec wait([atom()]) -> 'ok'.
 
 wait(TableNames) ->
     wait(TableNames, _Retry = false).
@@ -106,19 +106,20 @@ wait(TableNames, Timeout, Retries) ->
                  ok ->
                      ok;
                  {timeout, BadTabs} ->
-                     {error, {timeout_waiting_for_tables, BadTabs}};
+                     AllNodes = rabbit_mnesia:cluster_nodes(all),
+                     {error, {timeout_waiting_for_tables, AllNodes, BadTabs}};
                  {error, Reason} ->
-                     {error, {failed_waiting_for_tables, Reason}}
+                     AllNodes = rabbit_mnesia:cluster_nodes(all),
+                     {error, {failed_waiting_for_tables, AllNodes, Reason}}
              end,
     case {Retries, Result} of
         {_, ok} ->
+            rabbit_log:info("Successfully synced tables from a peer"),
             ok;
         {1, {error, _} = Error} ->
             throw(Error);
         {_, {error, Error}} ->
             rabbit_log:warning("Error while waiting for Mnesia tables: ~p~n", [Error]),
-            wait(TableNames, Timeout, Retries - 1);
-        _ ->
             wait(TableNames, Timeout, Retries - 1)
     end.
 
@@ -131,23 +132,36 @@ retry_timeout(_Retry = true) ->
               end,
     {retry_timeout(), Retries}.
 
+-spec retry_timeout() -> non_neg_integer() | infinity.
+
 retry_timeout() ->
     case application:get_env(rabbit, mnesia_table_loading_retry_timeout) of
         {ok, T}   -> T;
         undefined -> 30000
     end.
 
+-spec force_load() -> 'ok'.
+
 force_load() -> [mnesia:force_load_table(T) || T <- names()], ok.
+
+-spec is_present() -> boolean().
 
 is_present() -> names() -- mnesia:system_info(tables) =:= [].
 
+-spec is_empty() -> boolean().
+
 is_empty()           -> is_empty(names()).
+
+-spec needs_default_data() -> boolean().
+
 needs_default_data() -> is_empty([rabbit_user, rabbit_user_permission,
                                   rabbit_vhost]).
 
 is_empty(Names) ->
     lists:all(fun (Tab) -> mnesia:dirty_first(Tab) == '$end_of_table' end,
               Names).
+
+-spec check_schema_integrity(retry()) -> rabbit_types:ok_or_error(any()).
 
 check_schema_integrity(Retry) ->
     Tables = mnesia:system_info(tables),
@@ -162,6 +176,8 @@ check_schema_integrity(Retry) ->
         Other  -> Other
     end.
 
+-spec clear_ram_only_tables() -> 'ok'.
+
 clear_ram_only_tables() ->
     Node = node(),
     lists:foreach(
@@ -172,6 +188,20 @@ clear_ram_only_tables() ->
               end
       end, names()),
     ok.
+
+%% The sequence in which we delete the schema and then the other
+%% tables is important: if we delete the schema first when moving to
+%% RAM mnesia will loudly complain since it doesn't make much sense to
+%% do that. But when moving to disc, we need to move the schema first.
+
+-spec ensure_local_copies('disc' | 'ram') -> 'ok'.
+
+ensure_local_copies(disc) ->
+    create_local_copy(schema, disc_copies),
+    create_local_copies(disc);
+ensure_local_copies(ram)  ->
+    create_local_copies(ram),
+    create_local_copy(schema, ram_copies).
 
 %%--------------------------------------------------------------------
 %% Internal helpers
@@ -283,10 +313,11 @@ definitions() ->
                                  permission = #permission{_='_'},
                                  _='_'}}]},
      {rabbit_vhost,
-      [{record_name, vhost},
-       {attributes, record_info(fields, vhost)},
+      [
+       {record_name, vhost},
+       {attributes, vhost:fields()},
        {disc_copies, [node()]},
-       {match, #vhost{_='_'}}]},
+       {match, vhost:pattern_match_all()}]},
      {rabbit_listener,
       [{record_name, listener},
        {attributes, record_info(fields, listener)},
@@ -349,13 +380,14 @@ definitions() ->
        {match, #runtime_parameters{_='_'}}]},
      {rabbit_durable_queue,
       [{record_name, amqqueue},
-       {attributes, record_info(fields, amqqueue)},
+       {attributes, amqqueue:fields()},
        {disc_copies, [node()]},
-       {match, #amqqueue{name = queue_name_match(), _='_'}}]},
+       {match, amqqueue:pattern_match_on_name(queue_name_match())}]},
      {rabbit_queue,
       [{record_name, amqqueue},
-       {attributes, record_info(fields, amqqueue)},
-       {match, #amqqueue{name = queue_name_match(), _='_'}}]}]
+       {attributes, amqqueue:fields()},
+       {match, amqqueue:pattern_match_on_name(queue_name_match())}]}
+    ]
         ++ gm:table_definitions()
         ++ mirrored_supervisor:table_definitions().
 
@@ -370,9 +402,9 @@ reverse_binding_match() ->
 binding_destination_match() ->
     resource_match('_').
 trie_node_match() ->
-    #trie_node{   exchange_name = exchange_name_match(), _='_'}.
+    #trie_node{exchange_name = exchange_name_match(), _='_'}.
 trie_edge_match() ->
-    #trie_edge{   exchange_name = exchange_name_match(), _='_'}.
+    #trie_edge{exchange_name = exchange_name_match(), _='_'}.
 trie_binding_match() ->
     #trie_binding{exchange_name = exchange_name_match(), _='_'}.
 exchange_name_match() ->

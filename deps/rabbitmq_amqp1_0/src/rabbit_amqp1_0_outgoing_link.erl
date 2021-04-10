@@ -1,22 +1,13 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_amqp1_0_outgoing_link).
 
--export([attach/3, delivery/6, transferred/3, credit_drained/4, flow/3]).
+-export([attach/3, delivery/6, transferred/3, credit_drained/3, flow/3]).
 
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include("rabbit_amqp1_0.hrl").
@@ -98,8 +89,7 @@ attach(#'v1_0.attach'{name = Name,
     end.
 
 credit_drained(#'basic.credit_drained'{credit_drained = CreditDrained},
-               Handle, Link = #outgoing_link{delivery_count = Count0},
-               WriterPid) ->
+               Handle, Link = #outgoing_link{delivery_count = Count0}) ->
     Count = Count0 + CreditDrained,
     %% The transfer count that is given by the queue should be at
     %% least that we have locally, since we will either have received
@@ -112,8 +102,7 @@ credit_drained(#'basic.credit_drained'{credit_drained = CreditDrained},
                       link_credit = {uint, 0},
                       available   = {uint, 0},
                       drain       = true },
-    rabbit_amqp1_0_writer:send_command(WriterPid, F),
-    Link#outgoing_link{delivery_count = Count}.
+    {F, Link#outgoing_link{delivery_count = Count}}.
 
 flow(#outgoing_link{delivery_count = LocalCount},
      #'v1_0.flow'{handle         = Handle,

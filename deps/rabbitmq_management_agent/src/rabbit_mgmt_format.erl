@@ -1,24 +1,15 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ Management Plugin.
-%%
-%%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_format).
 
 -export([format/2, ip/1, ipb/1, amqp_table/1, tuple/1]).
 -export([parameter/1, now_to_str/1, now_to_str_ms/1, strip_pids/1]).
--export([protocol/1, resource/1, queue/1, queue_state/1]).
+-export([protocol/1, resource/1, queue/1, queue_state/1, queue_info/1]).
 -export([exchange/1, user/1, internal_user/1, binding/1, url/2]).
 -export([pack_binding_props/2, tokenise/1]).
 -export([to_amqp_table/1, listener/1, web_context/1, properties/1, basic_properties/1]).
@@ -42,6 +33,7 @@
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
+-include_lib("rabbit/include/amqqueue.hrl").
 
 %%--------------------------------------------------------------------
 
@@ -57,12 +49,18 @@ format_queue_stats({reductions, _}) ->
     [];
 format_queue_stats({exclusive_consumer_pid, _}) ->
     [];
+format_queue_stats({single_active_consumer_pid, _}) ->
+    [];
 format_queue_stats({slave_pids, ''}) ->
     [];
 format_queue_stats({slave_pids, Pids}) ->
     [{slave_nodes, [node(Pid) || Pid <- Pids]}];
+format_queue_stats({leader, Leader}) ->
+    [{node, Leader}];
 format_queue_stats({synchronised_slave_pids, ''}) ->
     [];
+format_queue_stats({effective_policy_definition, []}) ->
+    [{effective_policy_definition, #{}}];
 format_queue_stats({synchronised_slave_pids, Pids}) ->
     [{synchronised_slave_nodes, [node(Pid) || Pid <- Pids]}];
 format_queue_stats({backing_queue_status, Value}) ->
@@ -165,32 +163,7 @@ properties(unknown) -> unknown;
 properties(Table)   -> maps:from_list([{Name, tuple(Value)} ||
                                           {Name, Value} <- Table]).
 
-amqp_table(unknown)   -> unknown;
-amqp_table(undefined) -> amqp_table([]);
-amqp_table([])        -> #{};
-amqp_table(#{})       -> #{};
-amqp_table(Table)     -> maps:from_list([{Name, amqp_value(Type, Value)} ||
-                                            {Name, Type, Value} <- Table]).
-
-amqp_value(array, Vs)                  -> [amqp_value(T, V) || {T, V} <- Vs];
-amqp_value(table, V)                   -> amqp_table(V);
-amqp_value(_Type, V) when is_binary(V) -> utf8_safe(V);
-amqp_value(_Type, V)                   -> V.
-
-utf8_safe(V) ->
-    try
-        _ = xmerl_ucs:from_utf8(V),
-        V
-    catch exit:{ucs, _} ->
-            Enc = split_lines(base64:encode(V)),
-            <<"Not UTF-8, base64 is: ", Enc/binary>>
-    end.
-
-% MIME enforces a limit on line length of base 64-encoded data to 76 characters.
-split_lines(<<Text:76/binary, Rest/binary>>) ->
-    <<Text/binary, $\n, (split_lines(Rest))/binary>>;
-split_lines(Text) ->
-    Text.
+amqp_table(Value)   -> rabbit_misc:amqp_table(Value).
 
 parameter(P) -> pset(value, pget(value, P), P).
 
@@ -339,28 +312,7 @@ tokenise(Str) ->
                   tokenise(string:sub_string(Str, Count + 2))]
     end.
 
-to_amqp_table(M) when is_map(M) ->
-    lists:reverse(maps:fold(fun(K, V, Acc) -> [to_amqp_table_row(K, V)|Acc] end,
-                            [], M));
-to_amqp_table(L) when is_list(L) ->
-    L.
-
-to_amqp_table_row(K, V) ->
-    {T, V2} = type_val(V),
-    {K, T, V2}.
-
-to_amqp_array(L) ->
-    [type_val(I) || I <- L].
-
-type_val(M) when is_map(M)     -> {table,   to_amqp_table(M)};
-type_val(L) when is_list(L)    -> {array,   to_amqp_array(L)};
-type_val(X) when is_binary(X)  -> {longstr, X};
-type_val(X) when is_integer(X) -> {long,    X};
-type_val(X) when is_number(X)  -> {double,  X};
-type_val(true)                 -> {bool, true};
-type_val(false)                -> {bool, false};
-type_val(null)                 -> throw({error, null_not_allowed});
-type_val(X)                    -> throw({error, {unhandled_type, X}}).
+to_amqp_table(V) -> rabbit_misc:to_amqp_table(V).
 
 url(Fmt, Vals) ->
     print(Fmt, [rabbit_http_util:quote_plus(V) || V <- Vals]).
@@ -371,13 +323,22 @@ exchange(X) ->
 %% We get queues using rabbit_amqqueue:list/1 rather than :info_all/1 since
 %% the latter wakes up each queue. Therefore we have a record rather than a
 %% proplist to deal with.
-queue(#amqqueue{name            = Name,
-                durable         = Durable,
-                auto_delete     = AutoDelete,
-                exclusive_owner = ExclusiveOwner,
-                arguments       = Arguments,
-                pid             = Pid,
-                state           = State}) ->
+queue(Q) when ?is_amqqueue(Q) ->
+    Name = amqqueue:get_name(Q),
+    Durable = amqqueue:is_durable(Q),
+    AutoDelete = amqqueue:is_auto_delete(Q),
+    ExclusiveOwner = amqqueue:get_exclusive_owner(Q),
+    Arguments = amqqueue:get_arguments(Q),
+    Pid = amqqueue:get_pid(Q),
+    State = amqqueue:get_state(Q),
+    %% TODO: in the future queue types should be registered with their
+    %% full and short names and this hard-coded translation should not be
+    %% necessary
+    Type = case amqqueue:get_type(Q) of
+               rabbit_classic_queue -> classic;
+               rabbit_quorum_queue -> quorum;
+               T -> T
+           end,
     format(
       [{name,        Name},
        {durable,     Durable},
@@ -386,11 +347,18 @@ queue(#amqqueue{name            = Name,
        {owner_pid,   ExclusiveOwner},
        {arguments,   Arguments},
        {pid,         Pid},
-       {state,       State}],
+       {type,        Type},
+       {state,       State}] ++ rabbit_amqqueue:format(Q),
       {fun format_exchange_and_queue/1, false}).
+
+queue_info(List) ->
+    format(List, {fun format_exchange_and_queue/1, false}).
 
 queue_state({syncing, Msgs}) -> [{state,         syncing},
                                  {sync_messages, Msgs}];
+queue_state({terminated_by, Name}) ->
+                                [{state, terminated},
+                                 {terminated_by, Name}];
 queue_state(Status)          -> [{state,         Status}].
 
 %% We get bindings using rabbit_binding:list_*/1 rather than :info_all/1 since

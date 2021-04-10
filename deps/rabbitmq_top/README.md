@@ -1,14 +1,20 @@
 # RabbitMQ Top Plugin
 
-Adds UNIX top-like information on the Erlang VM to the management plugin.
+Adds UNIX top-like information on the Erlang VM to the [management UI](https://www.rabbitmq.com/management.html).
+The closest interactive CLI alternative in recent releases is `rabbitmq-diagnostics observer`.
 
-Screenshots: http://imgur.com/a/BjVOP
+This is what it looks like:
+
+![](https://i.imgur.com/m7cWTLV.pngP)
 
 ## Installation
 
 This plugin ships with RabbitMQ as of `3.6.3`. Enable it with
 
-    [sudo] rabbitmq-plugins enable rabbitmq_top
+``` bash
+# use sudo as necessary
+rabbitmq-plugins enable rabbitmq_top
+```
 
 ### RabbitMQ 3.5.x
 
@@ -26,7 +32,7 @@ object's management view.
 Click on the process ID (e.g. "&lt;0.3423.0&gt;") to see some more
 Erlang process details.
 
-See [Memory Use Analysis guide](http://www.rabbitmq.com/memory-use.html) on RabbitMQ website
+See [Memory Use Analysis guide](https://www.rabbitmq.com/memory-use.html) on RabbitMQ website
 for more information.
 
 ## HTTP API
@@ -43,13 +49,19 @@ important as it currently hard-codes returning the top 20 processes.
 
 Individual process details.
 
+## More Screenshots
+
+Individual process metrics are also available:
+
+![](https://i.imgur.com/BYgIqQF.png)
+
 ## Building from Source
 
 You can build and install it like any other plugin (see
-[the plugin development guide](http://www.rabbitmq.com/plugin-development.html)).
+[the plugin development guide](https://www.rabbitmq.com/plugin-development.html)).
 
 ## License and Copyright
 
-(c) Pivotal Software Inc, 2007—2017
+(c) Pivotal Software Inc, 2007—2019
 
 Released under the same license as RabbitMQ.

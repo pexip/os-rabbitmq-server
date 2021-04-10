@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_vhost_limit).
@@ -79,18 +70,18 @@ query_limits(VHost) ->
     end.
 
 
--spec list() -> [{rabbit_types:vhost(), rabbit_types:infos()}].
+-spec list() -> [{vhost:name(), rabbit_types:infos()}].
 list() ->
     query_limits('_').
 
--spec list(rabbit_types:vhost()) -> rabbit_types:infos().
+-spec list(vhost:name()) -> rabbit_types:infos().
 list(VHost) ->
     case query_limits(VHost) of
         []               -> [];
         [{VHost, Value}] -> Value
     end.
 
--spec is_over_connection_limit(rabbit_types:vhost()) -> {true, non_neg_integer()} | false.
+-spec is_over_connection_limit(vhost:name()) -> {true, non_neg_integer()} | false.
 
 is_over_connection_limit(VirtualHost) ->
     case rabbit_vhost_limit:connection_limit(VirtualHost) of
@@ -112,7 +103,7 @@ is_over_connection_limit(VirtualHost) ->
         {ok, _Limit}                                         -> false
     end.
 
--spec would_exceed_queue_limit(non_neg_integer(), rabbit_types:vhost()) ->
+-spec would_exceed_queue_limit(non_neg_integer(), vhost:name()) ->
     {true, non_neg_integer(), non_neg_integer()} | false.
 
 would_exceed_queue_limit(AdditionalCount, VirtualHost) ->
@@ -140,7 +131,7 @@ would_exceed_queue_limit(AdditionalCount, VirtualHost) ->
             false
     end.
 
--spec is_over_queue_limit(rabbit_types:vhost()) -> {true, non_neg_integer()} | false.
+-spec is_over_queue_limit(vhost:name()) -> {true, non_neg_integer()} | false.
 
 is_over_queue_limit(VirtualHost) ->
     case would_exceed_queue_limit(1, VirtualHost) of

@@ -428,13 +428,18 @@ compile_test_() ->
 					{[<<"horses">>], [], h, o},
 					{[<<"hats">>], [], h, o},
 					{[<<"hats">>, <<"page">>, number], [], h, o}]}]},
+		{[{'_', [{"/hats/:page/:number", h, o}]}], [{'_', [], [
+			{[<<"hats">>, page, number], [], h, o}]}]},
 		{[{'_', [{"/hats/[page/[:number]]", h, o}]}], [{'_', [], [
 			{[<<"hats">>], [], h, o},
 			{[<<"hats">>, <<"page">>], [], h, o},
 			{[<<"hats">>, <<"page">>, number], [], h, o}]}]},
 		{[{"[...]ninenines.eu", [{"/hats/[...]", h, o}]}],
 			[{[<<"eu">>, <<"ninenines">>, '...'], [], [
-				{[<<"hats">>, '...'], [], h, o}]}]}
+				{[<<"hats">>, '...'], [], h, o}]}]},
+		%% Path segment containing a colon.
+		{[{'_', [{"/foo/bar:blah", h, o}]}], [{'_', [], [
+			{[<<"foo">>, <<"bar:blah">>], [], h, o}]}]}
 	],
 	[{lists:flatten(io_lib:format("~p", [Rt])),
 		fun() -> Rs = compile(Rt) end} || {Rt, Rs} <- Tests].
