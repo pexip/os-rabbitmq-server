@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_cert_info).
@@ -78,10 +69,7 @@ validity(Cert) ->
 %%--------------------------------------------------------------------------
 
 cert_info(F, Cert) ->
-    F(case public_key:pkix_decode_cert(Cert, otp) of
-          {ok, DecCert} -> DecCert; %%pre R14B
-          DecCert       -> DecCert  %%R14B onwards
-      end).
+    F(public_key:pkix_decode_cert(Cert, otp)).
 
 find_by_type(Type, {rdnSequence, RDNs}) ->
     case [V || #'AttributeTypeAndValue'{type = T, value = V}
@@ -200,13 +188,13 @@ format_asn1_value(V) ->
 %% "intended to represent the limited character sets available to
 %% mainframe input terminals"
 %% A-Z a-z 0-9 ' ( ) + , - . / : = ? [space]
-%% http://msdn.microsoft.com/en-us/library/bb540814(v=vs.85).aspx
+%% https://msdn.microsoft.com/en-us/library/bb540814(v=vs.85).aspx
 %%
 %% teletexString:
 %% "a sizable volume of software in the world treats TeletexString
 %% (T61String) as a simple 8-bit string with mostly Windows Latin 1
 %% (superset of iso-8859-1) encoding"
-%% http://www.mail-archive.com/asn1@asn1.org/msg00460.html
+%% https://www.mail-archive.com/asn1@asn1.org/msg00460.html
 %%
 %% (However according to that link X.680 actually defines
 %% TeletexString in some much more involved and crazy way. I suggest

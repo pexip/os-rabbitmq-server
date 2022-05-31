@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% We use a gen_server simply so that during the terminate/2 call
@@ -40,12 +31,6 @@
 %%----------------------------------------------------------------------------
 
 -spec start(rabbit_types:vhost()) -> rabbit_types:ok_or_error(term()).
--spec stop(rabbit_types:vhost()) -> rabbit_types:ok_or_error(term()).
--spec store(rabbit_types:vhost(), file:filename(), term()) -> rabbit_types:ok_or_error(term()).
--spec read(rabbit_types:vhost(), file:filename()) -> rabbit_types:ok_or_error2(term(), not_found).
--spec clear(rabbit_types:vhost()) -> 'ok'.
-
-%%----------------------------------------------------------------------------
 
 start(VHost) ->
     case rabbit_vhost_sup_sup:get_vhost_sup(VHost) of
@@ -64,6 +49,8 @@ start(VHost) ->
     end,
     ok.
 
+-spec stop(rabbit_types:vhost()) -> rabbit_types:ok_or_error(term()).
+
 stop(VHost) ->
     case rabbit_vhost_sup_sup:get_vhost_sup(VHost) of
         {ok, VHostSup} ->
@@ -79,14 +66,20 @@ stop(VHost) ->
             ok
     end.
 
+-spec store(rabbit_types:vhost(), file:filename(), term()) -> rabbit_types:ok_or_error(term()).
+
 store(VHost, DirBaseName, Terms) ->
     dets:insert(VHost, {DirBaseName, Terms}).
+
+-spec read(rabbit_types:vhost(), file:filename()) -> rabbit_types:ok_or_error2(term(), not_found).
 
 read(VHost, DirBaseName) ->
     case dets:lookup(VHost, DirBaseName) of
         [{_, Terms}] -> {ok, Terms};
         _            -> {error, not_found}
     end.
+
+-spec clear(rabbit_types:vhost()) -> 'ok'.
 
 clear(VHost) ->
     try
@@ -115,7 +108,7 @@ upgrade_recovery_terms() ->
         [begin
              File = filename:join([QueuesDir, Dir, "clean.dot"]),
              case rabbit_file:read_term_file(File) of
-                 {ok, Terms} -> ok  = store(?MODULE, Dir, Terms);
+                 {ok, Terms} -> ok  = store_global_table(Dir, Terms);
                  {error, _}  -> ok
              end,
              file:delete(File)
@@ -132,7 +125,7 @@ dets_upgrade(Fun)->
     open_global_table(),
     try
         ok = dets:foldl(fun ({DirBaseName, Terms}, Acc) ->
-                                store(?MODULE, DirBaseName, Fun(Terms)),
+                                store_global_table(DirBaseName, Fun(Terms)),
                                 Acc
                         end, ok, ?MODULE),
         ok
@@ -158,8 +151,14 @@ close_global_table() ->
             ok
     end.
 
+store_global_table(DirBaseName, Terms) ->
+    dets:insert(?MODULE, {DirBaseName, Terms}).
+
 read_global(DirBaseName) ->
-    read(?MODULE, DirBaseName).
+    case dets:lookup(?MODULE, DirBaseName) of
+        [{_, Terms}] -> {ok, Terms};
+        _            -> {error, not_found}
+    end.
 
 delete_global_table() ->
     file:delete(filename:join(rabbit_mnesia:dir(), "recovery.dets")).
@@ -185,12 +184,37 @@ code_change(_OldVsn, State, _Extra) ->
 
 %%----------------------------------------------------------------------------
 
+-spec open_table(vhost:name()) -> rabbit_types:ok_or_error(any()).
+
 open_table(VHost) ->
+    open_table(VHost, 10).
+
+-spec open_table(vhost:name(), non_neg_integer()) -> rabbit_types:ok_or_error(any()).
+
+open_table(VHost, RetriesLeft) ->
     VHostDir = rabbit_vhost:msg_store_dir_path(VHost),
     File = filename:join(VHostDir, "recovery.dets"),
-    {ok, _} = dets:open_file(VHost, [{file,      File},
-                                     {ram_file,  true},
-                                     {auto_save, infinity}]).
+    Opts = [{file,      File},
+            {ram_file,  true},
+            {auto_save, infinity}],
+    case dets:open_file(VHost, Opts) of
+        {ok, _}        -> ok;
+        {error, Error} ->
+          case RetriesLeft of
+                0 ->
+                    {error, Error};
+                N when is_integer(N) ->
+                    _ = file:delete(File),
+                    %% Wait before retrying
+                    DelayInMs = 1000,
+                    rabbit_log:warning("Failed to open a recovery terms DETS file at ~p. Will delete it and retry in ~p ms (~p retries left)",
+                                       [File, DelayInMs, RetriesLeft]),
+                    timer:sleep(DelayInMs),
+                    open_table(VHost, RetriesLeft - 1)
+          end
+    end.
+
+-spec flush(vhost:name()) -> rabbit_types:ok_or_error(any()).
 
 flush(VHost) ->
     try
@@ -201,6 +225,8 @@ flush(VHost) ->
                              [VHost]),
             ok
     end.
+
+-spec close_table(vhost:name()) -> rabbit_types:ok_or_error(any()).
 
 close_table(VHost) ->
     try

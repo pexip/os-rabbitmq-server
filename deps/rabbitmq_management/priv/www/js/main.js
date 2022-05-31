@@ -1,6 +1,17 @@
 $(document).ready(function() {
-    replace_content('outer', format('login', {}));
-    start_app_login();
+    if (enable_uaa) {
+        get(uaa_location + "/info", "application/json", function(req) {
+            if (req.status !== 200) {
+                replace_content('outer', format('login_uaa', {}));
+                replace_content('login-status', '<p class="warning">' + uaa_location + " does not appear to be a running UAA instance or may not have a trusted SSL certificate"  + '</p> <button id="loginWindow" onclick="uaa_login_window()">Single Sign On</button>');
+            } else {
+                replace_content('outer', format('login_uaa', {}));
+            }
+        });
+    } else {
+        replace_content('outer', format('login', {}));
+        start_app_login();
+    }
 });
 
 function dispatcher_add(fun) {
@@ -33,29 +44,13 @@ function set_auth_pref(userinfo) {
     store_cookie_value_with_expiration('auth', encodeURIComponent(b64), date);
 }
 
-function login_route () {
-    var userpass = '' + this.params['username'] + ':' + this.params['password'],
-        location = window.location.href,
-        hash = window.location.hash;
-    set_auth_pref(decodeURIComponent(userpass));
-    location = location.substr(0, location.length - hash.length);
-    window.location.replace(location);
-    // because we change url, we don't need to hit check_login as
-    // we'll end up doing that at the bottom of start_app_login after
-    // we've changed url.
+function getParameterByName(name) {
+    var match = RegExp('[#&]' + name + '=([^&]*)').exec(window.location.hash);
+    return match && decodeURIComponent(match[1].replace(/\+/g, ' '));
 }
 
-function login_route_with_path() {
-  var params = ('' + this.params['splat']).split('/');
-  var user = params.shift();
-  var pass = params.shift();
-  var userpass = '' + user + ':' + pass,
-        location = window.location.href,
-        hash = window.location.hash;
-    set_auth_pref(decodeURIComponent(userpass));
-    location = location.substr(0, location.length - hash.length) + '#/' + params.join('/');
-    check_login();
-    window.location.replace(location);
+function getAccessToken() {
+    return getParameterByName('access_token');
 }
 
 function start_app_login() {
@@ -67,13 +62,44 @@ function start_app_login() {
             set_auth_pref(username + ':' + password);
             check_login();
         });
-        this.get('#/login/:username/:password', login_route);
-        this.get(/\#\/login\/(.*)/, login_route_with_path);
     });
-    app.run();
-    if (get_cookie_value('auth') != null) {
-        check_login();
+    if (enable_uaa) {
+        var token = getAccessToken();
+        if (token != null) {
+            set_auth_pref(uaa_client_id + ':' + token);
+            store_pref('uaa_token', token);
+            check_login();
+        } else if(has_auth_cookie_value()) {
+            check_login();
+        };
+    } else {
+        app.run();
+        if (get_cookie_value('auth') != null) {
+            check_login();
+        }
     }
+}
+
+
+function uaa_logout_window() {
+    uaa_invalid = true;
+    uaa_login_window();
+}
+
+function uaa_login_window() {
+    var redirect;
+    if (window.location.hash != "") {
+        redirect = window.location.href.split(window.location.hash)[0];
+    } else {
+        redirect = window.location.href
+    };
+    var loginRedirectUrl;
+    if (uaa_invalid) {
+        loginRedirectUrl = Singular.properties.uaaLocation + '/logout.do?client_id=' + Singular.properties.clientId + '&redirect=' + redirect;
+    } else {
+        loginRedirectUrl = Singular.properties.uaaLocation + '/oauth/authorize?response_type=token&client_id=' + Singular.properties.clientId + '&redirect_uri=' + redirect;
+    };
+    window.open(loginRedirectUrl, "LOGIN_WINDOW");
 }
 
 function check_login() {
@@ -81,8 +107,14 @@ function check_login() {
     if (user == false) {
         // clear a local storage value used by earlier versions
         clear_pref('auth');
+        clear_pref('uaa_token');
         clear_cookie_value('auth');
-        replace_content('login-status', '<p>Login failed</p>');
+        if (enable_uaa) {
+            uaa_invalid = true;
+            replace_content('login-status', '<button id="loginWindow" onclick="uaa_login_window()">Log out</button>');
+        } else {
+            replace_content('login-status', '<p>Login failed</p>');
+        }
     }
     else {
         hide_popup_warn();
@@ -138,17 +170,25 @@ function start_app() {
     // just leave the history here.
     //Sammy.HashLocationProxy._interval = null;
 
-
     app = new Sammy.Application(dispatcher);
     app.run();
+
     var url = this.location.toString();
+    var hash = this.location.hash;
+    var pathname = this.location.pathname;
     if (url.indexOf('#') == -1) {
         this.location = url + '#/';
+    } else if (hash.indexOf('#token_type') != - 1 && pathname == '/') {
+        // This is equivalent to previous `if` clause when uaa authorisation is used.
+        // Tokens are passed in the url hash, so the url always contains a #.
+        // We need to check the current path is `/` and token is present,
+        // so we can redirect to `/#/`
+        this.location = url.replace(/#token_type.+/gi, "#/");
     }
 }
 
 function setup_constant_events() {
-    $('#update-every').change(function() {
+    $('#update-every').on('change', function() {
             var interval = $(this).val();
             store_pref('interval', interval);
             if (interval == '')
@@ -157,7 +197,7 @@ function setup_constant_events() {
                 interval = parseInt(interval);
             set_timer_interval(interval);
         });
-    $('#show-vhost').change(function() {
+    $('#show-vhost').on('change', function() {
             current_vhost = $(this).val();
             store_pref('vhost', current_vhost);
             update();
@@ -528,7 +568,7 @@ function show_popup(type, text, _mode) {
     hide();
     $('#outer').after(format('popup', {'type': type, 'text': text}));
     $(cssClass).fadeIn(100);
-    $(cssClass + ' span').click(function () {
+    $(cssClass + ' span').on('click', function () {
         $('.popup-owner').removeClass('popup-owner');
         hide();
     });
@@ -560,7 +600,11 @@ function submit_import(form) {
                 vhost_part = '/' + esc(vhost_name);
             }
 
-            var form_action = "/definitions" + vhost_part + '?auth=' + get_cookie_value('auth');
+            if (enable_uaa) {
+                var form_action = "/definitions" + vhost_part + '?token=' + get_pref('uaa_token');
+            } else {
+                var form_action = "/definitions" + vhost_part + '?auth=' + get_cookie_value('auth');
+            };
             var fd = new FormData();
             fd.append('file', file);
             with_req('POST', form_action, fd, function(resp) {
@@ -572,16 +616,16 @@ function submit_import(form) {
 };
 
 function postprocess() {
-    $('form.confirm-queue').submit(function() {
+    $('form.confirm-queue').on('submit', function() {
         return confirm("Are you sure? The queue is going to be deleted. " +
                        "Messages cannot be recovered after deletion.");
         });
 
-    $('form.confirm-purge-queue').submit(function() {
+    $('form.confirm-purge-queue').on('submit', function() {
         return confirm("Are you sure? Messages cannot be recovered after purging.");
         });
 
-    $('form.confirm').submit(function() {
+    $('form.confirm').on('submit', function() {
             return confirm("Are you sure? This object cannot be recovered " +
                            "after deletion.");
         });
@@ -597,18 +641,24 @@ function postprocess() {
             }
         });
 
-    $('#download-definitions').click(function() {
+    $('#download-definitions').on('click', function() {
             var idx = $("select[name='vhost-download'] option:selected").index();
             var vhost = ((idx <=0 ) ? "" : "/" + esc($("select[name='vhost-download'] option:selected").val()));
+        if (enable_uaa) {
             var path = 'api/definitions' + vhost + '?download=' +
                 esc($('#download-filename').val()) +
-                '&auth=' + get_cookie_value('auth');
+                '&token=' + get_pref('uaa_token');
+            } else {
+                var path = 'api/definitions' + vhost + '?download=' +
+                    esc($('#download-filename').val()) +
+                    '&auth=' + get_cookie_value('auth');
+            };
             window.location = path;
             setTimeout('app.run()');
             return false;
         });
 
-    $('.update-manual').click(function() {
+    $('.update-manual').on('click', function() {
             update_manual($(this).attr('for'), $(this).attr('query'));
         });
 
@@ -620,7 +670,7 @@ function postprocess() {
             update_multifields();
         });
 
-    $('.controls-appearance').change(function() {
+    $('.controls-appearance').on('change', function() {
         var params = $(this).get(0).options;
         var selected = $(this).val();
 
@@ -656,11 +706,11 @@ function postprocess() {
         update_counter = 0; // If there's interaction, reset the counter.
     });
 
-    $('.tag-link').click(function() {
+    $('.tag-link').on('click', function() {
         $('#tags').val($(this).attr('tag'));
     });
 
-    $('.argument-link').click(function() {
+    $('.argument-link').on('click', function() {
         var field = $(this).attr('field');
         var row = $('#' + field).find('.mf').last();
         var key = row.find('input').first();
@@ -678,7 +728,7 @@ function postprocess() {
 
     $('#filter').on('keyup', debounce(update_filter, 500));
 
-    $('#filter-regex-mode').change(update_filter_regex_mode);
+    $('#filter-regex-mode').on('change', update_filter_regex_mode);
 
     $('#truncate').on('keyup', debounce(update_truncate, 500));
 
@@ -734,13 +784,19 @@ function update_pages(template, page_start){
 }
 
 function renderQueues() {
-    render({'queues':  {path: url_pagination_template('queues', 1, 100),
-                        options: {sort:true, vhost:true, pagination:true}},
-                        'vhosts': '/vhosts'}, 'queues', '#/queues');
+    ensure_queues_chart_range();
+    render({'queues': {
+        path: url_pagination_template('queues', 1, 100),
+        options: {
+            sort: true,
+            vhost: true,
+            pagination: true
+        }
+    }, 'vhosts': '/vhosts'}, 'queues', '#/queues');
 }
 
 function renderExchanges() {
-    render({'exchanges':  {path: url_pagination_template('exchanges', 1, 100),
+    render({'exchanges': {path: url_pagination_template('exchanges', 1, 100),
                           options: {sort:true, vhost:true, pagination:true}},
                          'vhosts': '/vhosts'}, 'exchanges', '#/exchanges');
 }
@@ -760,22 +816,22 @@ function renderChannels() {
 function update_pages_from_ui(sender) {
     var val = $(sender).val();
     var raw = !!$(sender).attr('data-page-start') ? $(sender).attr('data-page-start') : val;
-    var s   = fmt_strip_tags(raw);
+    var s   = fmt_escape_html(fmt_strip_tags(raw));
     update_pages(current_template, s);
 }
 
 function postprocess_partial() {
-    $('.pagination_class_input').keypress(function(e) {
+    $('.pagination_class_input').on('keypress', function(e) {
         if (e.keyCode == 13) {
             update_pages_from_ui(this);
         }
     });
 
-    $('.pagination_class_checkbox').click(function(e) {
+    $('.pagination_class_checkbox').on('click', function(e) {
         update_pages_from_ui(this);
     });
 
-    $('.pagination_class_select').change(function(e) {
+    $('.pagination_class_select').on('change', function(e) {
         update_pages_from_ui(this);
     });
 
@@ -786,7 +842,7 @@ function postprocess_partial() {
             toggle_visibility($(this));
         });
 
-    $('.sort').click(function() {
+    $('.sort').on('click', function() {
             var sort = $(this).attr('sort');
             if (current_sort == sort) {
                 current_sort_reverse = ! current_sort_reverse;
@@ -828,14 +884,14 @@ function update_multifield(multifield, dict) {
         var type = $(this).val();
         var input = $('#' + prefix + '_mfvalue');
         if (type == 'list') {
-            if (input.size() == 1) {
+            if (input.length == 1) {
                 input.replaceWith('<div class="multifield-sub" id="' + prefix +
                                   '"></div>');
             }
             update_multifield($('#' + prefix), false);
         }
         else {
-            if (input.size() == 1) {
+            if (input.length == 1) {
                 var key = dict ? $('#' + prefix + '_mfkey').val() : '';
                 var value = input.val();
                 if (key == '' && value == '') {
@@ -924,11 +980,13 @@ function update_filter() {
 function update_truncate() {
     var current_truncate_str =
         $(this).val().replace(new RegExp('\\D', 'g'), '');
-    if (current_truncate_str == '')
+    if (current_truncate_str == '') {
         current_truncate_str = '0';
-    if ($(this).val() != current_truncate_str)
+    }
+    if ($(this).val() != current_truncate_str) {
         $(this).val(current_truncate_str);
-    current_truncate = parseInt(current_truncate_str, 10);
+    }
+    var current_truncate = parseInt(current_truncate_str, 10);
     store_pref('truncate', current_truncate);
     partial_update();
 }
@@ -1021,7 +1079,7 @@ function publish_msg0(params) {
         }
     }
     with_req('POST', path, JSON.stringify(params), function(resp) {
-            var result = jQuery.parseJSON(resp.responseText);
+            var result = JSON.parse(resp.responseText);
             if (result.routed) {
                 show_popup('info', 'Message published.');
             } else {
@@ -1033,7 +1091,7 @@ function publish_msg0(params) {
 function get_msgs(params) {
     var path = fill_path_template('/queues/:vhost/:name/get', params);
     with_req('POST', path, JSON.stringify(params), function(resp) {
-            var msgs = jQuery.parseJSON(resp.responseText);
+            var msgs = JSON.parse(resp.responseText);
             if (msgs.length == 0) {
                 show_popup('info', 'Queue is empty');
             } else {
@@ -1048,7 +1106,7 @@ function with_reqs(reqs, acc, fun) {
     if (keys(reqs).length > 0) {
         var key = keys(reqs)[0];
         with_req('GET', reqs[key], null, function(resp) {
-                acc[key] = jQuery.parseJSON(resp.responseText);
+                acc[key] = JSON.parse(resp.responseText);
                 var remainder = {};
                 for (var k in reqs) {
                     if (k != key) remainder[k] = reqs[k];
@@ -1106,10 +1164,14 @@ function has_auth_cookie_value() {
 }
 
 function auth_header() {
-    if(has_auth_cookie_value()) {
-        return "Basic " + decodeURIComponent(get_cookie_value('auth'));
+    if(has_auth_cookie_value() && enable_uaa) {
+        return "Bearer " + decodeURIComponent(get_pref('uaa_token'));
     } else {
-        return null;
+        if(has_auth_cookie_value()) {
+            return "Basic " + decodeURIComponent(get_cookie_value('auth'));
+        } else {
+            return null;
+        }
     }
 }
 
@@ -1123,7 +1185,10 @@ function with_req(method, path, body, fun) {
     var json;
     var req = xmlHttpRequest();
     req.open(method, 'api' + path, true );
-    req.setRequestHeader('authorization', auth_header());
+    var header = auth_header();
+    if (header !== null) {
+        req.setRequestHeader('authorization', header);
+    }
     req.setRequestHeader('x-vhost', current_vhost);
     req.onreadystatechange = function () {
         if (req.readyState == 4) {
@@ -1139,6 +1204,19 @@ function with_req(method, path, body, fun) {
     };
     outstanding_reqs.push(req);
     req.send(body);
+}
+
+function get(url, accept, callback) {
+  var req = new XMLHttpRequest();
+  req.open("GET", url);
+  req.setRequestHeader("Accept", accept);
+  req.send();
+
+  req.onreadystatechange = function() {
+    if (req.readyState == XMLHttpRequest.DONE) {
+      callback(req);
+    }
+  };
 }
 
 function sync_get(path) {
@@ -1189,7 +1267,7 @@ function sync_req(type, params0, path_template, options) {
     catch (e) {
         if (e.number == 0x80004004) {
             // 0x80004004 means "Operation aborted."
-            // http://support.microsoft.com/kb/186063
+            // https://support.microsoft.com/kb/186063
             // MSIE6 appears to do this in response to HTTP 204.
         }
     }
@@ -1198,7 +1276,9 @@ function sync_req(type, params0, path_template, options) {
         if (type == 'GET')
             return req.responseText;
         else
-            return true;
+            // rabbitmq/rabbitmq-management#732
+            // https://developer.mozilla.org/en-US/docs/Glossary/Truthy
+            return {result: true, http_status: req.status, req_params: params};
     }
     else {
         return false;
@@ -1206,7 +1286,7 @@ function sync_req(type, params0, path_template, options) {
 }
 
 function check_bad_response(req, full_page_404) {
-    // 1223 == 204 - see http://www.enhanceie.com/ie/bugs.asp
+    // 1223 == 204 - see https://www.enhanceie.com/ie/bugs.asp
     // MSIE7 and 8 appear to do this in response to HTTP 204.
     if ((req.status >= 200 && req.status < 300) || req.status == 1223) {
         return true;
@@ -1343,6 +1423,14 @@ function collapse_multifields(params0) {
                 var prefix = id_parts.slice(0, id_parts.length - 1).join('_');
                 id_map[name][prefix].push(val);
             }
+        }
+    }
+    if (params.hasOwnProperty('queuetype')) {
+        delete params['queuetype'];
+        params['arguments']['x-queue-type'] = queue_type;
+        if (queue_type == 'quorum') {
+            params['durable'] = true;
+            params['auto_delete'] = false;
         }
     }
     return params;
@@ -1525,4 +1613,92 @@ function rename_multifield(params, from, to) {
         }
     }
     return new_params;
+}
+
+function select_queue_type(queuetype) {
+    queue_type = queuetype.value;
+    update();
+}
+
+function is_quorum(queue) {
+    if (queue["arguments"]) {
+        if (queue["arguments"]["x-queue-type"]) {
+            return queue["arguments"]["x-queue-type"] === "quorum";
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
+}
+
+function is_classic(queue) {
+    if (queue["arguments"]) {
+        if (queue["arguments"]["x-queue-type"]) {
+            return queue["arguments"]["x-queue-type"] === "classic";
+        } else {
+            return true;
+        }
+    } else {
+        return true;
+    }
+}
+
+function ensure_queues_chart_range() {
+    var range = get_pref('chart-range');
+    // Note: the queues page uses the 'basic' range type
+    var fixup_range;
+    var valid_range = false;
+    var range_type = get_chart_range_type('queues');
+    var chart_periods = CHART_RANGES[range_type];
+    for (var i = 0; i < chart_periods.length; ++i) {
+        var data = chart_periods[i];
+        var val = data[0];
+        if (range === val) {
+            valid_range = true;
+            break;
+        }
+        // If the range needs to be adjusted, use the last
+        // valid one
+        fixup_range = val;
+    }
+    if (!valid_range) {
+        store_pref('chart-range', fixup_range);
+    }
+}
+
+function get_chart_range_type(arg) {
+   /*
+    * 'arg' can be:
+    * lengths-over for the Overview page
+    * lengths-q for the per-queue page
+    * queues for setting up the queues range
+    */
+    if (arg === 'lengths-over') {
+        return 'global';
+    }
+    if (arg === 'msg-rates-over') {
+        return 'global';
+    }
+    if (arg === 'lengths-q') {
+        return 'basic';
+    }
+    if (arg === 'msg-rates-q') {
+        return 'basic';
+    }
+    if (arg === 'queues') {
+        return 'basic';
+    }
+    if (arg === 'queue-churn') {
+        return 'basic';
+    }
+    if (arg === 'channel-churn') {
+        return 'basic';
+    }
+    if (arg === 'connection-churn') {
+        return 'basic';
+    }
+
+    console.log('[WARNING]: range type not found for arg: ' + arg);
+    return 'basic';
 }

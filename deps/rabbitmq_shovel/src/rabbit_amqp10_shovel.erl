@@ -1,17 +1,8 @@
-%%  The contents of this file are subject to the Mozilla Public License
-%%  Version 1.1 (the "License"); you may not use this file except in
-%%  compliance with the License. You may obtain a copy of the License
-%%  at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Software distributed under the License is distributed on an "AS IS"
-%%  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%  the License for the specific language governing rights and
-%%  limitations under the License.
-%%
-%%  The Original Code is RabbitMQ.
-%%
-%%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_amqp10_shovel).
@@ -43,8 +34,10 @@
         ]).
 
 -import(rabbit_misc, [pget/2, pget/3]).
+-import(rabbit_data_coercion, [to_binary/1]).
 
 -define(INFO(Text, Args), error_logger:info_msg(Text, Args)).
+-define(LINK_CREDIT_TIMEOUT, 5000).
 
 -type state() :: rabbit_shovel_behaviour:state().
 -type uri() :: rabbit_shovel_behaviour:uri().
@@ -81,7 +74,7 @@ connect_source(State = #{name := Name,
                          source := #{uris := [Uri | _],
                                      source_address := Addr} = Src}) ->
     AttachFun = fun amqp10_client:attach_receiver_link/5,
-    {Conn, Sess, LinkRef} = connect(Name, AckMode, Uri, "-receiver", Addr, Src,
+    {Conn, Sess, LinkRef} = connect(Name, AckMode, Uri, "receiver", Addr, Src,
                                     AttachFun),
     State#{source => Src#{current => #{conn => Conn,
                                        session => Sess,
@@ -94,18 +87,22 @@ connect_dest(State = #{name := Name,
                        dest := #{uris := [Uri | _],
                                  target_address := Addr} = Dst}) ->
     AttachFun = fun amqp10_client:attach_sender_link_sync/5,
-    {Conn, Sess, LinkRef} = connect(Name, AckMode, Uri, "-sender", Addr, Dst,
+    {Conn, Sess, LinkRef} = connect(Name, AckMode, Uri, "sender", Addr, Dst,
                                     AttachFun),
+    %% wait for link credit here as if there are messages waiting we may try
+    %% to forward before we've received credit
     State#{dest => Dst#{current => #{conn => Conn,
                                      session => Sess,
+                                     link_state => attached,
+                                     pending => [],
                                      link => LinkRef,
                                      uri => Uri}}}.
 
 connect(Name, AckMode, Uri, Postfix, Addr, Map, AttachFun) ->
     {ok, Config} = amqp10_client:parse_uri(Uri),
     {ok, Conn} = amqp10_client:open_connection(Config),
-    link(Conn),
     {ok, Sess} = amqp10_client:begin_session(Conn),
+    link(Conn),
     LinkName = begin
                    LinkName0 = gen_unique_name(Name, Postfix),
                    rabbit_data_coercion:to_binary(LinkName0)
@@ -177,7 +174,7 @@ dest_endpoint(#{shovel_type := dynamic,
 -spec handle_source(Msg :: any(), state()) -> not_handled | state().
 handle_source({amqp10_msg, _LinkRef, Msg}, State) ->
     Tag = amqp10_msg:delivery_id(Msg),
-    [Payload] = amqp10_msg:body(Msg),
+    Payload = amqp10_msg:body_bin(Msg),
     rabbit_shovel_behaviour:forward(Tag, #{}, Payload, State);
 handle_source({amqp10_event, {connection, Conn, opened}},
               State = #{source := #{current := #{conn := Conn}}}) ->
@@ -241,6 +238,16 @@ handle_dest({amqp10_event, {session, Sess, {ended, Why}}},
 handle_dest({amqp10_event, {link, Link, {detached, Why}}},
             #{dest := #{current := #{link := Link}}}) ->
     {stop, {outbound_link_detached, Why}};
+handle_dest({amqp10_event, {link, Link, credited}},
+            State0 = #{dest := #{current := #{link := Link},
+                                 pending := Pend} = Dst}) ->
+
+    %% we have credit so can begin to forward
+    State = State0#{dest => Dst#{link_state => credited,
+                                 pending => []}},
+    lists:foldl(fun ({A, B, C}, S) ->
+                        forward(A, B, C, S)
+                end, State, lists:reverse(Pend));
 handle_dest({amqp10_event, {link, Link, _Evt}},
             State= #{dest := #{current := #{link := Link}}}) ->
     State;
@@ -293,6 +300,12 @@ forward(_Tag, _Props, _Payload,
         #{source := #{remaining_unacked := 0}} = State) ->
     State;
 forward(Tag, Props, Payload,
+        #{dest := #{current := #{link_state := attached},
+                    pending := Pend0} = Dst} = State) ->
+    %% simply cache the forward oo
+    Pend = [{Tag, Props, Payload} | Pend0],
+    State#{dest => Dst#{pending => {Pend}}};
+forward(Tag, Props, Payload,
         #{dest := #{current := #{link := Link},
                     unacked := Unacked} = Dst,
           ack_mode := AckMode} = State) ->
@@ -332,17 +345,52 @@ add_forward_headers(#{dest := #{cached_forward_headers := Props}}, Msg) ->
 add_forward_headers(_, Msg) -> Msg.
 
 set_message_properties(Props, Msg) ->
-    maps:fold(fun(delivery_mode, 2, M) ->
-                      amqp10_msg:set_headers(#{durable => true}, M);
-                 (content_type, Ct, M) ->
-                      amqp10_msg:set_properties(
-                        #{content_type => rabbit_data_coercion:to_binary(Ct)}, M);
-                 (_, _, M) -> M
-              end, Msg, Props).
+    %% this is effectively special handling properties from amqp 0.9.1
+    maps:fold(
+      fun(content_type, Ct, M) ->
+              amqp10_msg:set_properties(
+                #{content_type => to_binary(Ct)}, M);
+         (content_encoding, Ct, M) ->
+              amqp10_msg:set_properties(
+                #{content_encoding => to_binary(Ct)}, M);
+         (delivery_mode, 2, M) ->
+              amqp10_msg:set_headers(#{durable => true}, M);
+         (correlation_id, Ct, M) ->
+              amqp10_msg:set_properties(#{correlation_id => to_binary(Ct)}, M);
+         (reply_to, Ct, M) ->
+              amqp10_msg:set_properties(#{reply_to => to_binary(Ct)}, M);
+         (message_id, Ct, M) ->
+              amqp10_msg:set_properties(#{message_id => to_binary(Ct)}, M);
+         (timestamp, Ct, M) ->
+              amqp10_msg:set_properties(#{creation_time => Ct}, M);
+         (user_id, Ct, M) ->
+              amqp10_msg:set_properties(#{user_id => Ct}, M);
+         (headers, Headers0, M) when is_list(Headers0) ->
+              %% AMPQ 0.9.1 are added as applicatin properties
+              %% TODO: filter headers to make safe
+              Headers = lists:foldl(
+                          fun ({K, _T, V}, Acc) ->
+                                  case is_amqp10_compat(V) of
+                                      true ->
+                                          Acc#{to_binary(K) => V};
+                                      false ->
+                                          Acc
+                                  end
+                          end, #{}, Headers0),
+              amqp10_msg:set_application_properties(Headers, M);
+         (Key, Value, M) ->
+              case is_amqp10_compat(Value) of
+                  true ->
+                      amqp10_msg:set_application_properties(
+                        #{to_binary(Key) => Value}, M);
+                  false ->
+                      M
+              end
+      end, Msg, Props).
 
 gen_unique_name(Pre0, Post0) ->
-    Pre = rabbit_data_coercion:to_binary(Pre0),
-    Post = rabbit_data_coercion:to_binary(Post0),
+    Pre = to_binary(Pre0),
+    Post = to_binary(Post0),
     Id = bin_to_hex(crypto:strong_rand_bytes(8)),
     <<Pre/binary, <<"_">>/binary, Id/binary, <<"_">>/binary, Post/binary>>.
 
@@ -350,3 +398,10 @@ bin_to_hex(Bin) ->
     <<<<if N >= 10 -> N -10 + $a;
            true  -> N + $0 end>>
       || <<N:4>> <= Bin>>.
+
+is_amqp10_compat(T) ->
+    is_binary(T) orelse
+    is_number(T) orelse
+    %% TODO: not all lists are compatible
+    is_list(T) orelse
+    is_boolean(T).

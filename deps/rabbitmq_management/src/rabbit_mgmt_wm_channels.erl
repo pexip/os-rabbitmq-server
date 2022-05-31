@@ -1,17 +1,8 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ Management Plugin.
-%%
-%%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_channels).
@@ -28,7 +19,7 @@
 %%--------------------------------------------------------------------
 
 init(Req, _State) ->
-    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
+    {cowboy_rest, rabbit_mgmt_headers:set_common_permission_headers(Req, ?MODULE), #context{}}.
 
 variances(Req, Context) ->
     {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
@@ -37,12 +28,17 @@ content_types_provided(ReqData, Context) ->
    {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
 
 to_json(ReqData, Context) ->
-    try
-        rabbit_mgmt_util:reply_list_or_paginate(augmented(ReqData, Context),
-            ReqData, Context)
-    catch
-        {error, invalid_range_parameters, Reason} ->
-            rabbit_mgmt_util:bad_request(iolist_to_binary(Reason), ReqData, Context)
+    case rabbit_mgmt_util:disable_stats(ReqData) of
+        false ->
+            try
+                rabbit_mgmt_util:reply_list_or_paginate(augmented(ReqData, Context),
+                                                        ReqData, Context)
+            catch
+                {error, invalid_range_parameters, Reason} ->
+                    rabbit_mgmt_util:bad_request(iolist_to_binary(Reason), ReqData, Context)
+            end;
+        true ->
+            rabbit_mgmt_util:bad_request(<<"Stats in management UI are disabled on this node">>, ReqData, Context)
     end.
 
 is_authorized(ReqData, Context) ->

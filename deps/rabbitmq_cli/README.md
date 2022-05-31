@@ -1,13 +1,11 @@
 # RabbitMQ CLI Tools
 
-This is the [next
-generation](https://groups.google.com/forum/#!topic/rabbitmq-users/x0XugmBt-IE)
-implementation of
-[rabbitmqctl](https://www.rabbitmq.com/man/rabbitmqctl.1.man.html) and
-other RabbitMQ CLI tools.
+[![Build Status](https://travis-ci.org/rabbitmq/rabbitmq-cli.svg?branch=master)](https://travis-ci.org/rabbitmq/rabbitmq-cli)
 
-This project first shipped with RabbitMQ `3.7.0`. Please use the version of CLI
-tools that come with the RabbitMQ distribution version installed.
+This repository contains [RabbitMQ CLI tools](https://rabbitmq.com/cli.html) ([rabbitmqctl](https://www.rabbitmq.com/man/rabbitmqctl.1.man.html) and
+others).
+
+This generation of CLI tools first shipped with RabbitMQ `3.7.0`.
 
 
 ## Goals
@@ -18,21 +16,25 @@ Team RabbitMQ wanted a set of tools that
  * Supported pluggable output formats (in particular machine-friendly ones)
  * Had good test coverage
  * Wasn't as coupled to the server repository
- * Could be used as a low risk vehicle for [Elixir](http://elixir-lang.org) evaluation
+ * Could be used as a low risk vehicle for [Elixir](https://elixir-lang.org) evaluation
 
 ## Supported RabbitMQ Versions
 
-This version of CLI tools targets RabbitMQ master (future
-`3.7.0`). Some operations (for example, the `list_*` ones) will not
-work with earlier server releases.
+Long lived branches in this repository track the same branch in RabbitMQ core and related
+repositories. So `master` tracks `master` in rabbitmq-server, `v3.7.x` tracks branch `v3.7.x` in
+rabbitmq-server and so on.
 
+Please use the version of CLI tools that come with the RabbitMQ distribution version installed.
 
 
 ## Building
 
 ### Requirements
 
-Building this project requires [Elixir](http://elixir-lang.org/) 1.4.4 or greater.
+Building this project requires
+
+ * Erlang/OTP 21.3 (or later)
+ * [Elixir](https://elixir-lang.org/) 1.10.0 (or later).
 
 Command line tools depend on [rabbitmq-common](https://github.com/rabbitmq/rabbitmq-common).
 Dependencies are being resolved by `erlang.mk`
@@ -40,7 +42,7 @@ Dependencies are being resolved by `erlang.mk`
 ### Building Standalone Executables
 
 This repo produces a `rabbitmqctl` executable which can be used as different tools
-(`rabbitmq-plugins`, `rabbitmq-diagnostics`) by copying or symlinking it with different names.
+(`rabbitmq-plugins`, `rabbitmq-diagnostics`, `rabbitmq-queues`, `rabbitmq-upgrade`) by copying or symlinking it with different names.
 Depending on the name, a different set of commands will be loaded and available, including
 for `--help`.
 
@@ -54,9 +56,17 @@ make
 
 ### `rabbitmqctl`
 
-`rabbitmqctl [-n node] [-t timeout] [-q] {command} [command options...]`
+See `rabbitmqctl help` and [rabbitmqctl man page](https://www.rabbitmq.com/man/rabbitmqctl.1.man.html) for details.
 
-See the [rabbitmqctl man page](https://www.rabbitmq.com/man/rabbitmqctl.1.man.html) for a full list of options.
+### `rabbitmq-plugins`
+
+See `rabbitmq-plugins help` and [rabbitmq-plugins man page](https://www.rabbitmq.com/man/rabbitmq-plugins.1.man.html) for details.
+
+### `rabbitmq-diagnostics`
+
+See `rabbitmq-diagnostics help` and [rabbitmq-diagnostics man page](https://www.rabbitmq.com/rabbitmq-diagnostics.8.html).
+
+
 
 
 ## Testing
@@ -95,7 +105,7 @@ There are also a number of optional callbacks:
  * `usage_additional`: extra values appended to the `usage` output
    to provide additional command-specific documentation.
  * `scopes`: what scopes this command appears in. Scopes associate
-   tools (e.g. `rabbitmqctl`, `rabbitmq-diagnostics`) with commands.
+   tools (e.g. `rabbitmqctl`, `rabbitmq-diagnostics`, `rabbitmq-queues`) with commands.
  * `distribution`: control erlang distribution.
    Can be `:cli` (default), `:none` or `{:fun, fun}`
 
@@ -106,8 +116,8 @@ command that deletes a queue.
 
 ### Examples
 
-See `lib/rabbitmq/cli/ctl/commands/status_command.ex` and `test/status_command_test.exs` for simple
-examples.
+See `lib/rabbitmq/cli/ctl/commands/status_command.ex` and `test/status_command_test.exs` for minimalistic
+but not entirely trivial examples.
 
 
 ## Copyright and License
@@ -115,4 +125,5 @@ examples.
 The project is [licensed under the MPL](LICENSE-MPL-RabbitMQ), the same license
 as RabbitMQ.
 
-(c) Pivotal Software, Inc, 2016-2017.
+(c) 2007-2020 VMware, Inc. or its affiliates.
+

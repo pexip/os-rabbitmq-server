@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_connection_sup).
@@ -38,11 +29,8 @@
 
 -spec start_link(any(), rabbit_net:socket(), module(), any()) ->
           {'ok', pid(), pid()}.
--spec reader(pid()) -> pid().
 
-%%--------------------------------------------------------------------------
-
-start_link(Ref, Sock, _Transport, _Opts) ->
+start_link(Ref, _Sock, _Transport, _Opts) ->
     {ok, SupPid} = supervisor2:start_link(?MODULE, []),
     %% We need to get channels in the hierarchy here so they get shut
     %% down after the reader, so the reader gets a chance to terminate
@@ -62,9 +50,11 @@ start_link(Ref, Sock, _Transport, _Opts) ->
     {ok, ReaderPid} =
         supervisor2:start_child(
           SupPid,
-          {reader, {rabbit_reader, start_link, [HelperSup, Ref, Sock]},
+          {reader, {rabbit_reader, start_link, [HelperSup, Ref]},
            intrinsic, ?WORKER_WAIT, worker, [rabbit_reader]}),
     {ok, SupPid, ReaderPid}.
+
+-spec reader(pid()) -> pid().
 
 reader(Pid) ->
     hd(supervisor2:find_child(Pid, reader)).
@@ -72,4 +62,5 @@ reader(Pid) ->
 %%--------------------------------------------------------------------------
 
 init([]) ->
+    ?LG_PROCESS_TYPE(connection_sup),
     {ok, {{one_for_all, 0, 1}, []}}.

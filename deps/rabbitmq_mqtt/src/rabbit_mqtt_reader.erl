@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mqtt_reader).
@@ -22,11 +13,12 @@
 
 -behaviour(gen_server2).
 
--export([start_link/3]).
+-export([start_link/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         code_change/3, terminate/2]).
+         code_change/3, terminate/2, handle_pre_hibernate/1]).
 
--export([conserve_resources/3, start_keepalive/2]).
+-export([conserve_resources/3, start_keepalive/2,
+         close_connection/2]).
 
 -export([ssl_login_name/1]).
 -export([info/2]).
@@ -39,9 +31,9 @@
 
 %%----------------------------------------------------------------------------
 
-start_link(KeepaliveSup, Ref, Sock) ->
+start_link(KeepaliveSup, Ref) ->
     Pid = proc_lib:spawn_link(?MODULE, init,
-                              [[KeepaliveSup, Ref, Sock]]),
+                              [[KeepaliveSup, Ref]]),
 
     {ok, Pid}.
 
@@ -55,12 +47,16 @@ info(Pid, InfoItems) ->
         UnknownItems -> throw({bad_argument, UnknownItems})
     end.
 
+close_connection(Pid, Reason) ->
+    gen_server:cast(Pid, {close_connection, Reason}).
+
 %%----------------------------------------------------------------------------
 
-init([KeepaliveSup, Ref, Sock]) ->
+init([KeepaliveSup, Ref]) ->
     process_flag(trap_exit, true),
+    {ok, Sock} = rabbit_networking:handshake(Ref,
+        application:get_env(rabbitmq_mqtt, proxy_protocol, false)),
     RealSocket = rabbit_net:unwrap_socket(Sock),
-    rabbit_networking:accept_ack(Ref, RealSocket),
     case rabbit_net:connection_string(Sock, inbound) of
         {ok, ConnStr} ->
             rabbit_log_connection:debug("MQTT accepting TCP connection ~p (~s)~n", [self(), ConnStr]),
@@ -106,9 +102,23 @@ handle_call(Msg, From, State) ->
 handle_cast(duplicate_id,
             State = #state{ proc_state = PState,
                             conn_name  = ConnName }) ->
-    rabbit_log_connection:warning("MQTT disconnecting duplicate client id ~p (~p)~n",
-                 [rabbit_mqtt_processor:info(client_id, PState), ConnName]),
+    rabbit_log_connection:warning("MQTT disconnecting client ~p with duplicate id '~s'~n",
+                 [ConnName, rabbit_mqtt_processor:info(client_id, PState)]),
     {stop, {shutdown, duplicate_id}, State};
+
+handle_cast(decommission_node,
+            State = #state{ proc_state = PState,
+                            conn_name  = ConnName }) ->
+    rabbit_log_connection:warning("MQTT disconnecting client ~p with client ID '~s' as its node is about"
+                                  " to be decommissioned~n",
+                 [ConnName, rabbit_mqtt_processor:info(client_id, PState)]),
+    {stop, {shutdown, decommission_node}, State};
+
+handle_cast({close_connection, Reason},
+            State = #state{conn_name = ConnName, proc_state = PState}) ->
+    rabbit_log_connection:warning("MQTT disconnecting client ~p with client ID '~s', reason: ~s",
+                                  [ConnName, rabbit_mqtt_processor:info(client_id, PState), Reason]),
+    {stop, {shutdown, server_initiated_close}, State};
 
 handle_cast(Msg, State) ->
     {stop, {mqtt_unexpected_cast, Msg}, State}.
@@ -130,22 +140,29 @@ handle_info(#'basic.cancel'{}, State) ->
 handle_info({'EXIT', _Conn, Reason}, State) ->
     {stop, {connection_died, Reason}, State};
 
-handle_info({inet_reply, _Ref, ok}, State) ->
-    {noreply, State, hibernate};
-
-handle_info({inet_async, Sock, _Ref, {ok, Data}},
-            State = #state{ socket = Sock, connection_state = blocked }) ->
+handle_info({Tag, Sock, Data},
+            State = #state{ socket = Sock, connection_state = blocked })
+            when Tag =:= tcp; Tag =:= ssl ->
     {noreply, State#state{ deferred_recv = Data }, hibernate};
 
-handle_info({inet_async, Sock, _Ref, {ok, Data}},
-            State = #state{ socket = Sock, connection_state = running }) ->
+handle_info({Tag, Sock, Data},
+            State = #state{ socket = Sock, connection_state = running })
+            when Tag =:= tcp; Tag =:= ssl ->
     process_received_bytes(
       Data, control_throttle(State #state{ await_recv = false }));
 
-handle_info({inet_async, _Sock, _Ref, {error, Reason}}, State = #state {}) ->
+handle_info({Tag, Sock}, State = #state{socket = Sock})
+            when Tag =:= tcp_closed; Tag =:= ssl_closed ->
+    network_error(closed, State);
+
+handle_info({Tag, Sock, Reason}, State = #state{socket = Sock})
+            when Tag =:= tcp_error; Tag =:= ssl_error ->
     network_error(Reason, State);
 
-handle_info({inet_reply, _Sock, {error, Reason}}, State = #state {}) ->
+handle_info({inet_reply, Sock, ok}, State = #state{socket = Sock}) ->
+    {noreply, State, hibernate};
+
+handle_info({inet_reply, Sock, {error, Reason}}, State = #state{socket = Sock}) ->
     network_error(Reason, State);
 
 handle_info({conserve_resources, Conserve}, State) ->
@@ -174,6 +191,13 @@ handle_info(keepalive_timeout, State = #state {conn_name = ConnStr,
 handle_info(emit_stats, State) ->
     {noreply, emit_stats(State), hibernate};
 
+handle_info({ra_event, _From, Evt},
+            #state{proc_state = PState} = State) ->
+    %% handle applied event to ensure registration command actually got applied
+    %% handle not_leader notification in case we send the command to a non-leader
+    PState1 = rabbit_mqtt_processor:handle_ra_event(Evt, PState),
+    {noreply, State#state{proc_state = PState1}, hibernate};
+
 handle_info(Msg, State) ->
     {stop, {mqtt_unexpected_msg, Msg}, State}.
 
@@ -181,28 +205,30 @@ terminate(Reason, State) ->
     maybe_emit_stats(State),
     do_terminate(Reason, State).
 
+handle_pre_hibernate(State) ->
+    rabbit_mqtt_processor:handle_pre_hibernate(),
+    {hibernate, State}.
+
 do_terminate({network_error, {ssl_upgrade_error, closed}, ConnStr}, _State) ->
     rabbit_log_connection:error("MQTT detected TLS upgrade error on ~s: connection closed~n",
        [ConnStr]);
 
 do_terminate({network_error,
-           {ssl_upgrade_error,
-            {tls_alert, "handshake failure"}}, ConnStr}, _State) ->
-    rabbit_log_connection:error("MQTT detected TLS upgrade error on ~s: handshake failure~n",
-       [ConnStr]);
-
+              {ssl_upgrade_error,
+               {tls_alert, "handshake failure"}}, ConnStr}, _State) ->
+    log_tls_alert(handshake_failure, ConnStr);
 do_terminate({network_error,
-           {ssl_upgrade_error,
-            {tls_alert, "unknown ca"}}, ConnStr}, _State) ->
-    rabbit_log_connection:error("MQTT detected TLS certificate verification error on ~s: alert 'unknown CA'~n",
-       [ConnStr]);
-
+              {ssl_upgrade_error,
+               {tls_alert, "unknown ca"}}, ConnStr}, _State) ->
+    log_tls_alert(unknown_ca, ConnStr);
 do_terminate({network_error,
-           {ssl_upgrade_error,
-            {tls_alert, Alert}}, ConnStr}, _State) ->
-    rabbit_log_connection:error("MQTT detected TLS upgrade error on ~s: alert ~s~n",
-       [ConnStr, Alert]);
-
+              {ssl_upgrade_error,
+               {tls_alert, {Err, _}}}, ConnStr}, _State) ->
+    log_tls_alert(Err, ConnStr);
+do_terminate({network_error,
+              {ssl_upgrade_error,
+               {tls_alert, Alert}}, ConnStr}, _State) ->
+    log_tls_alert(Alert, ConnStr);
 do_terminate({network_error, {ssl_upgrade_error, Reason}, ConnStr}, _State) ->
     rabbit_log_connection:error("MQTT detected TLS upgrade error on ~s: ~p~n",
         [ConnStr, Reason]);
@@ -240,8 +266,19 @@ ssl_login_name(Sock) ->
 
 %%----------------------------------------------------------------------------
 
-log_new_connection(#state{conn_name = ConnStr}) ->
-    rabbit_log_connection:info("accepting MQTT connection ~p (~s)~n", [self(), ConnStr]).
+log_tls_alert(handshake_failure, ConnStr) ->
+    rabbit_log_connection:error("MQTT detected TLS upgrade error on ~s: handshake failure~n",
+       [ConnStr]);
+log_tls_alert(unknown_ca, ConnStr) ->
+    rabbit_log_connection:error("MQTT detected TLS certificate verification error on ~s: alert 'unknown CA'~n",
+       [ConnStr]);
+log_tls_alert(Alert, ConnStr) ->
+    rabbit_log_connection:error("MQTT detected TLS upgrade error on ~s: alert ~s~n",
+       [ConnStr, Alert]).
+
+log_new_connection(#state{conn_name = ConnStr, proc_state = PState}) ->
+    rabbit_log_connection:info("accepting MQTT connection ~p (~s, client id: ~s)~n",
+                               [self(), ConnStr, rabbit_mqtt_processor:info(client_id, PState)]).
 
 process_received_bytes(<<>>, State = #state{proc_state = ProcState,
                                             received_connect_frame = false}) ->
@@ -260,7 +297,7 @@ process_received_bytes(Bytes,
     case parse(Bytes, ParseState) of
         {more, ParseState1} ->
             {noreply,
-             ensure_stats_timer(control_throttle( State #state{ parse_state = ParseState1 })),
+             ensure_stats_timer( State #state{ parse_state = ParseState1 }),
              hibernate};
         {ok, Frame, Rest} ->
             case rabbit_mqtt_processor:process_frame(Frame, ProcState) of
@@ -271,25 +308,43 @@ process_received_bytes(Bytes,
                       State #state{ parse_state = PS,
                                     proc_state = ProcState1,
                                     connection = ConnPid });
+                %% PUBLISH and more
+                {error, unauthorized = Reason, ProcState1} ->
+                    rabbit_log_connection:error("MQTT connection ~s is closing due to an authorization failure~n", [ConnStr]),
+                    {stop, {shutdown, Reason}, pstate(State, ProcState1)};
+                %% CONNECT frames only
+                {error, unauthenticated = Reason, ProcState1} ->
+                    rabbit_log_connection:error("MQTT connection ~s is closing due to an authentication failure~n", [ConnStr]),
+                    {stop, {shutdown, Reason}, pstate(State, ProcState1)};
+                %% CONNECT frames only
+                {error, invalid_client_id = Reason, ProcState1} ->
+                    rabbit_log_connection:error("MQTT cannot accept connection ~s: client uses an invalid ID~n", [ConnStr]),
+                    {stop, {shutdown, Reason}, pstate(State, ProcState1)};
+                %% CONNECT frames only
+                {error, unsupported_protocol_version = Reason, ProcState1} ->
+                    rabbit_log_connection:error("MQTT cannot accept connection ~s: incompatible protocol version~n", [ConnStr]),
+                    {stop, {shutdown, Reason}, pstate(State, ProcState1)};
+                {error, unavailable = Reason, ProcState1} ->
+                    rabbit_log_connection:error("MQTT cannot accept connection ~s due to an internal error or unavailable component~n",
+                        [ConnStr]),
+                    {stop, {shutdown, Reason}, pstate(State, ProcState1)};
                 {error, Reason, ProcState1} ->
-                    rabbit_log_connection:info("MQTT protocol error ~p for connection ~s~n",
-                        [Reason, ConnStr]),
+                    rabbit_log_connection:error("MQTT protocol error on connection ~s: ~p~n",
+                        [ConnStr, Reason]),
                     {stop, {shutdown, Reason}, pstate(State, ProcState1)};
                 {error, Error} ->
-                    rabbit_log_connection:error("MQTT detected framing error '~p' for connection ~s~n",
-                        [Error, ConnStr]),
+                    rabbit_log_connection:error("MQTT detected a framing error on connection ~s: ~p~n",
+                        [ConnStr, Error]),
                     {stop, {shutdown, Error}, State};
                 {stop, ProcState1} ->
-                    {stop, normal, pstate(State, ProcState1)};
-                {err, unauthorized = Reason, ProcState1} ->
-                    {stop, {shutdown, Reason}, pstate(State, ProcState1)}
+                    {stop, normal, pstate(State, ProcState1)}
             end;
         {error, {cannot_parse, Error, Stacktrace}} ->
-            rabbit_log_connection:error("MQTT cannot parse frame for connection '~s', unparseable payload: ~p, error: {~p, ~p} ~n",
+            rabbit_log_connection:error("MQTT cannot parse a frame on connection '~s', unparseable payload: ~p, error: {~p, ~p} ~n",
                 [ConnStr, Bytes, Error, Stacktrace]),
             {stop, {shutdown, Error}, State};
         {error, Error} ->
-            rabbit_log_connection:error("MQTT detected framing error '~p' for connection ~s~n",
+            rabbit_log_connection:error("MQTT detected a framing error on connection ~s: ~p~n",
                 [ConnStr, Error]),
             {stop, {shutdown, Error}, State}
     end.
@@ -310,23 +365,24 @@ parse(Bytes, ParseState) ->
     try
         rabbit_mqtt_frame:parse(Bytes, ParseState)
     catch
-        _:Reason ->
-            {error, {cannot_parse, Reason, erlang:get_stacktrace()}}
+        _:Reason:Stacktrace ->
+            {error, {cannot_parse, Reason, Stacktrace}}
     end.
 
 send_will_and_terminate(PState, State) ->
     send_will_and_terminate(PState, {shutdown, conn_closed}, State).
 
-send_will_and_terminate(PState, Reason, State) ->
+send_will_and_terminate(PState, Reason, State = #state{conn_name = ConnStr}) ->
     rabbit_mqtt_processor:send_will(PState),
+    rabbit_log_connection:debug("MQTT: about to send will message (if any) on connection ~p", [ConnStr]),
     % todo: flush channel after publish
     {stop, Reason, State}.
 
 network_error(closed,
-              State = #state{ conn_name  = ConnStr,
-                              proc_state = PState }) ->
+              State = #state{conn_name  = ConnStr,
+                             proc_state = PState}) ->
     MqttConn = PState#proc_state.connection,
-    Fmt = "MQTT detected network error for ~p: peer closed TCP connection~n",
+    Fmt = "MQTT connection ~p will terminate because peer closed TCP connection~n",
     Args = [ConnStr],
     case MqttConn of
         undefined  -> rabbit_log_connection:debug(Fmt, Args);
@@ -335,9 +391,10 @@ network_error(closed,
     send_will_and_terminate(PState, State);
 
 network_error(Reason,
-              State = #state{ conn_name  = ConnStr,
-                              proc_state = PState }) ->
-    rabbit_log_connection:info("MQTT detected network error for ~p: ~p~n", [ConnStr, Reason]),
+              State = #state{conn_name  = ConnStr,
+                             proc_state = PState}) ->
+    rabbit_log_connection:info("MQTT detected network error for ~p: ~p~n",
+                               [ConnStr, Reason]),
     send_will_and_terminate(PState, State).
 
 run_socket(State = #state{ connection_state = blocked }) ->
@@ -347,7 +404,7 @@ run_socket(State = #state{ deferred_recv = Data }) when Data =/= undefined ->
 run_socket(State = #state{ await_recv = true }) ->
     State;
 run_socket(State = #state{ socket = Sock }) ->
-    rabbit_net:async_recv(Sock, 0, infinity),
+    rabbit_net:setopts(Sock, [{active, once}]),
     State#state{ await_recv = true }.
 
 control_throttle(State = #state{ connection_state = Flow,
@@ -366,7 +423,7 @@ control_throttle(State = #state{ connection_state = Flow,
 maybe_process_deferred_recv(State = #state{ deferred_recv = undefined }) ->
     {noreply, State, hibernate};
 maybe_process_deferred_recv(State = #state{ deferred_recv = Data, socket = Sock }) ->
-    handle_info({inet_async, Sock, noref, {ok, Data}},
+    handle_info({tcp, Sock, Data},
                 State#state{ deferred_recv = undefined }).
 
 maybe_emit_stats(undefined) ->

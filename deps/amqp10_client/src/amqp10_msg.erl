@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(amqp10_msg).
 
@@ -30,6 +21,7 @@
          properties/1,
          application_properties/1,
          body/1,
+         body_bin/1,
          footer/1,
          % "write" api
          new/2,
@@ -239,6 +231,18 @@ body(#amqp10_msg{body = [#'v1_0.data'{} | _] = Data}) ->
     [Content || #'v1_0.data'{content = Content} <- Data];
 body(#amqp10_msg{body = Body}) -> Body.
 
+%% @doc Returns the binary representation
+-spec body_bin(amqp10_msg()) -> binary().
+body_bin(#amqp10_msg{body = [#'v1_0.data'{content = Bin}]})
+  when is_binary(Bin) ->
+    Bin;
+body_bin(#amqp10_msg{body = Data}) when is_list(Data) ->
+    iolist_to_binary([amqp10_framing:encode_bin(D) || D <- Data]);
+body_bin(#amqp10_msg{body = #'v1_0.amqp_value'{} = Body}) ->
+    %% TODO: to avoid unnecessary decoding and re-encoding we could amend
+    %% the parse to provide the body in a lazy fashion, only decoding when
+    %% reading. For now we just re-encode it.
+    iolist_to_binary(amqp10_framing:encode_bin(Body)).
 
 %% @doc Create a new amqp10 message using the specified delivery tag, body
 %% and settlement state. Settled=true means the message is considered settled
@@ -398,12 +402,18 @@ set_message_annotations(
     Anns1 = #'v1_0.message_annotations'{content = maps:to_list(Anns)},
     Msg#amqp10_msg{message_annotations = Anns1}.
 
+wrap_ap_value(true) ->
+    {boolean, true};
+wrap_ap_value(false) ->
+    {boolean, false};
 wrap_ap_value(V) when is_integer(V) ->
     {uint, V};
 wrap_ap_value(V) when is_binary(V) ->
     utf8(V);
 wrap_ap_value(V) when is_list(V) ->
-    utf8(list_to_binary(V)).
+    utf8(list_to_binary(V));
+wrap_ap_value(V) when is_atom(V) ->
+    utf8(atom_to_list(V)).
 
 
 %% LOCAL

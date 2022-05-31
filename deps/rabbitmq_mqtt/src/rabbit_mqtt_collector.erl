@@ -1,101 +1,88 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mqtt_collector).
 
--behaviour(gen_server).
+-include("mqtt_machine.hrl").
 
--export([start_link/0, register/2, unregister/2, list/0]).
-
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
-
--record(state, {client_ids}).
-
--define(SERVER, ?MODULE).
+-export([register/2, register/3, unregister/2, list/0, leave/1]).
 
 %%----------------------------------------------------------------------------
-
-start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
-
+-spec register(term(), pid()) -> {ok, reference()} | {error, term()}.
 register(ClientId, Pid) ->
-    gen_server:call(rabbit_mqtt_collector, {register, ClientId, Pid}, infinity).
+    {ClusterName, _} = NodeId = mqtt_node:server_id(),
+    case ra_leaderboard:lookup_leader(ClusterName) of
+        undefined ->
+            case ra:members(NodeId) of
+                {ok, _, Leader} ->
+                    register(Leader, ClientId, Pid);
+                 _ = Error ->
+                    Error
+            end;
+        Leader ->
+            register(Leader, ClientId, Pid)
+    end.
+
+-spec register(ra:server_id(), term(), pid()) ->
+    {ok, reference()} | {error, term()}.
+register(ServerId, ClientId, Pid) ->
+    Corr = make_ref(),
+    send_ra_command(ServerId, {register, ClientId, Pid}, Corr),
+    erlang:send_after(5000, self(), {ra_event, undefined, register_timeout}),
+    {ok, Corr}.
 
 unregister(ClientId, Pid) ->
-    gen_server:call(rabbit_mqtt_collector, {unregister, ClientId, Pid}, infinity).
+    {ClusterName, _} = mqtt_node:server_id(),
+    case ra_leaderboard:lookup_leader(ClusterName) of
+        undefined ->
+            ok;
+        Leader ->
+            send_ra_command(Leader, {unregister, ClientId, Pid}, no_correlation)
+    end.
 
 list() ->
-    gen_server:call(rabbit_mqtt_collector, list).
+    {ClusterName, _} = mqtt_node:server_id(),
+     QF = fun (#machine_state{client_ids = Ids}) -> maps:to_list(Ids) end,
+    case ra_leaderboard:lookup_leader(ClusterName) of
+        undefined ->
+            NodeIds = mqtt_node:all_node_ids(),
+            case ra:leader_query(NodeIds, QF) of
+                {ok, {_, Ids}, _} -> Ids;
+                {timeout, _}      ->
+                    rabbit_log:debug("~s:list/0 leader query timed out",
+                                     [?MODULE]),
+                    []
+            end;
+        Leader ->
+            case ra:leader_query(Leader, QF) of
+                {ok, {_, Ids}, _} -> Ids;
+                {error, _} ->
+                    [];
+                {timeout, _}      ->
+                    rabbit_log:debug("~s:list/0 leader query timed out",
+                                     [?MODULE]),
+                    []
+            end
+    end.
+
+leave(NodeBin) ->
+    Node = binary_to_atom(NodeBin, utf8),
+    ServerId = mqtt_node:server_id(),
+    run_ra_command(ServerId, {leave, Node}),
+    mqtt_node:leave(Node).
 
 %%----------------------------------------------------------------------------
+-spec run_ra_command(term(), term()) -> term() | {error, term()}.
+run_ra_command(ServerId, RaCommand) ->
+    case ra:process_command(ServerId, RaCommand) of
+        {ok, Result, _} -> Result;
+        _ = Error -> Error
+    end.
 
-init([]) ->
-    {ok, #state{client_ids = #{}}}. % clientid -> {pid, monitor}
-
-%%--------------------------------------------------------------------------
-
-handle_call({register, ClientId, Pid}, _From,
-            State = #state{client_ids = Ids}) ->
-    Ids1 = case maps:find(ClientId, Ids) of
-               {ok, {OldPid, MRef}} when Pid =/= OldPid ->
-                   catch gen_server2:cast(OldPid, duplicate_id),
-                   erlang:demonitor(MRef),
-                   maps:remove(ClientId, Ids);
-               error ->
-                   Ids
-           end,
-    Ids2 = maps:put(ClientId, {Pid, erlang:monitor(process, Pid)}, Ids1),
-    {reply, ok, State#state{client_ids = Ids2}};
-
-handle_call({unregister, ClientId, Pid}, _From, State = #state{client_ids = Ids}) ->
-    {Reply, Ids1} = case maps:find(ClientId, Ids) of
-                        {ok, {Pid, MRef}} -> erlang:demonitor(MRef),
-                                             {ok, maps:remove(ClientId, Ids)};
-                        _                 -> {ok, Ids}
-                    end,
-    {reply, Reply, State#state{ client_ids = Ids1 }};
-
-handle_call(list, _From, State = #state{client_ids = Ids}) ->
-    {reply, maps:to_list(Ids), State};
-
-handle_call(Msg, _From, State) ->
-    {stop, {unhandled_call, Msg}, State}.
-
-handle_cast(Msg, State) ->
-    {stop, {unhandled_cast, Msg}, State}.
-
-handle_info({'EXIT', _, {shutdown, closed}}, State) ->
-    {stop, {shutdown, closed}, State};
-
-handle_info({'DOWN', MRef, process, DownPid, _Reason},
-            State = #state{client_ids = Ids}) ->
-    Ids1 = maps:filter(fun (ClientId, {Pid, M})
-                           when Pid =:= DownPid, MRef =:= M ->
-                               rabbit_log_connection:warning(
-                                              "MQTT disconnect from ~p~n",
-                                              [ClientId]),
-                               false;
-                           (_, _) ->
-                               true
-                       end, Ids),
-    {noreply, State #state{ client_ids = Ids1 }}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+-spec send_ra_command(term(), term(), term()) -> ok.
+send_ra_command(ServerId, RaCommand, Correlation) ->
+    ok = ra:pipeline_command(ServerId, RaCommand, Correlation, normal).

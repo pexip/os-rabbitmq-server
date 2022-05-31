@@ -4,7 +4,7 @@
     "minor-version": 0,
     "port": 5672,
     "copyright": [
-        "Copyright (C) 2008-2016 Pivotal Software, Inc, Inc.\n",
+        "Copyright (C) 2008-2020 VMware, Inc. or its affiliates.\n",
         "\n",
         "Permission is hereby granted, free of charge, to any person\n",
         "obtaining a copy of this file (the \"Software\"), to deal in the\n",
@@ -29,7 +29,7 @@
         "Class information entered from amqp_xml0-8.pdf and domain types from amqp-xml-doc0-9.pdf\n",
         "\n",
         "b3cb053f15e7b98808c0ccc67f23cb3e  amqp_xml0-8.pdf\n",
-        "http://www.twiststandards.org/index.php?option=com_docman&task=cat_view&gid=28&&Itemid=90\n",
+        "http://twiststandards.org/?option=com_docman&task=cat_view&gid=28&Itemid=90\n",
         "8444db91e2949dbecfb2585e9eef6d64  amqp-xml-doc0-9.pdf\n",
         "https://jira.amqp.org/confluence/download/attachments/720900/amqp-xml-doc0-9.pdf?version=1\n"],
 

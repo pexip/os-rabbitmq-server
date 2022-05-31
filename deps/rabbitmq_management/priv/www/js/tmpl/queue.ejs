@@ -1,11 +1,13 @@
-<h1>Queue <b><%= fmt_string(queue.name) %></b><%= fmt_maybe_vhost(queue.vhost) %></h1>
+<h1>Queue <b><%= fmt_string(highlight_extra_whitespace(queue.name)) %></b><%= fmt_maybe_vhost(queue.vhost) %></h1>
 
 <div class="section">
   <h2>Overview</h2>
+<% if(!disable_stats) { %>
   <div class="hider updatable">
     <%= queue_lengths('lengths-q', queue) %>
 <% if (rates_mode != 'none') { %>
     <%= message_rates('msg-rates-q', queue.message_stats) %>
+<% } %>
 <% } %>
 
     <h3>Details</h3>
@@ -14,6 +16,7 @@
         <th>Features</th>
         <td><%= fmt_features(queue) %></td>
       </tr>
+<% if(!disable_stats) { %>
       <tr>
         <th>Policy</th>
         <td><%= link_policy(queue.vhost, queue.policy) %></td>
@@ -22,17 +25,55 @@
         <th>Operator policy</th>
         <td><%= fmt_string(queue.operator_policy, '') %></td>
       </tr>
+      <% if (queue.owner_pid_details != undefined) { %>
+        <tr>
+          <th>Exclusive owner</th>
+          <td><%= link_conn(queue.owner_pid_details.name) %></td>
+        </tr>
+      <% } %>
       <tr>
         <th>Effective policy definition</th>
         <td><%= fmt_table_short(queue.effective_policy_definition) %></td>
       </tr>
+<% } %>
 <% if (nodes_interesting) { %>
       <tr>
+      <% if (is_quorum(queue)) { %>
+        <th>Leader</th>
+      <% } else { %>
         <th>Node</th>
+      <% } %>
+      <% if (queue.leader) { %>
+        <td><%= fmt_node(queue.leader) %></td>
+      <% } else { %>
         <td><%= fmt_node(queue.node) %></td>
+      <% } %>
       </tr>
-  <% if (!queue.exclusive) { %>
+  <% if (is_quorum(queue)) { %>
       <tr>
+        <th>Online</th>
+                                              <td>
+                                              <%
+                                              for (var i in queue.online) {
+                                                      %>
+                                                      <%= fmt_node(queue.online[i]) %>
+                                                      <br/>
+                                                      <% } %>
+                                              </td>
+      </tr>
+        <th>Members</th>
+                                              <td>
+                                              <%
+                                              for (var i in queue.members) {
+                                                      %>
+                                                      <%= fmt_node(queue.members[i]) %>
+                                                      <br/>
+                                                      <% } %>
+                                              </td>
+      </tr>
+  <% } else { %>
+    <% if (!queue.exclusive) { %>
+        <tr>
         <th>Mirrors</th>
         <td>
           <%
@@ -77,9 +118,11 @@
         </td>
       </tr>
   <% } %>
+  <% } %>
 <% } %>
     </table>
 
+<% if(!disable_stats) { %>
     <table class="facts facts-l">
       <tr>
         <th>State</th>
@@ -93,6 +136,12 @@
         <th>Consumer utilisation <span class="help" id="queue-consumer-utilisation"></th>
         <td><%= fmt_percent(queue.consumer_utilisation) %></td>
       </tr>
+      <% if (is_quorum(queue)) { %>
+      <tr>
+        <th>Open files</th>
+        <td><%= fmt_table_short(queue.open_files) %></td>
+      </tr>
+      <% } %>
     </table>
 
     <table class="facts">
@@ -101,9 +150,14 @@
         <th class="horizontal">Total</th>
         <th class="horizontal">Ready</th>
         <th class="horizontal">Unacked</th>
+        <% if (is_quorum(queue)) { %>
+        <th class="horizontal">In memory ready</th>
+        <% } %>
+        <% if (is_classic(queue)) { %>
         <th class="horizontal">In memory</th>
         <th class="horizontal">Persistent</th>
         <th class="horizontal">Transient, Paged Out</th>
+        <% } %>
       </tr>
       <tr>
         <th>
@@ -122,12 +176,14 @@
         <td class="r">
           <%= fmt_num_thousands(queue.messages_ram) %>
         </td>
+        <% if (is_classic(queue)) { %>
         <td class="r">
           <%= fmt_num_thousands(queue.messages_persistent) %>
         </td>
         <td class="r">
           <%= fmt_num_thousands(queue.messages_paged_out) %>
         </td>
+        <% } %>
       </tr>
       <tr>
         <th>
@@ -146,12 +202,14 @@
         <td class="r">
           <%= fmt_bytes(queue.message_bytes_ram) %>
         </td>
+        <% if (is_classic(queue)) { %>
         <td class="r">
           <%= fmt_bytes(queue.message_bytes_persistent) %>
         </td>
         <td class="r">
           <%= fmt_bytes(queue.message_bytes_paged_out) %>
         </td>
+        <% } %>
       </tr>
       <tr>
         <th>
@@ -161,6 +219,7 @@
         <td class="r"><%= fmt_bytes(queue.memory) %></td>
       </tr>
     </table>
+    <% } %>
   </div>
 </div>
 
@@ -186,14 +245,18 @@
 </table>
 </div>
 </div>
+
 <% } %>
 
+
+<% if(!disable_stats) { %>
 <div class="section-hidden">
   <h2>Consumers</h2>
   <div class="hider updatable">
 <%= format('consumers', {'mode': 'queue', 'consumers': queue.consumer_details}) %>
   </div>
 </div>
+<% } %>
 
 <div class="section-hidden">
   <h2>Bindings</h2>

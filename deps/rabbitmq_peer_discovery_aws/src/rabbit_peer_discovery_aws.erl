@@ -1,18 +1,10 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
-%%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2017 Pivotal Software, Inc. All rights reserved.
+%% Copyright (c) 2016-2020 VMware, Inc. or its affiliates. All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_aws).
@@ -31,6 +23,13 @@
 -compile(export_all).
 -endif.
 
+% rabbitmq/rabbitmq-peer-discovery-aws#25
+
+% Note: this timeout must not be greater than the default
+% gen_server:call timeout of 5000ms. Note that `timeout`,
+% when set, is used as the connect and then request timeout
+% by `httpc`
+-define(INSTANCE_ID_TIMEOUT, 2250).
 -define(INSTANCE_ID_URL,
         "http://169.254.169.254/latest/meta-data/instance-id").
 
@@ -83,7 +82,8 @@ init() ->
     %% we cannot start this plugin yet since it depends on the rabbit app,
     %% which is in the process of being started by the time this function is called
     application:load(rabbitmq_peer_discovery_common),
-    rabbit_peer_discovery_httpc:maybe_configure_proxy().
+    rabbit_peer_discovery_httpc:maybe_configure_proxy(),
+    rabbit_peer_discovery_httpc:maybe_configure_inet6().
 
 -spec list_nodes() -> {ok, {Nodes :: list(), NodeType :: rabbit_types:node_type()}}.
 
@@ -101,7 +101,6 @@ list_nodes() ->
         false ->
             get_node_list_from_tags(get_tags())
     end.
-
 
 -spec supports_registration() -> boolean().
 
@@ -357,7 +356,8 @@ select_hostname() ->
 %% @end
 %%
 instance_id() ->
-    case httpc:request(?INSTANCE_ID_URL) of
+    case httpc:request(get, {?INSTANCE_ID_URL, []},
+                       [{timeout, ?INSTANCE_ID_TIMEOUT}], []) of
         {ok, {{_, 200, _}, _, Value}} ->
             rabbit_log:debug("Fetched EC2 instance ID from ~p: ~p",
                              [?INSTANCE_ID_URL, Value]),

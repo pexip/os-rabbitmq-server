@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2014 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_boot_steps).
@@ -23,7 +14,10 @@ run_boot_steps() ->
     run_boot_steps(loaded_applications()).
 
 run_boot_steps(Apps) ->
-    [ok = run_step(Attrs, mfa) || {_, _, Attrs} <- find_steps(Apps)],
+    [begin
+      rabbit_log:info("Running boot step ~s defined by app ~s", [Step, App]),
+      ok = run_step(Attrs, mfa)
+    end || {App, Step, Attrs} <- find_steps(Apps)],
     ok.
 
 run_cleanup_steps(Apps) ->
@@ -41,17 +35,17 @@ find_steps(Apps) ->
     [Step || {App, _, _} = Step <- All, lists:member(App, Apps)].
 
 run_step(Attributes, AttributeName) ->
-    case [MFA || {Key, MFA} <- Attributes,
-                 Key =:= AttributeName] of
-        [] ->
-            ok;
-        MFAs ->
-            [case apply(M,F,A) of
-                 ok              -> ok;
-                 {error, Reason} -> exit({error, Reason})
-             end || {M,F,A} <- MFAs],
-            ok
-    end.
+    [begin
+        rabbit_log:debug("Applying MFA: M = ~s, F = ~s, A = ~p",
+                        [M, F, A]),
+        case apply(M,F,A) of
+            ok              -> ok;
+            {error, Reason} -> exit({error, Reason})
+        end
+     end
+      || {Key, {M,F,A}} <- Attributes,
+          Key =:= AttributeName],
+    ok.
 
 vertices({AppName, _Module, Steps}) ->
     [{StepName, {AppName, StepName, Atts}} || {StepName, Atts} <- Steps].

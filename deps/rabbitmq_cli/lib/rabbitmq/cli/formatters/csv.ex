@@ -1,89 +1,97 @@
-## The contents of this file are subject to the Mozilla Public License
-## Version 1.1 (the "License"); you may not use this file except in
-## compliance with the License. You may obtain a copy of the License
-## at http://www.mozilla.org/MPL/
+## This Source Code Form is subject to the terms of the Mozilla Public
+## License, v. 2.0. If a copy of the MPL was not distributed with this
+## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Software distributed under the License is distributed on an "AS IS"
-## basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-## the License for the specific language governing rights and
-## limitations under the License.
-##
-## The Original Code is RabbitMQ.
-##
-## The Initial Developer of the Original Code is GoPivotal, Inc.
-## Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 
 alias RabbitMQ.CLI.Formatters.FormatterHelpers
 
 defmodule RabbitMQ.CLI.Formatters.Csv do
-
   @behaviour RabbitMQ.CLI.FormatterBehaviour
 
   def format_stream(stream, _) do
     ## Flatten list_consumers
-    Stream.flat_map(stream,
-                    fn([first | _] = element) ->
-                        case Keyword.keyword?(first) or is_map(first) do
-                          true  -> element;
-                          false -> [element]
-                        end
-                      (other) ->
-                        [other]
-                    end)
+    Stream.flat_map(
+      stream,
+      fn
+        [first | _] = element ->
+          case FormatterHelpers.proplist?(first) or is_map(first) do
+            true -> element
+            false -> [element]
+          end
+
+        other ->
+          [other]
+      end
+    )
     ## Add info_items names
-    |> Stream.transform(:init,
-                        FormatterHelpers.without_errors_2(
-                          fn(element, :init) ->
-                              {
-                                case keys(element) do
-                                  nil -> [values(element)];
-                                  ks  -> [ks, values(element)]
-                                end,
-                                :next
-                               };
-                            (element, :next) ->
-                              {[values(element)], :next}
-                            end))
-    |> CSV.encode([delimiter: ""])
+    |> Stream.transform(
+      :init,
+      FormatterHelpers.without_errors_2(fn
+        element, :init ->
+          {
+            case keys(element) do
+              nil -> [values(element)]
+              ks -> [ks, values(element)]
+            end,
+            :next
+          }
+
+        element, :next ->
+          {[values(element)], :next}
+      end)
+    )
+    |> CSV.encode(delimiter: "")
   end
 
   def format_output(output, _) do
     case keys(output) do
-      nil -> [values(output)];
-      ks  -> [ks, values(output)]
+      nil -> [values(output)]
+      ks -> [ks, values(output)]
     end
-    |> CSV.encode
+    |> CSV.encode()
+    |> Enum.join()
   end
 
-  def keys(map) when is_map(map) do
+  def machine_readable?, do: true
+
+  #
+  # Implementation
+  #
+
+  defp keys(map) when is_map(map) do
     Map.keys(map)
   end
-  def keys(list) when is_list(list) do
-    case Keyword.keyword?(list) do
-      true  -> Keyword.keys(list);
+
+  defp keys(list) when is_list(list) do
+    case FormatterHelpers.proplist?(list) do
+      true -> Keyword.keys(list)
       false -> nil
     end
   end
-  def keys(_other) do
+
+  defp keys(_other) do
     nil
   end
 
-  def values(map) when is_map(map) do
+  defp values(map) when is_map(map) do
     Map.values(map)
   end
-  def values([]) do
+
+  defp values([]) do
     []
   end
-  def values(list) when is_list(list) do
-    case Keyword.keyword?(list) do
-      true  -> Keyword.values(list);
+
+  defp values(list) when is_list(list) do
+    case FormatterHelpers.proplist?(list) do
+      true -> Keyword.values(list)
       false -> list
     end
   end
-  def values(other) do
+
+  defp values(other) do
     other
   end
-
 end
 
 defimpl CSV.Encode, for: PID do

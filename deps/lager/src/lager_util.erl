@@ -27,15 +27,21 @@
     localtime_ms/0, localtime_ms/1, maybe_utc/1, parse_rotation_date_spec/1,
     calculate_next_rotation/1, validate_trace/1, check_traces/4, is_loggable/3,
     trace_filter/1, trace_filter/2, expand_path/1, find_file/2, check_hwm/1, check_hwm/2,
-    make_internal_sink_name/1, otp_version/0, maybe_flush/2
+    make_internal_sink_name/1, otp_version/0, maybe_flush/2,
+    has_file_changed/3
 ]).
 
 -ifdef(TEST).
--export([create_test_dir/0, delete_test_dir/1]).
+-export([create_test_dir/0, get_test_dir/0, delete_test_dir/0,
+         set_dir_permissions/2,
+         safe_application_load/1,
+         safe_write_file/2]).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
 -include("lager.hrl").
+
+-include_lib("kernel/include/file.hrl").
 
 levels() ->
     [debug, info, notice, warning, error, critical, alert, emergency, none].
@@ -268,9 +274,8 @@ calculate_next_rotation([{day, Day}|T], {Date, _Time} = Now) ->
     end,
     case AdjustedDay of
         DoW -> %% rotation is today
-            OldDate = element(1, Now),
             case calculate_next_rotation(T, Now) of
-                {OldDate, _} = NewNow -> NewNow;
+                {Date, _} = NewNow -> NewNow;
                 {NewDate, _} ->
                     %% rotation *isn't* today! rerun the calculation
                     NewNow = {NewDate, {0, 0, 0}},
@@ -293,9 +298,8 @@ calculate_next_rotation([{date, last}|T], {{Year, Month, Day}, _} = Now) ->
     Last = calendar:last_day_of_the_month(Year, Month),
     case Last == Day of
         true -> %% doing rotation today
-            OldDate = element(1, Now),
             case calculate_next_rotation(T, Now) of
-                {OldDate, _} = NewNow -> NewNow;
+                {{Year, Month, Day}, _} = NewNow -> NewNow;
                 {NewDate, _} ->
                     %% rotation *isn't* today! rerun the calculation
                     NewNow = {NewDate, {0, 0, 0}},
@@ -305,11 +309,10 @@ calculate_next_rotation([{date, last}|T], {{Year, Month, Day}, _} = Now) ->
             NewNow = setelement(1, Now, {Year, Month, Last}),
             calculate_next_rotation(T, NewNow)
     end;
-calculate_next_rotation([{date, Date}|T], {{_, _, Date}, _} = Now) ->
+calculate_next_rotation([{date, Date}|T], {{Year, Month, Date}, _} = Now) ->
     %% rotation is today
-    OldDate = element(1, Now),
     case calculate_next_rotation(T, Now) of
-        {OldDate, _} = NewNow -> NewNow;
+        {{Year, Month, Date}, _} = NewNow -> NewNow;
         {NewDate, _} ->
             %% rotation *isn't* today! rerun the calculation
             NewNow = setelement(1, Now, NewDate),
@@ -444,7 +447,9 @@ is_loggable(Msg, {mask, Mask}, MyName) ->
     %?debugFmt("comparing masks ~.2B and ~.2B -> ~p~n", [S, Mask, S band Mask]),
     (lager_msg:severity_as_int(Msg) band Mask) /= 0 orelse
     lists:member(MyName, lager_msg:destinations(Msg));
-is_loggable(Msg ,SeverityThreshold,MyName) ->
+is_loggable(Msg, SeverityThreshold, MyName) when is_atom(SeverityThreshold) ->
+    is_loggable(Msg, level_to_num(SeverityThreshold), MyName);
+is_loggable(Msg, SeverityThreshold, MyName) when is_integer(SeverityThreshold) ->
     lager_msg:severity_as_int(Msg) =< SeverityThreshold orelse
     lists:member(MyName, lager_msg:destinations(Msg)).
 
@@ -502,9 +507,15 @@ check_hwm(Shaper = #lager_shaper{filter = Filter}, Event) ->
 
 check_hwm(Shaper = #lager_shaper{hwm = undefined}) ->
     {true, 0, Shaper};
-check_hwm(Shaper = #lager_shaper{mps = Mps, hwm = Hwm}) when Mps < Hwm ->
-    %% haven't hit high water mark yet, just log it
-    {true, 0, Shaper#lager_shaper{mps=Mps+1}};
+check_hwm(Shaper = #lager_shaper{mps = Mps, hwm = Hwm, lasttime = Last}) when Mps < Hwm ->
+    {M, S, _} = Now = os:timestamp(),
+    case Last of
+        {M, S, _} ->
+            {true, 0, Shaper#lager_shaper{mps=Mps+1}};
+        _ ->
+            %different second - reset mps
+            {true, 0, Shaper#lager_shaper{mps=1, lasttime = Now}}
+    end;
 check_hwm(Shaper = #lager_shaper{lasttime = Last, dropped = Drop}) ->
     %% are we still in the same second?
     {M, S, _} = Now = os:timestamp(),
@@ -525,9 +536,9 @@ check_hwm(Shaper = #lager_shaper{lasttime = Last, dropped = Drop}) ->
                     end,
             {false, 0, Shaper#lager_shaper{dropped=Drop+NewDrops, timer=Timer}};
         _ ->
-            erlang:cancel_timer(Shaper#lager_shaper.timer),
+            _ = erlang:cancel_timer(Shaper#lager_shaper.timer),
             %% different second, reset all counters and allow it
-            {true, Drop, Shaper#lager_shaper{dropped = 0, mps=1, lasttime = Now}}
+            {true, Drop, Shaper#lager_shaper{dropped = 0, mps=0, lasttime = Now}}
     end.
 
 should_flush(#lager_shaper{flush_queue = true, flush_threshold = 0}) ->
@@ -583,6 +594,26 @@ maybe_flush(undefined, #lager_shaper{} = S) ->
     S;
 maybe_flush(Flag, #lager_shaper{} = S) when is_boolean(Flag) ->
     S#lager_shaper{flush_queue = Flag}.
+
+-spec has_file_changed(Name :: file:name_all(),
+                       Inode0 :: pos_integer(),
+                       Ctime0 :: file:date_time()) -> {boolean(), file:file_info() | undefined}.
+has_file_changed(Name, Inode0, Ctime0) ->
+    {OsType, _} = os:type(),
+    F = file:read_file_info(Name, [raw]),
+    case {OsType, F} of
+        {win32, {ok, #file_info{ctime=Ctime1}=FInfo}} ->
+            % Note: on win32, Inode is always zero
+            % So check the file's ctime to see if it
+            % needs to be re-opened
+            Changed = Ctime0 =/= Ctime1,
+            {Changed, FInfo};
+        {_, {ok, #file_info{inode=Inode1}=FInfo}} ->
+            Changed = Inode0 =/= Inode1,
+            {Changed, FInfo};
+        {_, _} ->
+            {true, undefined}
+    end.
 
 -ifdef(TEST).
 
@@ -821,24 +852,56 @@ sink_name_test_() ->
     ].
 
 create_test_dir() ->
-    Dir = filename:join(["/tmp", "lager_test",
+    {ok, Tmp} = get_temp_dir(),
+    Dir = filename:join([Tmp, "lager_test",
         erlang:integer_to_list(erlang:phash2(os:timestamp()))]),
     ?assertEqual(ok, filelib:ensure_dir(Dir)),
-    case file:make_dir(Dir) of
-        ok ->
-            Dir;
-        Err ->
-            ?assertEqual({error, eexist}, Err),
-            create_test_dir()
+    TestDir = case file:make_dir(Dir) of
+                  ok ->
+                      Dir;
+                  Err ->
+                      ?assertEqual({error, eexist}, Err),
+                      create_test_dir()
+                  end,
+    ok = application:set_env(lager, test_dir, TestDir),
+    {ok, TestDir}.
+
+get_test_dir() ->
+    case application:get_env(lager, test_dir) of
+        undefined ->
+            create_test_dir();
+        {ok, _}=Res ->
+            Res
     end.
 
-delete_test_dir(Dir) ->
-    case otp_version() of
-        15 ->
-            os:cmd("rm -rf " ++ Dir);
-        _ ->
-            do_delete_test_dir(Dir)
-    end.
+get_temp_dir() ->
+    Tmp = case os:getenv("TEMP") of
+              false ->
+                  case os:getenv("TMP") of
+                      false -> "/tmp";
+                      Dir1 -> Dir1
+                  end;
+               Dir0 -> Dir0
+          end,
+    ?assertEqual(true, filelib:is_dir(Tmp)),
+    {ok, Tmp}.
+
+delete_test_dir() ->
+    {ok, TestDir} = get_test_dir(),
+    ok = delete_test_dir(TestDir).
+
+delete_test_dir(TestDir) ->
+    ok = application:unset_env(lager, test_dir),
+    {OsType, _} = os:type(),
+    ok = case {OsType, otp_version()} of
+             {win32, _} ->
+                 application:stop(lager),
+                 do_delete_test_dir(TestDir);
+             {unix, 15} ->
+                 os:cmd("rm -rf " ++ TestDir);
+             {unix, _} ->
+                 do_delete_test_dir(TestDir)
+         end.
 
 do_delete_test_dir(Dir) ->
     ListRet = file:list_dir_all(Dir),
@@ -851,9 +914,54 @@ do_delete_test_dir(Dir) ->
                 true ->
                     delete_test_dir(FsElem);
                 _ ->
-                    ?assertEqual(ok, file:delete(FsElem))
+                    case file:delete(FsElem) of
+                        ok -> ok;
+                        Error ->
+                            io:format(standard_error, "[ERROR]: error deleting file ~p~n", [FsElem]),
+                            ?assertEqual(ok, Error)
+                    end
             end
         end, Entries),
     ?assertEqual(ok, file:del_dir(Dir)).
+
+do_delete_file(_FsElem, 0) ->
+    ?assert(false);
+do_delete_file(FsElem, Attempts) ->
+    case file:delete(FsElem) of
+        ok -> ok;
+        _Error ->
+            do_delete_file(FsElem, Attempts - 1)
+    end.
+
+set_dir_permissions(Perms, Dir) ->
+    do_set_dir_permissions(os:type(), Perms, Dir).
+
+do_set_dir_permissions({win32, _}, _Perms, _Dir) ->
+    ok;
+do_set_dir_permissions({unix, _}, Perms, Dir) ->
+    os:cmd("chmod -R " ++ Perms ++ " " ++ Dir),
+    ok.
+
+safe_application_load(App) ->
+    case application:load(App) of
+        ok ->
+            ok;
+        {error, {already_loaded, App}} ->
+            ok;
+        Error ->
+            ?assertEqual(ok, Error)
+    end.
+
+safe_write_file(File, Content) ->
+    % Note: ensures that the new creation time is at least one second
+    % in the future
+    ?assertEqual(ok, file:write_file(File, Content)),
+    Ctime0 = calendar:local_time(),
+    Ctime0Sec = calendar:datetime_to_gregorian_seconds(Ctime0),
+    Ctime1Sec = Ctime0Sec + 1,
+    Ctime1 = calendar:gregorian_seconds_to_datetime(Ctime1Sec),
+    {ok, FInfo0} = file:read_file_info(File, [raw]),
+    FInfo1 = FInfo0#file_info{ctime = Ctime1},
+    ?assertEqual(ok, file:write_file_info(File, FInfo1, [raw])).
 
 -endif.

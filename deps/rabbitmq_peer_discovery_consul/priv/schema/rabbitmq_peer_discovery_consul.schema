@@ -237,3 +237,81 @@ fun(Conf) ->
         Value     -> Value
     end
 end}.
+
+%% service tags
+
+{mapping, "cluster_formation.consul.svc_tags", "rabbit.cluster_formation.peer_discovery_consul.consul_svc_tags", [
+    {datatype, {enum, [none]}}
+]}.
+
+{mapping, "cluster_formation.consul.svc_tags.$name", "rabbit.cluster_formation.peer_discovery_consul.consul_svc_tags", [
+    {datatype, string}
+]}.
+
+{translation, "rabbit.cluster_formation.peer_discovery_consul.consul_svc_tags",
+fun(Conf) ->
+    case cuttlefish:conf_get("cluster_formation.consul.svc_tags", Conf, undefined) of
+        none -> [];
+        _ ->
+            Pairs = cuttlefish_variable:filter_by_prefix("cluster_formation.consul.svc_tags", Conf),
+            [V || {_, V} <- Pairs]
+    end
+end}.
+
+%% service metadata
+
+{mapping, "cluster_formation.consul.svc_meta", "rabbit.cluster_formation.peer_discovery_consul.consul_svc_meta", [
+    {datatype, {enum, [none]}}
+]}.
+
+{mapping, "cluster_formation.consul.svc_meta.$name", "rabbit.cluster_formation.peer_discovery_consul.consul_svc_meta", [
+    {datatype, string}
+]}.
+
+{translation, "rabbit.cluster_formation.peer_discovery_consul.consul_svc_meta",
+fun(Conf) ->
+    case cuttlefish:conf_get("cluster_formation.consul.svc_meta", Conf, undefined) of
+        none -> [];
+        _    ->
+          Pairs = cuttlefish_variable:filter_by_prefix("cluster_formation.consul.svc_meta", Conf),
+          [{list_to_binary(lists:last(Segments)), list_to_binary(V)} || {Segments, V} <- Pairs]
+    end
+end}.
+
+%% lock key prefix
+
+{mapping, "cluster_formation.consul.lock_prefix", "rabbit.cluster_formation.peer_discovery_consul.consul_lock_prefix", [
+    {datatype, string}
+]}.
+
+{translation, "rabbit.cluster_formation.peer_discovery_consul.consul_lock_prefix",
+fun(Conf) ->
+    case cuttlefish:conf_get("cluster_formation.consul.lock_prefix", Conf, undefined) of
+        undefined -> cuttlefish:unset();
+        Value     -> Value
+    end
+end}.
+
+%% lock acquisition timeout
+
+{mapping, "cluster_formation.consul.lock_wait_time", "rabbit.cluster_formation.peer_discovery_consul.lock_wait_time", [
+    {datatype, integer}, {validators, ["non_negative_integer"]}
+]}.
+
+{mapping, "cluster_formation.consul.lock_timeout", "rabbit.cluster_formation.peer_discovery_consul.lock_wait_time", [
+    {datatype, integer}, {validators, ["non_negative_integer"]}
+]}.
+
+%% an alias for lock acquisition timeout to be consistent with the etcd backend
+
+{translation, "rabbit.cluster_formation.peer_discovery_consul.lock_wait_time",
+fun(Conf) ->
+    case cuttlefish:conf_get("cluster_formation.consul.lock_timeout", Conf, undefined) of
+        undefined ->
+            case cuttlefish:conf_get("cluster_formation.consul.lock_wait_time", Conf, undefined) of
+                    undefined -> cuttlefish:unset();
+                    Value     -> Value
+                end;
+        Value -> Value
+    end
+end}.

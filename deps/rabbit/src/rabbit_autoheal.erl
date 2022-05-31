@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_autoheal).
@@ -372,6 +363,7 @@ wait_for_supervisors(Monitors) ->
 restart_loser(State, Winner) ->
     rabbit_log:warning(
       "Autoheal: we were selected to restart; winner is ~p~n", [Winner]),
+    NextStateTimeout = application:get_env(rabbit, autoheal_state_transition_timeout, 60000),
     rabbit_node_monitor:run_outside_applications(
       fun () ->
               MRef = erlang:monitor(process, {?SERVER, Winner}),
@@ -381,6 +373,11 @@ restart_loser(State, Winner) ->
                       not_healing;
                   autoheal_safe_to_start ->
                       State
+                  after NextStateTimeout ->
+                      rabbit_log:warning(
+                          "Autoheal: timed out waiting for a safe-to-start message from the winner (~p); will retry",
+                          [Winner]),
+                      not_healing
               end,
               erlang:demonitor(MRef, [flush]),
               %% During the restart, the autoheal state is lost so we

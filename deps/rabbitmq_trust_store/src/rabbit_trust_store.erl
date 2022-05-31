@@ -1,16 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_trust_store).
@@ -146,10 +138,10 @@ init([]) ->
         Interval  >  0 ->
             erlang:send_after(Interval, erlang:self(), refresh)
     end,
-    {ok,
-     #state{
-      providers_state = ProvidersState,
-      refresh_interval = Interval}}.
+    State = #state{
+        providers_state = ProvidersState,
+        refresh_interval = Interval},
+    {ok, State}.
 
 handle_call(mode, _, St) ->
     {reply, mode(St), St};
@@ -165,10 +157,18 @@ handle_cast(_, St) ->
 
 handle_info(refresh, #state{refresh_interval = Interval,
                             providers_state = ProvidersState} = St) ->
-    Config = application:get_all_env(rabbitmq_trust_store),
-    NewProvidersState = refresh_certs(Config, ProvidersState),
-    erlang:send_after(Interval, erlang:self(), refresh),
-    {noreply, St#state{providers_state = NewProvidersState}};
+        Config = application:get_all_env(rabbitmq_trust_store),
+        try
+            rabbit_log:debug("Trust store will attempt to refresh certificates..."),
+            NewProvidersState = refresh_certs(Config, ProvidersState),
+            {noreply, St#state{providers_state = NewProvidersState}}
+        catch
+            _:Error  ->
+                rabbit_log:error("Failed to refresh certificates: ~p", [Error]),
+                {noreply, St#state{providers_state = ProvidersState}}
+        after
+            erlang:send_after(Interval, erlang:self(), refresh)
+        end;
 handle_info(_, St) ->
     {noreply, St}.
 
@@ -227,8 +227,13 @@ refresh_certs(Config, State) ->
 refresh_provider_certs(Provider, Config, ProviderState) ->
     case list_certs(Provider, Config, ProviderState) of
         no_change ->
+            rabbit_log:debug("Trust store provider reported no certificate changes"),
+            ProviderState;
+        ok ->
+            rabbit_log:debug("Trust store provider reported no certificate changes"),
             ProviderState;
         {ok, CertsList, NewProviderState} ->
+            rabbit_log:debug("Trust store listed certificates: ~p", [CertsList]),
             update_certs(CertsList, Provider, Config),
             NewProviderState;
         {error, Reason} ->
@@ -244,6 +249,7 @@ list_certs(Provider, Config, ProviderState) ->
     Provider:list_certs(Config, ProviderState).
 
 update_certs(CertsList, Provider, Config) ->
+    rabbit_log:debug("Updating ~p fetched trust store certificates", [length(CertsList)]),
     OldCertIds = get_old_cert_ids(Provider),
     {NewCertIds, _} = lists:unzip(CertsList),
 
@@ -278,8 +284,8 @@ load_and_decode_cert(Provider, CertId, Attributes, Config) ->
                 {ok, Cert, Id};
             {error, Reason} -> {error, Reason}
         end
-    catch _:Error ->
-        {error, {Error, erlang:get_stacktrace()}}
+    catch _:Error:Stacktrace ->
+        {error, {Error, Stacktrace}}
     end.
 
 delete_cert(CertId, Provider) ->

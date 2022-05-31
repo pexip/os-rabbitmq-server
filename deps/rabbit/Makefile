@@ -29,6 +29,7 @@ define PROJECT_ENV
 	    {connection_max, infinity},
 	    {heartbeat, 60},
 	    {msg_store_file_size_limit, 16777216},
+	    {msg_store_shutdown_timeout, 600000},
 	    {fhc_write_buffering, true},
 	    {fhc_read_buffering, false},
 	    {queue_index_max_journal_entries, 32768},
@@ -56,30 +57,13 @@ define PROJECT_ENV
 	    {reverse_dns_lookups, false},
 	    {cluster_partition_handling, ignore},
 	    {cluster_keepalive_interval, 10000},
+	    {autoheal_state_transition_timeout, 60000},
 	    {tcp_listen_options, [{backlog,       128},
 	                          {nodelay,       true},
 	                          {linger,        {true, 0}},
 	                          {exit_on_close, false}
 	                         ]},
 	    {halt_on_upgrade_failure, true},
-	    {hipe_compile, false},
-	    %% see bug 24513 [in legacy Bugzilla] for how this list was created
-	    {hipe_modules,
-	     [rabbit_reader, rabbit_channel, gen_server2, rabbit_exchange,
-	      rabbit_command_assembler, rabbit_framing_amqp_0_9_1, rabbit_basic,
-	      rabbit_event, lists, queue, priority_queue, rabbit_router,
-	      rabbit_trace, rabbit_misc, rabbit_binary_parser,
-	      rabbit_exchange_type_direct, rabbit_guid, rabbit_net,
-	      rabbit_amqqueue_process, rabbit_variable_queue,
-	      rabbit_binary_generator, rabbit_writer, delegate, gb_sets, lqueue,
-	      sets, orddict, rabbit_amqqueue, rabbit_limiter, gb_trees,
-	      rabbit_queue_index, rabbit_exchange_decorator, gen, dict, ordsets,
-	      file_handle_cache, rabbit_msg_store, array,
-	      rabbit_msg_store_ets_index, rabbit_msg_file,
-	      rabbit_exchange_type_fanout, rabbit_exchange_type_topic, mnesia,
-	      mnesia_lib, rpc, mnesia_tm, qlc, sofs, proplists, credit_flow,
-	      pmon, ssl_connection, tls_connection, ssl_record, tls_record,
-	      gen_fsm, ssl]},
 	    {ssl_apps, [asn1, crypto, public_key, ssl]},
 	    %% see rabbitmq-server#114
 	    {mirroring_flow_control, true},
@@ -96,6 +80,8 @@ define PROJECT_ENV
 	    %% see rabbitmq-server#143,
 	    %% rabbitmq-server#949, rabbitmq-server#1098
 	    {credit_flow_default_credit, {400, 200}},
+	    {quorum_commands_soft_limit, 32},
+	    {quorum_cluster_size, 5},
 	    %% see rabbitmq-server#248
 	    %% and rabbitmq-server#667
 	    {channel_operation_timeout, 15000},
@@ -107,11 +93,7 @@ define PROJECT_ENV
 	    %% used by rabbit_peer_discovery_classic_config
 	    {cluster_nodes, {[], disc}},
 
-	    {config_entry_decoder, [{cipher, aes_cbc256},
-	                            {hash, sha512},
-	                            {iterations, 1000},
-	                            {passphrase, undefined}
-	                           ]},
+	    {config_entry_decoder, [{passphrase, undefined}]},
 
 	    %% rabbitmq-server#973
 	    {queue_explicit_gc_run_operation_threshold, 1000},
@@ -127,16 +109,30 @@ define PROJECT_ENV
 	    %% vhost had to shut down, see server#1158 and server#1280
 	    {vhost_restart_strategy, continue},
 	    %% {global, prefetch count}
-	    {default_consumer_prefetch, {false, 0}}
+	    {default_consumer_prefetch, {false, 0}},
+		%% interval at which the channel can perform periodic actions
+	    {channel_tick_interval, 60000},
+	    %% Default max message size is 128 MB
+	    {max_message_size, 134217728},
+	    %% Socket writer will run GC every 1 GB of outgoing data
+	    {writer_gc_threshold, 1000000000}
 	  ]
 endef
 
-LOCAL_DEPS = sasl mnesia os_mon inets
-BUILD_DEPS = rabbitmq_cli
-DEPS = ranch syslog lager rabbit_common
+# With Erlang.mk default behavior, the value of `$(APPS_DIR)` is always
+# relative to the top-level executed Makefile. In our case, it could be
+# a plugin for instance. However, the rabbitmq_prelaunch application is
+# in this repository, not the plugin's. That's why we need to override
+# this value here.
+APPS_DIR := $(CURDIR)/apps
+
+LOCAL_DEPS = sasl rabbitmq_prelaunch os_mon inets compiler public_key crypto ssl syntax_tools xmerl
+BUILD_DEPS = rabbitmq_cli syslog
+DEPS = cuttlefish ranch lager rabbit_common ra sysmon_handler stdout_formatter recon observer_cli
 TEST_DEPS = rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client meck proper
 
-dep_syslog = git https://github.com/schlagert/syslog 3.4.3
+dep_cuttlefish = hex 2.4.1
+dep_syslog = git https://github.com/schlagert/syslog 3.4.5
 
 define usage_xml_to_erl
 $(subst __,_,$(patsubst $(DOCS_DIR)/rabbitmq%.1.xml, src/rabbit_%_usage.erl, $(subst -,_,$(1))))
@@ -162,6 +158,9 @@ ERLANG_MK_COMMIT = rabbitmq-tmp
 include rabbitmq-components.mk
 include erlang.mk
 
+# See above why we mess with `$(APPS_DIR)`.
+unexport APPS_DIR
+
 ifeq ($(strip $(BATS)),)
 BATS := $(ERLANG_MK_TMP)/bats/bin/bats
 endif
@@ -181,15 +180,45 @@ bats: $(BATS)
 tests:: bats
 
 SLOW_CT_SUITES := backing_queue \
+		  channel_interceptor \
+		  cluster \
 		  cluster_rename \
 		  clustering_management \
+		  config_schema \
+		  confirms_rejects \
+		  consumer_timeout \
+		  crashing_queues \
 		  dynamic_ha \
+		  dynamic_qq \
 		  eager_sync \
+		  feature_flags \
 		  health_check \
+		  lazy_queue \
+		  many_node_ha \
+		  metrics \
+		  msg_store \
 		  partitions \
+		  per_user_connection_tracking \
+		  per_vhost_connection_limit \
+		  per_vhost_connection_limit_partitions \
+		  per_vhost_msg_store \
+		  per_vhost_queue_limit \
+		  policy \
 		  priority_queue \
+		  priority_queue_recovery \
+		  publisher_confirms_parallel \
 		  queue_master_location \
-		  simple_ha
+		  queue_parallel \
+		  quorum_queue \
+		  rabbit_core_metrics_gc \
+		  rabbit_fifo_prop \
+		  rabbitmq_queues_cli_integration \
+		  rabbitmqctl_integration \
+		  simple_ha \
+		  sync_detection \
+		  unit_inbroker_non_parallel \
+		  unit_inbroker_parallel \
+		  vhost
 FAST_CT_SUITES := $(filter-out $(sort $(SLOW_CT_SUITES)),$(CT_SUITES))
 
 ct-fast: CT_SUITES = $(FAST_CT_SUITES)
@@ -211,26 +240,16 @@ ifdef CREDIT_FLOW_TRACING
 RMQ_ERLC_OPTS += -DCREDIT_FLOW_TRACING=true
 endif
 
+ifdef DEBUG_FF
+RMQ_ERLC_OPTS += -DDEBUG_QUORUM_QUEUE_FF=true
+endif
+
 ifndef USE_PROPER_QC
 # PropEr needs to be installed for property checking
 # http://proper.softlab.ntua.gr/
 USE_PROPER_QC := $(shell $(ERL) -eval 'io:format({module, proper} =:= code:ensure_loaded(proper)), halt().')
 RMQ_ERLC_OPTS += $(if $(filter true,$(USE_PROPER_QC)),-Duse_proper_qc)
 endif
-
-.PHONY: copy-escripts clean-extra-sources clean-escripts
-
-CLI_ESCRIPTS_DIR = escript
-
-copy-escripts:
-	$(gen_verbose) $(MAKE) -C $(DEPS_DIR)/rabbitmq_cli install \
-		PREFIX="$(abspath $(CLI_ESCRIPTS_DIR))" \
-		DESTDIR=
-
-clean:: clean-escripts
-
-clean-escripts:
-	$(gen_verbose) rm -rf "$(CLI_ESCRIPTS_DIR)"
 
 # --------------------------------------------------------------------
 # Documentation.
@@ -264,7 +283,9 @@ web-manpages: $(WEB_MANPAGES)
 	    gsub(/<\/h2>/, "</h3>", line); \
 	    gsub(/<h1/, "<h2", line); \
 	    gsub(/<\/h1>/, "</h2>", line); \
-	    gsub(/class="D1"/, "class=\"D1 sourcecode bash hljs\"", line); \
+	    gsub(/class="D1"/, "class=\"D1 lang-bash\"", line); \
+	    gsub(/class="Bd Bd-indent"/, "class=\"Bd Bd-indent lang-bash\"", line); \
+	    gsub(/&#[xX]201[cCdD];/, "\\&quot;", line); \
 	    print line; \
 	  } } \
 	  ' > "$@"
@@ -273,5 +294,3 @@ distclean:: distclean-manpages
 
 distclean-manpages::
 	$(gen_verbose) rm -f $(WEB_MANPAGES)
-
-app-build: copy-escripts

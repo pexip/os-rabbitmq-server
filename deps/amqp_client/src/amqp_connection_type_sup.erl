@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% @private
@@ -54,19 +45,23 @@ start_infrastructure_fun(Sup, Conn, network) ->
     fun (Sock, ConnName) ->
             {ok, ChMgr} = start_channels_manager(Sup, Conn, ConnName, network),
             {ok, AState} = rabbit_command_assembler:init(?PROTOCOL),
+            {ok, GCThreshold} = application:get_env(amqp_client, writer_gc_threshold),
             {ok, Writer} =
                 supervisor2:start_child(
                   Sup,
                   {writer,
                    {rabbit_writer, start_link,
-                    [Sock, 0, ?FRAME_MIN_SIZE, ?PROTOCOL, Conn, ConnName]},
+                    [Sock, 0, ?FRAME_MIN_SIZE, ?PROTOCOL, Conn, ConnName,
+                     false, GCThreshold]},
                    transient, ?WORKER_WAIT, worker, [rabbit_writer]}),
-            {ok, _Reader} =
+            {ok, Reader} =
                 supervisor2:start_child(
                   Sup,
                   {main_reader, {amqp_main_reader, start_link,
                                  [Sock, Conn, ChMgr, AState, ConnName]},
                    transient, ?WORKER_WAIT, worker, [amqp_main_reader]}),
+            rabbit_net:controlling_process(Sock, Reader),
+            amqp_main_reader:post_init(Reader),
             {ok, ChMgr, Writer}
     end;
 start_infrastructure_fun(Sup, Conn, direct) ->

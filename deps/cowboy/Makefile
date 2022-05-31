@@ -2,7 +2,7 @@
 
 PROJECT = cowboy
 PROJECT_DESCRIPTION = Small, fast, modern HTTP server.
-PROJECT_VERSION = 2.2.2
+PROJECT_VERSION = 2.6.1
 PROJECT_REGISTERED = cowboy_clock
 
 # Options.
@@ -15,12 +15,12 @@ CT_OPTS += -ct_hooks cowboy_ct_hook [] # -boot start_sasl
 LOCAL_DEPS = crypto
 
 DEPS = cowlib ranch
-dep_cowlib = git https://github.com/ninenines/cowlib 2.1.0
-dep_ranch = git https://github.com/ninenines/ranch 1.4.0
+dep_cowlib = git https://github.com/ninenines/cowlib 2.7.0
+dep_ranch = git https://github.com/ninenines/ranch 1.7.1
 
 DOC_DEPS = asciideck
 
-TEST_DEPS = ci.erlang.mk ct_helper gun proper
+TEST_DEPS = $(if $(CI_ERLANG_MK),ci.erlang.mk) ct_helper gun proper
 dep_ct_helper = git https://github.com/extend/ct_helper master
 dep_gun = git https://github.com/ninenines/gun master
 
@@ -38,6 +38,12 @@ AUTO_CI_WINDOWS ?= OTP-19+
 
 include $(if $(ERLANG_MK_FILENAME),$(ERLANG_MK_FILENAME),erlang.mk)
 
+# Don't run the examples test suite by default.
+
+ifndef FULL
+CT_SUITES := $(filter-out examples ws_autobahn,$(CT_SUITES))
+endif
+
 # Compile options.
 
 ERLC_OPTS += +warn_missing_spec +warn_untyped_record
@@ -49,9 +55,28 @@ app:: rebar.config
 
 # Dialyze the tests.
 
-# DIALYZER_OPTS += --src -r test
+DIALYZER_OPTS += --src -r test
 
-# Use erl_make_certs from the tested release during CI.
+# h2spec setup.
+
+GOPATH := $(ERLANG_MK_TMP)/gopath
+export GOPATH
+
+H2SPEC := $(GOPATH)/src/github.com/summerwind/h2spec/h2spec
+export H2SPEC
+
+# @todo It would be better to allow these dependencies to be specified
+# on a per-target basis instead of for all targets.
+test-build:: $(H2SPEC)
+
+$(H2SPEC):
+	$(gen_verbose) mkdir -p $(GOPATH)/src/github.com/summerwind
+	$(verbose) git clone --depth 1 https://github.com/summerwind/h2spec $(dir $(H2SPEC))
+	$(verbose) $(MAKE) -C $(dir $(H2SPEC)) build MAKEFLAGS=
+
+# Use erl_make_certs from the tested release during CI
+# and ensure that ct_helper is always recompiled.
 
 ci-setup:: clean deps test-deps
-	$(gen_verbose) cp ~/.kerl/builds/$(CI_OTP_RELEASE)/otp_src_git/lib/ssl/test/erl_make_certs.erl deps/ct_helper/src/
+	$(gen_verbose) cp ~/.kerl/builds/$(CI_OTP_RELEASE)/otp_src_git/lib/ssl/test/erl_make_certs.erl deps/ct_helper/src/ || true
+	$(gen_verbose) $(MAKE) -C $(DEPS_DIR)/ct_helper clean app

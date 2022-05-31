@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mqtt_sup).
@@ -19,7 +10,10 @@
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 
--export([start_link/2, init/1]).
+-export([start_link/2, init/1, stop_listeners/0]).
+
+-define(TCP_PROTOCOL, 'mqtt').
+-define(TLS_PROTOCOL, 'mqtt/ssl').
 
 start_link(Listeners, []) ->
     supervisor2:start_link({local, ?MODULE}, ?MODULE, [Listeners]).
@@ -31,23 +25,29 @@ init([{Listeners, SslListeners0}]) ->
         = case SslListeners0 of
               [] -> {none, 0, []};
               _  -> {rabbit_networking:ensure_ssl(),
-                     application:get_env(rabbitmq_mqtt, num_ssl_acceptors, 1),
+                     application:get_env(rabbitmq_mqtt, num_ssl_acceptors, 10),
                      case rabbit_networking:poodle_check('MQTT') of
                          ok     -> SslListeners0;
                          danger -> []
                      end}
           end,
     {ok, {{one_for_all, 10, 10},
-          [{collector,
-            {rabbit_mqtt_collector, start_link, []},
-            transient, ?WORKER_WAIT, worker, [rabbit_mqtt_collector]},
-           {rabbit_mqtt_retainer_sup,
+          [{rabbit_mqtt_retainer_sup,
             {rabbit_mqtt_retainer_sup, start_link, [{local, rabbit_mqtt_retainer_sup}]},
              transient, ?SUPERVISOR_WAIT, supervisor, [rabbit_mqtt_retainer_sup]} |
            listener_specs(fun tcp_listener_spec/1,
                           [SocketOpts, NumTcpAcceptors], Listeners) ++
            listener_specs(fun ssl_listener_spec/1,
                           [SocketOpts, SslOpts, NumSslAcceptors], SslListeners)]}}.
+
+stop_listeners() ->
+    rabbit_networking:stop_ranch_listener_of_protocol(?TCP_PROTOCOL),
+    rabbit_networking:stop_ranch_listener_of_protocol(?TLS_PROTOCOL),
+    ok.
+
+%%
+%% Implementation
+%%
 
 listener_specs(Fun, Args, Listeners) ->
     [Fun([Address | Args]) ||
@@ -57,20 +57,17 @@ listener_specs(Fun, Args, Listeners) ->
 tcp_listener_spec([Address, SocketOpts, NumAcceptors]) ->
     rabbit_networking:tcp_listener_spec(
       rabbit_mqtt_listener_sup, Address, SocketOpts,
-      transport(mqtt), rabbit_mqtt_connection_sup, [],
-      mqtt, NumAcceptors, "MQTT TCP Listener").
+      transport(?TCP_PROTOCOL), rabbit_mqtt_connection_sup, [],
+      mqtt, NumAcceptors, "MQTT TCP listener").
 
 ssl_listener_spec([Address, SocketOpts, SslOpts, NumAcceptors]) ->
     rabbit_networking:tcp_listener_spec(
       rabbit_mqtt_listener_sup, Address, SocketOpts ++ SslOpts,
-      transport('mqtt/ssl'), rabbit_mqtt_connection_sup, [],
-      'mqtt/ssl', NumAcceptors, "MQTT SSL Listener").
+      transport(?TLS_PROTOCOL), rabbit_mqtt_connection_sup, [],
+      'mqtt/ssl', NumAcceptors, "MQTT TLS listener").
 
 transport(Protocol) ->
-    ProxyProtocol = application:get_env(rabbitmq_mqtt, proxy_protocol, false),
-    case {Protocol, ProxyProtocol} of
-        {mqtt, false}       -> ranch_tcp;
-        {mqtt, true}        -> ranch_proxy;
-        {'mqtt/ssl', false} -> ranch_ssl;
-        {'mqtt/ssl', true}  -> ranch_proxy_ssl
+    case Protocol of
+        ?TCP_PROTOCOL -> ranch_tcp;
+        ?TLS_PROTOCOL -> ranch_ssl
     end.

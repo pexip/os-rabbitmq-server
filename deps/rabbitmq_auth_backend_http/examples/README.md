@@ -7,24 +7,34 @@ different platforms and frameworks:
 
  * Python and Django
  * Java and Spring Boot
+ * Kotlin and Spring Boot
  * C# and ASP.NET Web API
  * C# and ASP.NET Core 2.1
-
+ * PHP
 
 ## Python Example
 
-`rabbitmq_auth_backend_django` is a very minimalistic [Django](https://www.djangoproject.com/) 1.10+ application
+`rabbitmq_auth_backend_django` is a very minimalistic [Django](https://www.djangoproject.com/) application
 that rabbitmq-auth-backend-http can authenticate against. It's really
 not designed to be anything other than an example.
 
 ### Running the Example
 
-Run `start.sh` to launch it after [installing Django](https://docs.djangoproject.com/en/1.10/topics/install/). You may need to
-hack `start.sh` if you are not running Debian or Ubuntu.
+Run
+
+``` shell
+start.sh
+```
+
+to launch it after [installing Django](https://docs.djangoproject.com/en/2.1/intro/install/).
+You may need to hack `start.sh` if you are not running Debian or Ubuntu.
 
 The app will use a local SQLite database. It uses the standard
 Django authentication database. All users get access to all vhosts and
 resources.
+
+The app recognises two users (to make the setup easier): `admin` and `someuser`.
+Passwords for those users do not matter. user `admin` as tagged as `administrator`.
 
 ### HTTP Endpoint Examples
 
@@ -54,6 +64,29 @@ Have a look at the `AuthBackendHttpController`. There's only one user: `guest`,
 with the `guest` password. This implementation also checks the
 routing key starts with an `a` when publishing to a topic exchange
 or consuming from a topic. (an example of [topic authorisation](http://next.rabbitmq.com/access-control.html#topic-authorisation)).
+
+### rabbitmq.config Example
+
+Below is a [RabbitMQ config file](http://www.rabbitmq.com/configure.html) example to go with this
+example:
+
+``` ini
+auth_backends.1 = http
+
+auth_http.http_method   = post
+auth_http.user_path     = http://localhost:8080/auth/user
+auth_http.vhost_path    = http://localhost:8080/auth/vhost
+auth_http.resource_path = http://localhost:8080/auth/resource
+auth_http.topic_path    = http://localhost:8080/auth/topic
+```
+
+## Spring Boot Kotlin Example
+
+`rabbitmq_auth_backend_spring_boot_kotlin` is a simple [Spring Boot](https://projects.spring.io/spring-boot/)
+application written in Kotlin that rabbitmq-auth-backend-http can authenticate against. It's really
+not designed to be anything other than an example.
+It contains examples with recommended POST methods and example RabbitMQ configuration.
+It can be run the same way as the above example.
 
 
 ## ASP.NET Web API Example
@@ -120,11 +153,11 @@ This example was developed using
  * ASP.NET Core 2.1
  * Visual Studio 2017 (Visual Studio Code)
  * Windows 10
-  
+
 It is possible to build and run service from Visual Studio using IIS or from Visual Studio or Visual Studio Code using cross-platform server Kestrel.
 
 
-## PHP Boot Example
+## PHP Example
 
 `rabbitmq_auth_backend_php` is a minimalistic PHP application that this plugin can authenticate against.
 It's really not designed to be anything other than an example.
@@ -136,14 +169,14 @@ The example requires PHP >= 5.4 and [Composer](https://getcomposer.org/).
 The `rabbitmq-auth-backend-http-php` library depend on `symfony/security` and `symfony/http-foundation` components.
 Go to the `rabbitmq_auth_backend_php` folder and run `composer install`.
 
-```bash
+``` shell
 cd rabbitmq_auth_backend_php/
 composer install
 ```
 
 Now you can run the PHP 5.4 server (server at http://127.0.0.1:8080)
 
-```
+``` shell
 composer start
 ```
 
@@ -167,42 +200,36 @@ Users list:
 
 ### rabbitmq.config Example
 
-ℹ️ Dont forget to set the proper url in your rabbit config file
-
 Below is a [RabbitMQ config file](http://www.rabbitmq.com/configure.html) example to go with this
 example:
-
-the new style config format
 
 ``` ini
 auth_backends.1 = internal
 auth_backends.2 = http
+
 auth_http.user_path     = http://localhost:62190/auth/user.php
 auth_http.vhost_path    = http://localhost:62190/auth/vhost.php
 auth_http.resource_path = http://localhost:62190/auth/resource.php
 auth_http.topic_path    = http://localhost:62190/auth/topic.php
 ```
 
-Or in the classic format:
+See [RabbitMQ Access Control guide](http://www.rabbitmq.com/access-control.html) for more information.
 
-``` erlang
-[
-  {rabbit, [
-              {auth_backends, [rabbit_auth_backend_internal,rabbit_auth_backend_http]}
-            ]
-  },
+## Running with Docker Compose
 
-{
-  rabbitmq_auth_backend_http,
-    [
-       {http_method,   post},
-       {user_path,     "http://localhost:62190/auth/user"},
-       {vhost_path,    "http://localhost:62190/auth/vhost"},
-       {resource_path, "http://localhost:62190/auth/resource"},
-       {topic_path,    "http://localhost:62190/auth/topic"}
-    ]
-  }
-].
+An example node can be started using a provided `docker-compose.yml` file that sets up RabbitMQ.
+There's also a file that sets up the Django example above:
+
+```bash
+docker-compose -f docker-compose.yml -f rabbitmq_auth_backend_django/docker-compose.yml up --build
 ```
 
-See [RabbitMQ Access Control guide](http://www.rabbitmq.com/access-control.html) for more information.
+Another file, `docker/nodered/docker-compose.yml`, will run [nodered](https://nodered.org/) on port 1880
+with a configured MQTT client that will connect to RabbitMQ and perform basic operations that will trigger
+requests to the example service:
+
+```bash
+docker-compose -f docker-compose.yml -f rabbitmq_auth_backend_django/docker-compose.yml -f docker/nodered/docker-compose.yml up --build
+```
+
+Edit the provided [config file](docker/rabbitmq.conf) and enable caching and logging settings.

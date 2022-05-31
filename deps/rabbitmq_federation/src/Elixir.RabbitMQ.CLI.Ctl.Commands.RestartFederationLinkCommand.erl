@@ -1,32 +1,29 @@
-%%  The contents of this file are subject to the Mozilla Public License
-%%  Version 1.1 (the "License"); you may not use this file except in
-%%  compliance with the License. You may obtain a copy of the License
-%%  at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Software distributed under the License is distributed on an "AS IS"
-%%  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%  the License for the specific language governing rights and
-%%  limitations under the License.
-%%
-%%  The Original Code is RabbitMQ.
-%%
-%%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module('Elixir.RabbitMQ.CLI.Ctl.Commands.RestartFederationLinkCommand').
+
+-include("rabbit_federation.hrl").
 
 -behaviour('Elixir.RabbitMQ.CLI.CommandBehaviour').
 
 -export([
          usage/0,
+         usage_additional/0,
+         usage_doc_guides/0,
          flags/0,
          validate/2,
          merge_defaults/2,
          banner/2,
          run/2,
          aliases/0,
-         output/2
+         output/2,
+         help_section/0,
+         description/0
         ]).
 
 
@@ -35,6 +32,20 @@
 %%----------------------------------------------------------------------------
 usage() ->
      <<"restart_federation_link <link_id>">>.
+
+usage_additional() ->
+   [
+      {<<"<link_id>">>, <<"ID of the link to restart">>}
+   ].
+
+usage_doc_guides() ->
+    [?FEDERATION_GUIDE_URL].
+
+help_section() ->
+   {plugin, federation}.
+
+description() ->
+   <<"Restarts a running federation link">>.
 
 flags() ->
     [].
@@ -58,7 +69,7 @@ run([Id], #{node := Node}) ->
         {badrpc, _} = Error ->
             Error;
         not_found ->
-            {error, <<"Link with provided ID was not found">>};
+            {error, <<"Link with the given ID was not found">>};
         Obj ->
             Upstream = proplists:get_value(upstream, Obj),
             Supervisor = proplists:get_value(supervisor, Obj),

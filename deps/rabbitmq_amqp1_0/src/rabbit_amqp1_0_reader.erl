@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_amqp1_0_reader).
@@ -322,8 +313,12 @@ handle_1_0_frame(Mode, Channel, Payload, State) ->
     catch
         _:#'v1_0.error'{} = Reason ->
             handle_exception(State, 0, Reason);
-        _:Reason ->
-            Trace = erlang:get_stacktrace(),
+        _:{error, {not_allowed, Username}} ->
+            %% section 2.8.15 in http://docs.oasis-open.org/amqp/core/v1.0/os/amqp-core-complete-v1.0-os.pdf
+            handle_exception(State, 0, error_frame(
+                                         ?V_1_0_AMQP_ERROR_UNAUTHORIZED_ACCESS,
+                                         "Access for user '~s' was refused: insufficient permissions~n", [Username]));
+        _:Reason:Trace ->
             handle_exception(State, 0, error_frame(
                                          ?V_1_0_AMQP_ERROR_INTERNAL_ERROR,
                                          "Reader error: ~p~n~p~n",
@@ -418,6 +413,12 @@ handle_1_0_connection_frame(#'v1_0.open'{ max_frame_size = ClientFrameMax,
                          heartbeater = Heartbeater,
                          queue_collector = Collector}
         end,
+    HostnameVal = case Hostname of
+                    undefined -> undefined;
+                    {utf8, Val} -> Val
+                  end,
+    rabbit_log:debug("AMQP 1.0 connection.open frame: hostname = ~s, extracted vhost = ~s, idle_timeout = ~p" ,
+                    [HostnameVal, vhost(Hostname), HeartbeatSec * 1000]),
     %% TODO enforce channel_max
     ok = send_on_channel0(
            Sock,
@@ -635,7 +636,7 @@ auth_mechanism_to_module(TypeBin, Sock) ->
     end.
 
 auth_mechanisms(Sock) ->
-    {ok, Configured} = application:get_env(auth_mechanisms),
+    {ok, Configured} = application:get_env(rabbit, auth_mechanisms),
     [Name || {Name, Module} <- rabbit_registry:lookup_all(auth_mechanism),
              Module:should_offer(Sock), lists:member(Name, Configured)].
 
@@ -687,27 +688,35 @@ send_to_new_1_0_session(Channel, Frame, State) ->
                                     hostname  = Hostname,
                                     user      = User},
         proxy_socket = ProxySocket} = State,
-    {ok, ChSupPid, ChFrPid} =
-        %% Note: the equivalent, start_channel is in channel_sup_sup
-        rabbit_amqp1_0_session_sup_sup:start_session(
-          %% NB subtract fixed frame header size
-          ChanSupSup, {amqp10_framing, Sock, Channel,
-                       case FrameMax of
-                           unlimited -> unlimited;
-                           _         -> FrameMax - 8
-                       end,
-                       self(), User, vhost(Hostname), Collector, ProxySocket}),
-    erlang:monitor(process, ChFrPid),
-    put({channel, Channel}, {ch_fr_pid, ChFrPid}),
-    put({ch_sup_pid, ChSupPid}, {{channel, Channel}, {ch_fr_pid, ChFrPid}}),
-    put({ch_fr_pid, ChFrPid}, {channel, Channel}),
-    ok = rabbit_amqp1_0_session:process_frame(ChFrPid, Frame).
+    %% Note: the equivalent, start_channel is in channel_sup_sup
+    case rabbit_amqp1_0_session_sup_sup:start_session(
+           %% NB subtract fixed frame header size
+           ChanSupSup, {amqp10_framing, Sock, Channel,
+                        case FrameMax of
+                            unlimited -> unlimited;
+                            _         -> FrameMax - 8
+                        end,
+                        self(), User, vhost(Hostname), Collector, ProxySocket}) of
+        {ok, ChSupPid, ChFrPid} ->
+            erlang:monitor(process, ChFrPid),
+            put({channel, Channel}, {ch_fr_pid, ChFrPid}),
+            put({ch_sup_pid, ChSupPid}, {{channel, Channel}, {ch_fr_pid, ChFrPid}}),
+            put({ch_fr_pid, ChFrPid}, {channel, Channel}),
+            ok = rabbit_amqp1_0_session:process_frame(ChFrPid, Frame);
+        {error, {not_allowed, _}} ->
+            rabbit_log:error("AMQP 1.0: user '~s' is not allowed to access virtual host '~s'",
+                [User#user.username, vhost(Hostname)]),
+            %% Let's skip the supervisor trace, this is an expected error
+            throw({error, {not_allowed, User#user.username}});
+        {error, _} = E ->
+            throw(E)
+    end.
 
 vhost({utf8, <<"vhost:", VHost/binary>>}) ->
     VHost;
 vhost(_) ->
-    {ok, DefaultVHost} = application:get_env(default_vhost),
-    DefaultVHost.
+    application:get_env(rabbitmq_amqp1_0, default_vhost,
+                        application:get_env(rabbit, default_vhost, <<"/">>)).
 
 %% End 1-0
 
@@ -779,14 +788,10 @@ ssl_info(F, #v1{sock = Sock}) ->
         {error, _}  -> '';
         {ok, Items} ->
             P = proplists:get_value(protocol, Items),
-            CS = proplists:get_value(cipher_suite, Items),
-            %% The first form is R14.
-            %% The second is R13 - the extra term is exportability (by
-            %% inspection, the docs are wrong).
-            case CS of
-                {K, C, H}    -> F({P, {K, C, H}});
-                {K, C, H, _} -> F({P, {K, C, H}})
-            end
+            #{cipher := C,
+              key_exchange := K,
+              mac := H} = proplists:get_value(selected_cipher_suite, Items),
+            F({P, {K, C, H}})
     end.
 
 cert_info(F, #v1{sock = Sock}) ->

@@ -1,14 +1,14 @@
 %% the contents of this file are subject to the mozilla public license
 %% version 1.1 (the "license"); you may not use this file except in
 %% compliance with the license. you may obtain a copy of the license at
-%% http://www.mozilla.org/mpl/
+%% https://www.mozilla.org/mpl/
 %%
 %% software distributed under the license is distributed on an "as is"
 %% basis, without warranty of any kind, either express or implied. see the
 %% license for the specific language governing rights and limitations
 %% under the license.
 %%
-%% copyright (c) 2016 pivotal software, inc.  all rights reserved.
+%% Copyright (c) 2016-2020 VMware, Inc. or its affiliates. All rights reserved.
 
 -module(rabbit_mgmt_db_cache).
 
@@ -92,24 +92,34 @@ start_link(Key) ->
 %%%===================================================================
 
 init([]) ->
-    Mult = application:get_env(rabbitmg_management, management_db_cache_multiplier,
+    Mult = application:get_env(rabbitmq_management, management_db_cache_multiplier,
                                ?DEFAULT_MULT),
     {ok, #state{data = none,
                 args = [],
                 multiplier = Mult}}.
 
+handle_call({fetch, _FetchFun, FunArgs} = Msg, From,
+            #state{data = CachedData, args = Args} = State) when
+     CachedData =/= none andalso Args =/= FunArgs ->
+    %% there is cached data that needs to be invalidated
+    handle_call(Msg, From, ?RESET_STATE(State));
 handle_call({fetch, FetchFun, FunArgs}, _From,
-            #state{data = CachedData, args = Args,
-                   multiplier = Mult, timer_ref = Ref} = State) when
-     CachedData =:= none orelse Args =/= FunArgs ->
-    _ = timer:cancel(Ref),
+            #state{data = none,
+                   multiplier = Mult, timer_ref = Ref} = State) ->
+    %% force a gc here to clean up previously cleared data
+    garbage_collect(),
+    case Ref of
+        R when is_reference(R) ->
+            _ = erlang:cancel_timer(R);
+        _ -> ok
+    end,
 
     try timer:tc(FetchFun, FunArgs) of
         {Time, Data} ->
             case trunc(Time / 1000 * Mult) of
                 0 -> {reply, {ok, Data}, ?RESET_STATE(State)}; % no need to cache that
                 T ->
-                    {ok, TimerRef} = timer:send_after(T, self(), purge_cache),
+                    TimerRef = erlang:send_after(T, self(), purge_cache),
                     {reply, {ok, Data}, State#state{data = Data,
                                                     timer_ref = TimerRef,
                                                     args = FunArgs}}
@@ -121,14 +131,14 @@ handle_call({fetch, _FetchFun, _}, _From, #state{data = Data} = State) ->
     Reply = {ok, Data},
     {reply, Reply, State};
 handle_call(purge_cache, _From, State) ->
-    {reply, ok, ?RESET_STATE(State)}.
+    {reply, ok, ?RESET_STATE(State), hibernate}.
 
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info(purge_cache, State) ->
-    {noreply, ?RESET_STATE(State)};
+    {noreply, ?RESET_STATE(State), hibernate};
 handle_info(_Info, State) ->
     {noreply, State}.
 

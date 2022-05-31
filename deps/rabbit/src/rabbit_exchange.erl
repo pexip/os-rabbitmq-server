@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_exchange).
@@ -20,11 +11,11 @@
 
 -export([recover/1, policy_changed/2, callback/4, declare/7,
          assert_equivalence/6, assert_args_equivalence/2, check_type/1,
-         lookup/1, lookup_or_die/1, list/0, list/1, lookup_scratch/2,
+         lookup/1, lookup_many/1, lookup_or_die/1, list/0, list/1, lookup_scratch/2,
          update_scratch/3, update_decorators/1, immutable/1,
          info_keys/0, info/1, info/2, info_all/1, info_all/2, info_all/4,
-         route/2, delete/3, validate_binding/2]).
--export([list_names/0]).
+         route/2, delete/3, validate_binding/2, count/0]).
+-export([list_names/0, is_amq_prefixed/1]).
 %% these must be run inside a mnesia tx
 -export([maybe_auto_delete/2, serial/1, peek_serial/1, update/2]).
 
@@ -36,76 +27,12 @@
 -type type() :: atom().
 -type fun_name() :: atom().
 
--spec recover(rabbit_types:vhost()) -> [name()].
--spec callback
-        (rabbit_types:exchange(), fun_name(),
-         fun((boolean()) -> non_neg_integer()) | atom(), [any()]) -> 'ok'.
--spec policy_changed
-        (rabbit_types:exchange(), rabbit_types:exchange()) -> 'ok'.
--spec declare
-        (name(), type(), boolean(), boolean(), boolean(),
-         rabbit_framing:amqp_table(), rabbit_types:username())
-        -> rabbit_types:exchange().
--spec check_type
-        (binary()) -> atom() | rabbit_types:connection_exit().
--spec assert_equivalence
-        (rabbit_types:exchange(), atom(), boolean(), boolean(), boolean(),
-         rabbit_framing:amqp_table())
-        -> 'ok' | rabbit_types:connection_exit().
--spec assert_args_equivalence
-        (rabbit_types:exchange(), rabbit_framing:amqp_table())
-        -> 'ok' | rabbit_types:connection_exit().
--spec lookup
-        (name()) -> rabbit_types:ok(rabbit_types:exchange()) |
-                    rabbit_types:error('not_found').
--spec lookup_or_die
-        (name()) -> rabbit_types:exchange() |
-                    rabbit_types:channel_exit().
--spec list() -> [rabbit_types:exchange()].
--spec list_names() -> [rabbit_exchange:name()].
--spec list(rabbit_types:vhost()) -> [rabbit_types:exchange()].
--spec lookup_scratch(name(), atom()) ->
-                               rabbit_types:ok(term()) |
-                               rabbit_types:error('not_found').
--spec update_scratch(name(), atom(), fun((any()) -> any())) -> 'ok'.
--spec update
-        (name(),
-         fun((rabbit_types:exchange()) -> rabbit_types:exchange()))
-         -> not_found | rabbit_types:exchange().
--spec update_decorators(name()) -> 'ok'.
--spec immutable(rabbit_types:exchange()) -> rabbit_types:exchange().
--spec info_keys() -> rabbit_types:info_keys().
--spec info(rabbit_types:exchange()) -> rabbit_types:infos().
--spec info
-        (rabbit_types:exchange(), rabbit_types:info_keys())
-        -> rabbit_types:infos().
--spec info_all(rabbit_types:vhost()) -> [rabbit_types:infos()].
--spec info_all(rabbit_types:vhost(), rabbit_types:info_keys())
-                   -> [rabbit_types:infos()].
--spec info_all(rabbit_types:vhost(), rabbit_types:info_keys(),
-                    reference(), pid())
-                   -> 'ok'.
--spec route(rabbit_types:exchange(), rabbit_types:delivery())
-                 -> [rabbit_amqqueue:name()].
--spec delete
-        (name(),  'true', rabbit_types:username()) ->
-                    'ok'| rabbit_types:error('not_found' | 'in_use');
-        (name(), 'false', rabbit_types:username()) ->
-                    'ok' | rabbit_types:error('not_found').
--spec validate_binding
-        (rabbit_types:exchange(), rabbit_types:binding())
-        -> rabbit_types:ok_or_error({'binding_invalid', string(), [any()]}).
--spec maybe_auto_delete
-        (rabbit_types:exchange(), boolean())
-        -> 'not_deleted' | {'deleted', rabbit_binding:deletions()}.
--spec serial(rabbit_types:exchange()) ->
-                       fun((boolean()) -> 'none' | pos_integer()).
--spec peek_serial(name()) -> pos_integer() | 'undefined'.
-
 %%----------------------------------------------------------------------------
 
 -define(INFO_KEYS, [name, type, durable, auto_delete, internal, arguments,
                     policy, user_who_performed_action]).
+
+-spec recover(rabbit_types:vhost()) -> [name()].
 
 recover(VHost) ->
     Xs = rabbit_misc:table_filter(
@@ -123,6 +50,10 @@ recover(VHost) ->
            rabbit_durable_exchange),
     [XName || #exchange{name = XName} <- Xs].
 
+-spec callback
+        (rabbit_types:exchange(), fun_name(),
+         fun((boolean()) -> non_neg_integer()) | atom(), [any()]) -> 'ok'.
+
 callback(X = #exchange{type       = XType,
                        decorators = Decorators}, Fun, Serial0, Args) ->
     Serial = if is_function(Serial0) -> Serial0;
@@ -132,6 +63,9 @@ callback(X = #exchange{type       = XType,
         M <- rabbit_exchange_decorator:select(all, Decorators)],
     Module = type_to_module(XType),
     apply(Module, Fun, [Serial(Module:serialise_events()) | Args]).
+
+-spec policy_changed
+        (rabbit_types:exchange(), rabbit_types:exchange()) -> 'ok'.
 
 policy_changed(X  = #exchange{type       = XType,
                               decorators = Decorators},
@@ -147,6 +81,9 @@ serialise_events(X = #exchange{type = Type, decorators = Decorators}) ->
               rabbit_exchange_decorator:select(all, Decorators))
         orelse (type_to_module(Type)):serialise_events().
 
+-spec serial(rabbit_types:exchange()) ->
+                       fun((boolean()) -> 'none' | pos_integer()).
+
 serial(#exchange{name = XName} = X) ->
     Serial = case serialise_events(X) of
                  true  -> next_serial(XName);
@@ -155,6 +92,23 @@ serial(#exchange{name = XName} = X) ->
     fun (true)  -> Serial;
         (false) -> none
     end.
+
+-spec is_amq_prefixed(rabbit_types:exchange() | binary()) -> boolean().
+
+is_amq_prefixed(Name) when is_binary(Name) ->
+    case re:run(Name, <<"^amq\.">>) of
+        nomatch    -> false;
+        {match, _} -> true
+    end;
+is_amq_prefixed(#exchange{name = #resource{name = <<>>}}) ->
+    false;
+is_amq_prefixed(#exchange{name = #resource{name = Name}}) ->
+    is_amq_prefixed(Name).
+
+-spec declare
+        (name(), type(), boolean(), boolean(), boolean(),
+         rabbit_framing:amqp_table(), rabbit_types:username())
+        -> rabbit_types:exchange().
 
 declare(XName, Type, Durable, AutoDelete, Internal, Args, Username) ->
     X = rabbit_exchange_decorator:set(
@@ -218,8 +172,12 @@ store_ram(X) ->
     X1.
 
 %% Used with binaries sent over the wire; the type may not exist.
+
+-spec check_type
+        (binary()) -> atom() | rabbit_types:connection_exit().
+
 check_type(TypeBin) ->
-    case rabbit_registry:binary_to_type(TypeBin) of
+    case rabbit_registry:binary_to_type(rabbit_data_coercion:to_binary(TypeBin)) of
         {error, not_found} ->
             rabbit_misc:protocol_error(
               command_invalid, "unknown exchange type '~s'", [TypeBin]);
@@ -231,6 +189,11 @@ check_type(TypeBin) ->
                 {ok, _Module}      -> T
             end
     end.
+
+-spec assert_equivalence
+        (rabbit_types:exchange(), atom(), boolean(), boolean(), boolean(),
+         rabbit_framing:amqp_table())
+        -> 'ok' | rabbit_types:connection_exit().
 
 assert_equivalence(X = #exchange{ name        = XName,
                                   durable     = Durable,
@@ -245,6 +208,10 @@ assert_equivalence(X = #exchange{ name        = XName,
     AFE(Internal,   ReqInternal,   XName, internal),
     (type_to_module(Type)):assert_args_equivalence(X, ReqArgs).
 
+-spec assert_args_equivalence
+        (rabbit_types:exchange(), rabbit_framing:amqp_table())
+        -> 'ok' | rabbit_types:connection_exit().
+
 assert_args_equivalence(#exchange{ name = Name, arguments = Args },
                         RequiredArgs) ->
     %% The spec says "Arguments are compared for semantic
@@ -253,21 +220,52 @@ assert_args_equivalence(#exchange{ name = Name, arguments = Args },
     rabbit_misc:assert_args_equivalence(Args, RequiredArgs, Name,
                                         [<<"alternate-exchange">>]).
 
+-spec lookup
+        (name()) -> rabbit_types:ok(rabbit_types:exchange()) |
+                    rabbit_types:error('not_found').
+
 lookup(Name) ->
     rabbit_misc:dirty_read({rabbit_exchange, Name}).
+
+
+-spec lookup_many([name()]) -> [rabbit_types:exchange()].
+
+lookup_many([])     -> [];
+lookup_many([Name]) -> ets:lookup(rabbit_exchange, Name);
+lookup_many(Names) when is_list(Names) ->
+    %% Normally we'd call mnesia:dirty_read/1 here, but that is quite
+    %% expensive for reasons explained in rabbit_misc:dirty_read/1.
+    lists:append([ets:lookup(rabbit_exchange, Name) || Name <- Names]).
+
+
+-spec lookup_or_die
+        (name()) -> rabbit_types:exchange() |
+                    rabbit_types:channel_exit().
 
 lookup_or_die(Name) ->
     case lookup(Name) of
         {ok, X}            -> X;
-        {error, not_found} -> rabbit_misc:not_found(Name)
+        {error, not_found} -> rabbit_amqqueue:not_found(Name)
     end.
 
+-spec list() -> [rabbit_types:exchange()].
+
 list() -> mnesia:dirty_match_object(rabbit_exchange, #exchange{_ = '_'}).
+
+-spec count() -> non_neg_integer().
+
+count() ->
+    mnesia:table_info(rabbit_exchange, size).
+
+-spec list_names() -> [rabbit_exchange:name()].
 
 list_names() -> mnesia:dirty_all_keys(rabbit_exchange).
 
 %% Not dirty_match_object since that would not be transactional when used in a
 %% tx context
+
+-spec list(rabbit_types:vhost()) -> [rabbit_types:exchange()].
+
 list(VHostPath) ->
     mnesia:async_dirty(
       fun () ->
@@ -276,6 +274,10 @@ list(VHostPath) ->
                 #exchange{name = rabbit_misc:r(VHostPath, exchange), _ = '_'},
                 read)
       end).
+
+-spec lookup_scratch(name(), atom()) ->
+                               rabbit_types:ok(term()) |
+                               rabbit_types:error('not_found').
 
 lookup_scratch(Name, App) ->
     case lookup(Name) of
@@ -289,6 +291,8 @@ lookup_scratch(Name, App) ->
         {error, not_found} ->
             {error, not_found}
     end.
+
+-spec update_scratch(name(), atom(), fun((any()) -> any())) -> 'ok'.
 
 update_scratch(Name, App, Fun) ->
     rabbit_misc:execute_mnesia_transaction(
@@ -310,6 +314,8 @@ update_scratch(Name, App, Fun) ->
               ok
       end).
 
+-spec update_decorators(name()) -> 'ok'.
+
 update_decorators(Name) ->
     rabbit_misc:execute_mnesia_transaction(
       fun() ->
@@ -320,6 +326,11 @@ update_decorators(Name) ->
               end
       end).
 
+-spec update
+        (name(),
+         fun((rabbit_types:exchange()) -> rabbit_types:exchange()))
+         -> not_found | rabbit_types:exchange().
+
 update(Name, Fun) ->
     case mnesia:wread({rabbit_exchange, Name}) of
         [X] -> X1 = Fun(X),
@@ -327,9 +338,13 @@ update(Name, Fun) ->
         []  -> not_found
     end.
 
+-spec immutable(rabbit_types:exchange()) -> rabbit_types:exchange().
+
 immutable(X) -> X#exchange{scratches  = none,
                            policy     = none,
                            decorators = none}.
+
+-spec info_keys() -> rabbit_types:info_keys().
 
 info_keys() -> ?INFO_KEYS.
 
@@ -358,19 +373,37 @@ i(Item, #exchange{type = Type} = X) ->
         []          -> throw({bad_argument, Item})
     end.
 
+-spec info(rabbit_types:exchange()) -> rabbit_types:infos().
+
 info(X = #exchange{type = Type}) ->
     infos(?INFO_KEYS, X) ++ (type_to_module(Type)):info(X).
+
+-spec info
+        (rabbit_types:exchange(), rabbit_types:info_keys())
+        -> rabbit_types:infos().
 
 info(X = #exchange{type = _Type}, Items) ->
     infos(Items, X).
 
+-spec info_all(rabbit_types:vhost()) -> [rabbit_types:infos()].
+
 info_all(VHostPath) -> map(VHostPath, fun (X) -> info(X) end).
 
+-spec info_all(rabbit_types:vhost(), rabbit_types:info_keys())
+                   -> [rabbit_types:infos()].
+
 info_all(VHostPath, Items) -> map(VHostPath, fun (X) -> info(X, Items) end).
+
+-spec info_all(rabbit_types:vhost(), rabbit_types:info_keys(),
+                    reference(), pid())
+                   -> 'ok'.
 
 info_all(VHostPath, Items, Ref, AggregatorPid) ->
     rabbit_control_misc:emitting_map(
       AggregatorPid, Ref, fun(X) -> info(X, Items) end, list(VHostPath)).
+
+-spec route(rabbit_types:exchange(), rabbit_types:delivery())
+                 -> [rabbit_amqqueue:name()].
 
 route(#exchange{name = #resource{virtual_host = VHost, name = RName} = XName,
                 decorators = Decorators} = X,
@@ -447,6 +480,12 @@ call_with_exchange(XName, Fun) ->
                 end
       end).
 
+-spec delete
+        (name(),  'true', rabbit_types:username()) ->
+                    'ok'| rabbit_types:error('not_found' | 'in_use');
+        (name(), 'false', rabbit_types:username()) ->
+                    'ok' | rabbit_types:error('not_found').
+
 delete(XName, IfUnused, Username) ->
     Fun = case IfUnused of
               true  -> fun conditional_delete/2;
@@ -478,9 +517,17 @@ delete(XName, IfUnused, Username) ->
                                         XName#resource.name, Username)
     end.
 
+-spec validate_binding
+        (rabbit_types:exchange(), rabbit_types:binding())
+        -> rabbit_types:ok_or_error({'binding_invalid', string(), [any()]}).
+
 validate_binding(X = #exchange{type = XType}, Binding) ->
     Module = type_to_module(XType),
     Module:validate_binding(X, Binding).
+
+-spec maybe_auto_delete
+        (rabbit_types:exchange(), boolean())
+        -> 'not_deleted' | {'deleted', rabbit_binding:deletions()}.
 
 maybe_auto_delete(#exchange{auto_delete = false}, _OnlyDurable) ->
     not_deleted;
@@ -492,15 +539,21 @@ maybe_auto_delete(#exchange{auto_delete = true} = X, OnlyDurable) ->
 
 conditional_delete(X = #exchange{name = XName}, OnlyDurable) ->
     case rabbit_binding:has_for_source(XName) of
-        false  -> unconditional_delete(X, OnlyDurable);
+        false  -> internal_delete(X, OnlyDurable, false);
         true   -> {error, in_use}
     end.
 
-unconditional_delete(X = #exchange{name = XName}, OnlyDurable) ->
+unconditional_delete(X, OnlyDurable) ->
+    internal_delete(X, OnlyDurable, true).
+
+internal_delete(X = #exchange{name = XName}, OnlyDurable, RemoveBindingsForSource) ->
     ok = mnesia:delete({rabbit_exchange, XName}),
     ok = mnesia:delete({rabbit_exchange_serial, XName}),
     mnesia:delete({rabbit_durable_exchange, XName}),
-    Bindings = rabbit_binding:remove_for_source(XName),
+    Bindings = case RemoveBindingsForSource of
+        true  -> rabbit_binding:remove_for_source(XName);
+        false -> []
+    end,
     {deleted, X, Bindings, rabbit_binding:remove_for_destination(
                              XName, OnlyDurable)}.
 
@@ -509,6 +562,8 @@ next_serial(XName) ->
     ok = mnesia:write(rabbit_exchange_serial,
                       #exchange_serial{name = XName, next = Serial + 1}, write),
     Serial.
+
+-spec peek_serial(name()) -> pos_integer() | 'undefined'.
 
 peek_serial(XName) -> peek_serial(XName, read).
 

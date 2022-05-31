@@ -7,7 +7,7 @@ tools](https://github.com/rabbitmq/rabbitmq-cli) (e.g. `rabbitmqctl`)
 allow plugin developers to extend them their own commands.
 
 The CLI is written in the [Elixir programming
-language](http://elixir-lang.org/) and commands can be implemented in
+language](https://elixir-lang.org/) and commands can be implemented in
 Elixir, Erlang or any other Erlang-based language.  This tutorial will
 use Elixir but also provides an Erlang example.  The fundamentals are
 the same.
@@ -22,7 +22,7 @@ To develop a new plugin you should check existing tutorials:
 ## Anatomy of a RabbitMQ CLI Command
 
 A RabbitMQ CLI command is an Elixir/Erlang module that implements a
-particular [behavior](http://elixir-lang.org/getting-started/typespecs-and-behaviours.html).
+particular [behavior](https://elixir-lang.org/getting-started/typespecs-and-behaviours.html).
 It should fulfill certain requirements in order to be discovered and load by CLI tools:
 
  * Follow a naming convention (module name should match `RabbitMQ.CLI.(.*).Commands.(.*)Command`)
@@ -222,7 +222,7 @@ do something on a broker (remote) node, you need to use RPC calls.
 It can be the standard Erlang `rpc:call` set of functions or `rabbit_misc:rpc_call/4`.
 The latter is used by all standard commands and is generally recommended.
 
-Target RabbitMQ node name is passsed in as the `node` option, which is
+Target RabbitMQ node name is passed in as the `node` option, which is
 a global option and is available to all commands.
 
 
@@ -251,7 +251,7 @@ To do that, we'll define `output/2` to format the `run/2` return value:
 We have function clauses for every possible output of `rabbit_amqqueue:delete/3` used
 in the `run/2` function.
 
-For a run to be successul, the `output/2` function should return a pair of `{:ok, result}`,
+For a run to be successful, the `output/2` function should return a pair of `{:ok, result}`,
 and to indicate an error it should return a `{:error, exit_code, message}` tuple.
 `exit_code` must be an integer and `message` is a string or a list of strings.
 

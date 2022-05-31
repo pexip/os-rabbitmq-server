@@ -18,17 +18,19 @@ are not in scope for this plugin.
 
 This plugin requires RabbitMQ 3.7.0 or later.
 
-For an etcd-based peer discovery and cluster formation
-mechanism that supports 3.6.x, see [rabbitmq-autocluster](https://github.com/rabbitmq/rabbitmq-autocluster).
 
 ## Supported etcd Versions
 
-The plugin supports etcd v2 and v3.
+The plugin supports etcd 3.4 or later and uses the current stable v3 gRPC API.
 
 ## Installation
 
-This plugin ships with RabbitMQ as of 3.7.0. There is no need to install it separately.
-Enable the plugin in offline mode before the node is first started:
+This plugin ships with [supported RabbitMQ versions](https://www.rabbitmq.com/versions.html).
+There is no need to install it separately.
+
+As with any [plugin](https://rabbitmq.com/plugins.html), it must be enabled before it
+can be used. For peer discovery plugins it means they must be [enabled](https://rabbitmq.com//plugins.html#basics) or [preconfigured](https://rabbitmq.com//plugins.html#enabled-plugins-file)
+before first node boot:
 
 ```
 rabbitmq-plugins --offline enable rabbitmq_peer_discovery_etcd
@@ -47,9 +49,9 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and our [development process overview](
 
 ## License
 
-[Licensed under the MPL](LICENSE-MPL-RabbitMQ), same as RabbitMQ server.
+[Licensed under the MPL 2.0](LICENSE-MPL-RabbitMQ), same as RabbitMQ server.
 
 
 ## Copyright
 
-(c) Pivotal Software Inc., 2007-2018.
+(c) 2007-2020 VMware, Inc. or its affiliates.

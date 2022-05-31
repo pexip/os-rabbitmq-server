@@ -1,18 +1,10 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
-%%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2017 Pivotal Software, Inc. All rights reserved.
+%% Copyright (c) 2016-2020 VMware, Inc. or its affiliates. All rights reserved.
 %%
 -module(rabbit_peer_discovery_util).
 
@@ -28,7 +20,8 @@
          parse_port/1,
          as_proplist/1,
          as_map/1,
-         stringify_error/1
+         stringify_error/1,
+         maybe_backend_configured/4
         ]).
 
 
@@ -44,7 +37,9 @@
 -type stringifyable() :: atom() | binary() | string() | integer().
 
 
--spec getenv(Key :: string()) -> string() | false.
+-spec getenv(Key :: string() | undefined) -> string() | false.
+getenv(undefined) ->
+  false;
 getenv(Key) ->
   process_getenv_value(Key, os:getenv(Key)).
 
@@ -354,13 +349,32 @@ as_map(Value) ->
     [].
 
 -spec stringify_error({ok, term()} | {error, term()}) -> {ok, term()} | {error, string()}.
-stringify_error({ok, _} = Res) ->
-    Res;
+stringify_error({ok, Val}) ->
+    {ok, Val};
 stringify_error({error, Str}) when is_list(Str) ->
     {error, Str};
 stringify_error({error, Term}) ->
     {error, lists:flatten(io_lib:format("~p", [Term]))}.
 
+-spec maybe_backend_configured(BackendConfigKey :: atom(),
+                               ClusterFormationUndefinedFun :: fun(() -> {ok, term()} | ok),
+                               BackendUndefinedFun :: fun(() -> {ok, term()} | ok),
+                               ConfiguredFun :: fun((list()) -> {ok, term()})) -> {ok, term()}.
+maybe_backend_configured(BackendConfigKey,
+                         ClusterFormationUndefinedFun,
+                         BackendUndefinedFun,
+                         ConfiguredFun) ->
+    case application:get_env(rabbit, cluster_formation) of
+        undefined ->
+            ClusterFormationUndefinedFun();
+        {ok, ClusterFormation} ->
+            case proplists:get_value(BackendConfigKey, ClusterFormation) of
+                undefined ->
+                    BackendUndefinedFun();
+                Proplist  ->
+                    ConfiguredFun(Proplist)
+            end
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc

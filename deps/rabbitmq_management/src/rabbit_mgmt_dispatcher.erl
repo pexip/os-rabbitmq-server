@@ -1,17 +1,8 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ Management Plugin.
-%%
-%%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_dispatcher).
@@ -29,29 +20,29 @@ build_routes(Ignore) ->
     ManagementApp = module_app(?MODULE),
     Prefix = rabbit_mgmt_util:get_path_prefix(),
     RootIdxRtes = build_root_index_routes(Prefix, ManagementApp),
-    ApiRdrRte = build_static_index_html_route(Prefix, "/api"),
-    CliRdrRte = build_static_index_html_route(Prefix, "/cli"),
+    ApiRdrRte = build_redirect_route("/api", Prefix ++ "/api/index.html"),
+    CliRdrRte = build_redirect_route("/cli", Prefix ++ "/cli/index.html"),
+    StatsRdrRte1 = build_redirect_route("/stats", Prefix ++ "/api/index.html"),
+    StatsRdrRte2 = build_redirect_route("/doc/stats.html", Prefix ++ "/api/index.html"),
     MgmtRdrRte = {"/mgmt", rabbit_mgmt_wm_redirect, "/"},
     LocalPaths = [{module_app(M), "www"} || M <- modules(Ignore)],
     LocalStaticRte = {"/[...]", rabbit_mgmt_wm_static, LocalPaths},
     % NB: order is significant in the routing list
     Routes0 = build_module_routes(Ignore) ++
-        [ApiRdrRte, CliRdrRte, MgmtRdrRte, LocalStaticRte],
+        [ApiRdrRte, CliRdrRte, MgmtRdrRte, StatsRdrRte1, StatsRdrRte2, LocalStaticRte],
     Routes1 = maybe_add_path_prefix(Routes0, Prefix),
     % NB: ensure the root routes are first
     Routes2 = RootIdxRtes ++ Routes1,
     [{'_', Routes2}].
 
 build_root_index_routes("", ManagementApp) ->
-    [{"/", cowboy_static, root_idx_file(ManagementApp)}];
+    [{"/", rabbit_mgmt_wm_static, root_idx_file(ManagementApp)}];
 build_root_index_routes(Prefix, ManagementApp) ->
     [{"/", rabbit_mgmt_wm_redirect, Prefix ++ "/"},
-     {Prefix, cowboy_static, root_idx_file(ManagementApp)}].
+     {Prefix, rabbit_mgmt_wm_static, root_idx_file(ManagementApp)}].
 
-build_static_index_html_route("", Path) ->
-    {Path, rabbit_mgmt_wm_redirect, Path ++ "/index.html"};
-build_static_index_html_route(Prefix, Path) ->
-    {Path, rabbit_mgmt_wm_redirect, Prefix ++ Path ++ "/index.html"}.
+build_redirect_route(Path, Location) ->
+    {Path, rabbit_mgmt_wm_redirect, Location}.
 
 root_idx_file(ManagementApp) ->
     {priv_file, ManagementApp, "www/index.html"}.
@@ -160,6 +151,8 @@ dispatcher() ->
      {"/users/:user",                                          rabbit_mgmt_wm_user, []},
      {"/users/:user/permissions",                              rabbit_mgmt_wm_permissions_user, []},
      {"/users/:user/topic-permissions",                        rabbit_mgmt_wm_topic_permissions_user, []},
+     {"/feature-flags",                                        rabbit_mgmt_wm_feature_flags, []},
+     {"/feature-flags/:name/enable",                           rabbit_mgmt_wm_feature_flag_enable, []},
      {"/whoami",                                               rabbit_mgmt_wm_whoami, []},
      {"/permissions",                                          rabbit_mgmt_wm_permissions, []},
      {"/permissions/:vhost/:user",                             rabbit_mgmt_wm_permission, []},
@@ -170,5 +163,8 @@ dispatcher() ->
      {"/healthchecks/node",                                    rabbit_mgmt_wm_healthchecks, []},
      {"/healthchecks/node/:node",                              rabbit_mgmt_wm_healthchecks, []},
      {"/reset",                                                rabbit_mgmt_wm_reset, []},
-     {"/reset/:node",                                          rabbit_mgmt_wm_reset, []}
+     {"/reset/:node",                                          rabbit_mgmt_wm_reset, []},
+     {"/rebalance/queues",                                     rabbit_mgmt_wm_rebalance_queues, [{queues, all}]},
+     {"/auth",                                                 rabbit_mgmt_wm_auth, []},
+     {"/login",                                                rabbit_mgmt_wm_login, []}
     ].

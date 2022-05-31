@@ -1,7 +1,7 @@
 %% ----------------------------------------------------------------------------
 %% RabbitMQ LDAP Plugin
 %%
-%% See http://www.rabbitmq.com/ldap.html for details.
+%% See https://www.rabbitmq.com/ldap.html for details.
 %%
 %% ----------------------------------------------------------------------------
 
@@ -79,6 +79,14 @@ end}.
 %% Authentication
 %% ==============
 %%
+
+%% Pattern to convert the username given through AMQP to a different
+%% form before performing a simple bind
+%%
+%% {user_bind_pattern, "${ad_user}@${ad_domain}.com"},
+
+{mapping, "auth_ldap.user_bind_pattern", "rabbitmq_auth_backend_ldap.user_bind_pattern",
+    [{datatype, string}]}.
 
 %% Pattern to convert the username given through AMQP to a DN before
 %% binding
@@ -185,7 +193,7 @@ end}.
 
 %% The LDAP plugin can perform a variety of queries against your
 %% LDAP server to determine questions of authorisation. See
-%% http://www.rabbitmq.com/ldap.html#authorisation for more
+%% https://www.rabbitmq.com/ldap.html#authorisation for more
 %% information.
 
 %% Set the query to use when determining vhost access

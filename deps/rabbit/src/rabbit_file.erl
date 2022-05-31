@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2011-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2011-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_file).
@@ -34,30 +25,9 @@
 
 -type ok_or_error() :: rabbit_types:ok_or_error(any()).
 
--spec is_file((file:filename())) -> boolean().
--spec is_dir((file:filename())) -> boolean().
--spec file_size((file:filename())) -> non_neg_integer().
--spec ensure_dir((file:filename())) -> ok_or_error().
--spec wildcard(string(), file:filename()) -> [file:filename()].
--spec list_dir(file:filename()) ->
-          rabbit_types:ok_or_error2([file:filename()], any()).
--spec read_term_file
-        (file:filename()) -> {'ok', [any()]} | rabbit_types:error(any()).
--spec write_term_file(file:filename(), [any()]) -> ok_or_error().
--spec write_file(file:filename(), iodata()) -> ok_or_error().
--spec write_file(file:filename(), iodata(), [any()]) -> ok_or_error().
--spec append_file(file:filename(), string()) -> ok_or_error().
--spec ensure_parent_dirs_exist(string()) -> 'ok'.
--spec rename(file:filename(), file:filename()) -> ok_or_error().
--spec delete([file:filename()]) -> ok_or_error().
--spec recursive_delete([file:filename()]) ->
-          rabbit_types:ok_or_error({file:filename(), any()}).
--spec recursive_copy(file:filename(), file:filename()) ->
-          rabbit_types:ok_or_error({file:filename(), file:filename(), any()}).
--spec lock_file(file:filename()) -> rabbit_types:ok_or_error('eexist').
--spec filename_as_a_directory(file:filename()) -> file:filename().
-
 %%----------------------------------------------------------------------------
+
+-spec is_file((file:filename())) -> boolean().
 
 is_file(File) ->
     case read_file_info(File) of
@@ -66,6 +36,8 @@ is_file(File) ->
         _                                -> false
     end.
 
+-spec is_dir((file:filename())) -> boolean().
+
 is_dir(Dir) -> is_dir_internal(read_file_info(Dir)).
 
 is_dir_no_handle(Dir) -> is_dir_internal(prim_file:read_file_info(Dir)).
@@ -73,11 +45,15 @@ is_dir_no_handle(Dir) -> is_dir_internal(prim_file:read_file_info(Dir)).
 is_dir_internal({ok, #file_info{type=directory}}) -> true;
 is_dir_internal(_)                                -> false.
 
+-spec file_size((file:filename())) -> non_neg_integer().
+
 file_size(File) ->
     case read_file_info(File) of
         {ok, #file_info{size=Size}} -> Size;
         _                           -> 0
     end.
+
+-spec ensure_dir((file:filename())) -> ok_or_error().
 
 ensure_dir(File) -> with_handle(fun () -> ensure_dir_internal(File) end).
 
@@ -91,6 +67,8 @@ ensure_dir_internal(File) ->
                  prim_file:make_dir(Dir)
     end.
 
+-spec wildcard(string(), file:filename()) -> [file:filename()].
+
 wildcard(Pattern, Dir) ->
     case list_dir(Dir) of
         {ok, Files} -> {ok, RE} = re:compile(Pattern, [anchored]),
@@ -99,10 +77,16 @@ wildcard(Pattern, Dir) ->
         {error, _}  -> []
     end.
 
+-spec list_dir(file:filename()) ->
+          rabbit_types:ok_or_error2([file:filename()], any()).
+
 list_dir(Dir) -> with_handle(fun () -> prim_file:list_dir(Dir) end).
 
 read_file_info(File) ->
     with_handle(fun () -> prim_file:read_file_info(File) end).
+
+-spec read_term_file
+        (file:filename()) -> {'ok', [any()]} | rabbit_types:error(any()).
 
 read_term_file(File) ->
     try
@@ -124,11 +108,17 @@ group_tokens(Cur, [])                   -> [Cur];
 group_tokens(Cur, [T = {dot, _} | Ts])  -> [[T | Cur] | group_tokens([], Ts)];
 group_tokens(Cur, [T | Ts])             -> group_tokens([T | Cur], Ts).
 
+-spec write_term_file(file:filename(), [any()]) -> ok_or_error().
+
 write_term_file(File, Terms) ->
     write_file(File, list_to_binary([io_lib:format("~w.~n", [Term]) ||
                                         Term <- Terms])).
 
+-spec write_file(file:filename(), iodata()) -> ok_or_error().
+
 write_file(Path, Data) -> write_file(Path, Data, []).
+
+-spec write_file(file:filename(), iodata(), [any()]) -> ok_or_error().
 
 write_file(Path, Data, Modes) ->
     Modes1 = [binary, write | (Modes -- [binary, write])],
@@ -185,6 +175,9 @@ with_synced_copy(Path, Modes, Fun) ->
     end.
 
 %% TODO the semantics of this function are rather odd. But see bug 25021.
+
+-spec append_file(file:filename(), string()) -> ok_or_error().
+
 append_file(File, Suffix) ->
     case read_file_info(File) of
         {ok, FInfo}     -> append_file(File, FInfo#file_info.size, Suffix);
@@ -209,6 +202,8 @@ append_file(File, _, Suffix) ->
         Error              -> Error
     end.
 
+-spec ensure_parent_dirs_exist(string()) -> 'ok'.
+
 ensure_parent_dirs_exist(Filename) ->
     case ensure_dir(Filename) of
         ok              -> ok;
@@ -216,9 +211,16 @@ ensure_parent_dirs_exist(Filename) ->
             throw({error, {cannot_create_parent_dirs, Filename, Reason}})
     end.
 
+-spec rename(file:filename(), file:filename()) -> ok_or_error().
+
 rename(Old, New) -> with_handle(fun () -> prim_file:rename(Old, New) end).
 
+-spec delete([file:filename()]) -> ok_or_error().
+
 delete(File) -> with_handle(fun () -> prim_file:delete(File) end).
+
+-spec recursive_delete([file:filename()]) ->
+          rabbit_types:ok_or_error({file:filename(), any()}).
 
 recursive_delete(Files) ->
     with_handle(
@@ -262,6 +264,9 @@ is_symlink_no_handle(File) ->
         _       -> false
     end.
 
+-spec recursive_copy(file:filename(), file:filename()) ->
+          rabbit_types:ok_or_error({file:filename(), file:filename(), any()}).
+
 recursive_copy(Src, Dest) ->
     %% Note that this uses the 'file' module and, hence, shouldn't be
     %% run on many processes at once.
@@ -293,6 +298,9 @@ recursive_copy(Src, Dest) ->
 
 %% TODO: When we stop supporting Erlang prior to R14, this should be
 %% replaced with file:open [write, exclusive]
+
+-spec lock_file(file:filename()) -> rabbit_types:ok_or_error('eexist').
+
 lock_file(Path) ->
     case is_file(Path) of
         true  -> {error, eexist};
@@ -301,6 +309,8 @@ lock_file(Path) ->
                              ok = prim_file:close(Lock)
                    end)
     end.
+
+-spec filename_as_a_directory(file:filename()) -> file:filename().
 
 filename_as_a_directory(FileName) ->
     case lists:last(FileName) of

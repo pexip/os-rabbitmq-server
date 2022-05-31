@@ -1,25 +1,19 @@
-%%  The contents of this file are subject to the Mozilla Public License
-%%  Version 1.1 (the "License"); you may not use this file except in
-%%  compliance with the License. You may obtain a copy of the License
-%%  at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Software distributed under the License is distributed on an "AS IS"
-%%  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%  the License for the specific language governing rights and
-%%  limitations under the License.
-%%
-%%  The Original Code is RabbitMQ.
-%%
-%%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module('Elixir.RabbitMQ.CLI.Ctl.Commands.ShovelStatusCommand').
+
+-include("rabbit_shovel.hrl").
 
 -behaviour('Elixir.RabbitMQ.CLI.CommandBehaviour').
 
 -export([
          usage/0,
+         usage_doc_guides/0,
          flags/0,
          validate/2,
          merge_defaults/2,
@@ -29,7 +23,9 @@
          aliases/0,
          output/2,
          scopes/0,
-         formatter/0
+         formatter/0,
+         help_section/0,
+         description/0
         ]).
 
 
@@ -37,7 +33,16 @@
 %% Callbacks
 %%----------------------------------------------------------------------------
 usage() ->
-     <<"shovel_status">>.
+    <<"shovel_status">>.
+
+usage_doc_guides() ->
+    [?SHOVEL_GUIDE_URL].
+
+description() ->
+    <<"Displays status of Shovel on a node">>.
+
+help_section() ->
+    {plugin, shovel}.
 
 flags() ->
     [].
@@ -52,7 +57,7 @@ merge_defaults(A,O) ->
     {A, O}.
 
 banner(_, #{node := Node}) ->
-    erlang:iolist_to_binary([<<"Shovel status of node ">>,
+    erlang:iolist_to_binary([<<"Shovel status on node ">>,
                              atom_to_binary(Node, utf8)]).
 
 run(_Args, #{node := Node}) ->

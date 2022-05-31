@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mqtt_util).
@@ -19,33 +10,95 @@
 -include("rabbit_mqtt.hrl").
 
 -export([subcription_queue_name/1,
-         mqtt2amqp/1,
-         amqp2mqtt/1,
          gen_client_id/0,
          env/1,
          table_lookup/2,
          path_for/2,
          path_for/3,
-         vhost_name_to_table_name/1
+         vhost_name_to_table_name/1,
+         get_topic_translation_funs/0
         ]).
+
+-define(MAX_TOPIC_TRANSLATION_CACHE_SIZE, 12).
 
 subcription_queue_name(ClientId) ->
     Base = "mqtt-subscription-" ++ ClientId ++ "qos",
     {list_to_binary(Base ++ "0"), list_to_binary(Base ++ "1")}.
 
+cached(CacheName, Fun, Arg) ->
+    Cache =
+        case get(CacheName) of
+            undefined ->
+                [];
+            Other ->
+                Other
+        end,
+    case lists:keyfind(Arg, 1, Cache) of
+        {_, V} ->
+            V;
+        false ->
+            V = Fun(Arg),
+            CacheTail = lists:sublist(Cache, ?MAX_TOPIC_TRANSLATION_CACHE_SIZE - 1),
+            put(CacheName, [{Arg, V} | CacheTail]),
+            V
+    end.
+
+to_amqp(T0) ->
+    T1 = string:replace(T0, "/", ".", all),
+    T2 = string:replace(T1, "+", "*", all),
+    erlang:iolist_to_binary(T2).
+
+to_mqtt(T0) ->
+    T1 = string:replace(T0, "*", "+", all),
+    T2 = string:replace(T1, ".", "/", all),
+    erlang:iolist_to_binary(T2).
+
 %% amqp mqtt descr
 %% *    +    match one topic level
 %% #    #    match multiple topic levels
 %% .    /    topic level separator
-mqtt2amqp(Topic) ->
-    erlang:iolist_to_binary(
-      re:replace(re:replace(Topic, "/", ".", [global]),
-                 "[\+]", "*", [global])).
-
-amqp2mqtt(Topic) ->
-    erlang:iolist_to_binary(
-      re:replace(re:replace(Topic, "[\*]", "+", [global]),
-                 "[\.]", "/", [global])).
+get_topic_translation_funs() ->
+    SparkplugB = env(sparkplug),
+    ToAmqpFun = fun(Topic) ->
+                        cached(mta_cache, fun to_amqp/1, Topic)
+                end,
+    ToMqttFun = fun(Topic) ->
+                        cached(atm_cache, fun to_mqtt/1, Topic)
+                end,
+    {M2AFun, A2MFun} = case SparkplugB of
+        true ->
+            {ok, M2A_SpRe} = re:compile("^sp[AB]v\\d+\\.\\d+/"),
+            {ok, A2M_SpRe} = re:compile("^sp[AB]v\\d+___\\d+\\."),
+            M2A = fun(T0) ->
+                case re:run(T0, M2A_SpRe) of
+                    nomatch ->
+                        ToAmqpFun(T0);
+                    {match, _} ->
+                        T1 = string:replace(T0, ".", "___", leading),
+                        ToAmqpFun(T1)
+                end
+            end,
+            A2M = fun(T0) ->
+                case re:run(T0, A2M_SpRe) of
+                    nomatch ->
+                        ToMqttFun(T0);
+                    {match, _} ->
+                        T1 = ToMqttFun(T0),
+                        T2 = string:replace(T1, "___", ".", leading),
+                        erlang:iolist_to_binary(T2)
+                end
+            end,
+            {M2A, A2M};
+        _ ->
+            M2A = fun(T) ->
+                ToAmqpFun(T)
+            end,
+            A2M = fun(T) ->
+                ToMqttFun(T)
+            end,
+            {M2A, A2M}
+    end,
+    {ok, {mqtt2amqp_fun, M2AFun}, {amqp2mqtt_fun, A2MFun}}.
 
 gen_client_id() ->
     lists:nthtail(1, rabbit_guid:string(rabbit_guid:gen_secure(), [])).

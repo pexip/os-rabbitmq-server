@@ -1,23 +1,17 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_stomp_sup).
 -behaviour(supervisor).
 
--export([start_link/2, init/1]).
+-export([start_link/2, init/1, stop_listeners/0]).
+
+-define(TCP_PROTOCOL, 'stomp').
+-define(TLS_PROTOCOL, 'stomp/ssl').
 
 start_link(Listeners, Configuration) ->
     supervisor:start_link({local, ?MODULE}, ?MODULE,
@@ -30,17 +24,31 @@ init([{Listeners, SslListeners0}, Configuration]) ->
         = case SslListeners0 of
               [] -> {none, 0, []};
               _  -> {rabbit_networking:ensure_ssl(),
-                     application:get_env(rabbitmq_stomp, num_ssl_acceptors, 1),
+                     application:get_env(rabbitmq_stomp, num_ssl_acceptors, 10),
                      case rabbit_networking:poodle_check('STOMP') of
                          ok     -> SslListeners0;
                          danger -> []
                      end}
           end,
-    {ok, {{one_for_all, 10, 10},
+    Flags = #{
+        strategy => one_for_all,
+        period => 10,
+        intensity => 10
+    },
+    {ok, {Flags,
            listener_specs(fun tcp_listener_spec/1,
                           [SocketOpts, Configuration, NumTcpAcceptors], Listeners) ++
            listener_specs(fun ssl_listener_spec/1,
                           [SocketOpts, SslOpts, Configuration, NumSslAcceptors], SslListeners)}}.
+
+stop_listeners() ->
+    rabbit_networking:stop_ranch_listener_of_protocol(?TCP_PROTOCOL),
+    rabbit_networking:stop_ranch_listener_of_protocol(?TLS_PROTOCOL),
+    ok.
+
+%%
+%% Implementation
+%%
 
 listener_specs(Fun, Args, Listeners) ->
     [Fun([Address | Args]) ||
@@ -50,20 +58,17 @@ listener_specs(Fun, Args, Listeners) ->
 tcp_listener_spec([Address, SocketOpts, Configuration, NumAcceptors]) ->
     rabbit_networking:tcp_listener_spec(
       rabbit_stomp_listener_sup, Address, SocketOpts,
-      transport(stomp), rabbit_stomp_client_sup, Configuration,
-      stomp, NumAcceptors, "STOMP TCP Listener").
+      transport(?TCP_PROTOCOL), rabbit_stomp_client_sup, Configuration,
+      stomp, NumAcceptors, "STOMP TCP listener").
 
 ssl_listener_spec([Address, SocketOpts, SslOpts, Configuration, NumAcceptors]) ->
     rabbit_networking:tcp_listener_spec(
       rabbit_stomp_listener_sup, Address, SocketOpts ++ SslOpts,
-      transport('stomp/ssl'), rabbit_stomp_client_sup, Configuration,
-      'stomp/ssl', NumAcceptors, "STOMP SSL Listener").
+      transport(?TLS_PROTOCOL), rabbit_stomp_client_sup, Configuration,
+      'stomp/ssl', NumAcceptors, "STOMP TLS listener").
 
 transport(Protocol) ->
-    ProxyProtocol = application:get_env(rabbitmq_stomp, proxy_protocol, false),
-    case {Protocol, ProxyProtocol} of
-        {stomp, false}       -> ranch_tcp;
-        {stomp, true}        -> ranch_proxy;
-        {'stomp/ssl', false} -> ranch_ssl;
-        {'stomp/ssl', true}  -> ranch_proxy_ssl
+    case Protocol of
+        ?TCP_PROTOCOL -> ranch_tcp;
+        ?TLS_PROTOCOL -> ranch_ssl
     end.

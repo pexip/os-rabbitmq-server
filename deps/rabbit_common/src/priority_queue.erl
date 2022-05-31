@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% Priority queues have essentially the same interface as ordinary
@@ -33,7 +24,7 @@
 %% When the queue contains items with non-zero priorities, it is
 %% represented as a sorted kv list with the inverted Priority as the
 %% key and an ordinary queue as the value. Here again we use our own
-%% ordinary queue implemention for efficiency, often making recursive
+%% ordinary queue implementation for efficiency, often making recursive
 %% calls into the same function knowing that ordinary queues represent
 %% a base case.
 
@@ -41,7 +32,8 @@
 -module(priority_queue).
 
 -export([new/0, is_queue/1, is_empty/1, len/1, to_list/1, from_list/1,
-         in/2, in/3, out/1, out_p/1, join/2, filter/2, fold/3, highest/1]).
+         in/2, in/3, out/1, out_p/1, join/2, filter/2, fold/3, highest/1,
+         member/2]).
 
 %%----------------------------------------------------------------------------
 
@@ -67,6 +59,7 @@
 -spec fold
         (fun ((any(), priority(), A) -> A), A, pqueue()) -> A.
 -spec highest(pqueue()) -> priority() | 'empty'.
+-spec member(any(), pqueue()) -> boolean().
 
 %%----------------------------------------------------------------------------
 
@@ -213,6 +206,24 @@ fold(Fun, Init, Q) -> case out_p(Q) of
 highest({queue, [], [], 0})     -> empty;
 highest({queue, _, _, _})       -> 0;
 highest({pqueue, [{P, _} | _]}) -> maybe_negate_priority(P).
+
+member(_X, {queue, [], [], 0}) ->
+    false;
+member(X, {queue, R, F, _Size}) ->
+    lists:member(X, R) orelse lists:member(X, F);
+member(_X, {pqueue, []}) ->
+    false;
+member(X, {pqueue, [{_P, Q}]}) ->
+    member(X, Q);
+member(X, {pqueue, [{_P, Q} | T]}) ->
+    case member(X, Q) of
+        true ->
+            true;
+        false ->
+            member(X, {pqueue, T})
+    end;
+member(X, Q) ->
+    erlang:error(badarg, [X,Q]).
 
 r2f([],      0) -> {queue, [], [], 0};
 r2f([_] = R, 1) -> {queue, [], R, 1};

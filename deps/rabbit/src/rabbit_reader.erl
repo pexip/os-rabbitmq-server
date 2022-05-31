@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_reader).
@@ -57,12 +48,12 @@
 -include("rabbit_framing.hrl").
 -include("rabbit.hrl").
 
--export([start_link/3, info_keys/0, info/1, info/2, force_event_refresh/2,
+-export([start_link/2, info_keys/0, info/1, info/2, force_event_refresh/2,
          shutdown/2]).
 
 -export([system_continue/3, system_terminate/4, system_code_change/4]).
 
--export([init/4, mainloop/4, recvloop/4]).
+-export([init/3, mainloop/4, recvloop/4]).
 
 -export([conserve_resources/3, server_properties/1]).
 
@@ -157,58 +148,58 @@
 
 %%--------------------------------------------------------------------------
 
--spec start_link(pid(), any(), rabbit_net:socket()) -> rabbit_types:ok(pid()).
--spec info_keys() -> rabbit_types:info_keys().
--spec info(pid()) -> rabbit_types:infos().
--spec info(pid(), rabbit_types:info_keys()) -> rabbit_types:infos().
--spec force_event_refresh(pid(), reference()) -> 'ok'.
--spec shutdown(pid(), string()) -> 'ok'.
 -type resource_alert() :: {WasAlarmSetForNode :: boolean(),
                            IsThereAnyAlarmsWithSameSourceInTheCluster :: boolean(),
                            NodeForWhichAlarmWasSetOrCleared :: node()}.
--spec conserve_resources(pid(), atom(), resource_alert()) -> 'ok'.
--spec server_properties(rabbit_types:protocol()) ->
-          rabbit_framing:amqp_table().
-
-%% These specs only exists to add no_return() to keep dialyzer happy
--spec init(pid(), pid(), any(), rabbit_net:socket()) -> no_return().
--spec start_connection(pid(), pid(), any(), rabbit_net:socket()) ->
-          no_return().
-
--spec mainloop(_,[binary()], non_neg_integer(), #v1{}) -> any().
--spec system_code_change(_,_,_,_) -> {'ok',_}.
--spec system_continue(_,_,{[binary()], non_neg_integer(), #v1{}}) -> any().
--spec system_terminate(_,_,_,_) -> none().
 
 %%--------------------------------------------------------------------------
 
-start_link(HelperSup, Ref, Sock) ->
-    Pid = proc_lib:spawn_link(?MODULE, init, [self(), HelperSup, Ref, Sock]),
+-spec start_link(pid(), any()) -> rabbit_types:ok(pid()).
+
+start_link(HelperSup, Ref) ->
+    Pid = proc_lib:spawn_link(?MODULE, init, [self(), HelperSup, Ref]),
 
     {ok, Pid}.
+
+-spec shutdown(pid(), string()) -> 'ok'.
 
 shutdown(Pid, Explanation) ->
     gen_server:call(Pid, {shutdown, Explanation}, infinity).
 
-init(Parent, HelperSup, Ref, Sock) ->
-    RealSocket = rabbit_net:unwrap_socket(Sock),
-    rabbit_networking:accept_ack(Ref, RealSocket),
+-spec init(pid(), pid(), any()) -> no_return().
+
+init(Parent, HelperSup, Ref) ->
+    ?LG_PROCESS_TYPE(reader),
+    {ok, Sock} = rabbit_networking:handshake(Ref,
+        application:get_env(rabbit, proxy_protocol, false)),
     Deb = sys:debug_options([]),
     start_connection(Parent, HelperSup, Deb, Sock).
+
+-spec system_continue(_,_,{[binary()], non_neg_integer(), #v1{}}) -> any().
 
 system_continue(Parent, Deb, {Buf, BufLen, State}) ->
     mainloop(Deb, Buf, BufLen, State#v1{parent = Parent}).
 
+-spec system_terminate(_,_,_,_) -> no_return().
+
 system_terminate(Reason, _Parent, _Deb, _State) ->
     exit(Reason).
+
+-spec system_code_change(_,_,_,_) -> {'ok',_}.
 
 system_code_change(Misc, _Module, _OldVsn, _Extra) ->
     {ok, Misc}.
 
+-spec info_keys() -> rabbit_types:info_keys().
+
 info_keys() -> ?INFO_KEYS.
+
+-spec info(pid()) -> rabbit_types:infos().
 
 info(Pid) ->
     gen_server:call(Pid, info, infinity).
+
+-spec info(pid(), rabbit_types:info_keys()) -> rabbit_types:infos().
 
 info(Pid, Items) ->
     case gen_server:call(Pid, {info, Items}, infinity) of
@@ -216,12 +207,22 @@ info(Pid, Items) ->
         {error, Error} -> throw(Error)
     end.
 
+-spec force_event_refresh(pid(), reference()) -> 'ok'.
+
+% Note: https://www.pivotaltracker.com/story/show/166962656
+% This event is necessary for the stats timer to be initialized with
+% the correct values once the management agent has started
 force_event_refresh(Pid, Ref) ->
     gen_server:cast(Pid, {force_event_refresh, Ref}).
+
+-spec conserve_resources(pid(), atom(), resource_alert()) -> 'ok'.
 
 conserve_resources(Pid, Source, {_, Conserve, _}) ->
     Pid ! {conserve_resources, Source, Conserve},
     ok.
+
+-spec server_properties(rabbit_types:protocol()) ->
+          rabbit_framing:amqp_table().
 
 server_properties(Protocol) ->
     {ok, Product} = application:get_key(rabbit, description),
@@ -231,7 +232,7 @@ server_properties(Protocol) ->
     {ok, RawConfigServerProps} = application:get_env(rabbit,
                                                      server_properties),
 
-    %% Normalize the simplifed (2-tuple) and unsimplified (3-tuple) forms
+    %% Normalize the simplified (2-tuple) and unsimplified (3-tuple) forms
     %% from the config and merge them with the generated built-in properties
     NormalizedConfigServerProps =
         [{<<"capabilities">>, table, server_capabilities(Protocol)} |
@@ -299,6 +300,9 @@ socket_op(Sock, Fun) ->
                            rabbit_net:fast_close(RealSocket),
                            exit(normal)
     end.
+
+-spec start_connection(pid(), pid(), any(), rabbit_net:socket()) ->
+          no_return().
 
 start_connection(Parent, HelperSup, Deb, Sock) ->
     process_flag(trap_exit, true),
@@ -450,7 +454,6 @@ log_connection_exception(Severity, Name, Ex) ->
 log_connection_exception_with_severity(Severity, Fmt, Args) ->
     case Severity of
         debug   -> rabbit_log_connection:debug(Fmt, Args);
-        info    -> rabbit_log_connection:info(Fmt, Args);
         warning -> rabbit_log_connection:warning(Fmt, Args);
         error   -> rabbit_log_connection:error(Fmt, Args)
     end.
@@ -489,6 +492,8 @@ binlist_split(Len, L, [Acc0|Acc]) when Len < 0 ->
     {[H|L], [T|Acc]};
 binlist_split(Len, [H|T], Acc) ->
     binlist_split(Len - size(H), T, [H|Acc]).
+
+-spec mainloop(_,[binary()], non_neg_integer(), #v1{}) -> any().
 
 mainloop(Deb, Buf, BufLen, State = #v1{sock = Sock,
                                        connection_state = CS,
@@ -538,6 +543,7 @@ mainloop(Deb, Buf, BufLen, State = #v1{sock = Sock,
             end
     end.
 
+-spec stop(_, #v1{}) -> no_return().
 stop(tcp_healthcheck, State) ->
     %% The connection was closed before any packet was received. It's
     %% probably a load-balancer healthcheck: don't consider this a
@@ -572,7 +578,7 @@ handle_other({'EXIT', Parent, Reason}, State = #v1{parent = Parent}) ->
     Msg = io_lib:format("broker forced connection closure with reason '~w'", [Reason]),
     terminate(Msg, State),
     %% this is what we are expected to do according to
-    %% http://www.erlang.org/doc/man/sys.html
+    %% https://www.erlang.org/doc/man/sys.html
     %%
     %% If we wanted to be *really* nice we should wait for a while for
     %% clients to close the socket at their end, just as we do in the
@@ -648,7 +654,7 @@ switch_callback(State, Callback, Length) ->
 terminate(Explanation, State) when ?IS_RUNNING(State) ->
     {normal, handle_exception(State, 0,
                               rabbit_misc:amqp_error(
-                                connection_forced, Explanation, [], none))};
+                                connection_forced, "~s", [Explanation], none))};
 terminate(_Explanation, State) ->
     {force, State}.
 
@@ -838,7 +844,7 @@ handle_exception(State = #v1{connection = #connection{protocol = Protocol},
     respond_and_close(State, Channel, Protocol, Reason,
                       {handshake_error, CS, Reason});
 %% when negotiation fails, e.g. due to channel_max being higher than the
-%% maxiumum allowed limit
+%% maximum allowed limit
 handle_exception(State = #v1{connection = #connection{protocol = Protocol,
                                                       log_name = ConnName,
                                                       user = User},
@@ -858,6 +864,7 @@ handle_exception(State, Channel, Reason) ->
 
 %% we've "lost sync" with the client and hence must not accept any
 %% more input
+-spec fatal_frame_error(_, _, _, _, _) -> no_return().
 fatal_frame_error(Error, Type, Channel, Payload, State) ->
     frame_error(Error, Type, Channel, Payload, State),
     %% grace period to allow transmission of error
@@ -1096,6 +1103,7 @@ start_connection({ProtocolMajor, ProtocolMinor, _ProtocolRevision},
                              connection_state = starting},
                     frame_header, 7).
 
+-spec refuse_connection(_, _, _) -> no_return().
 refuse_connection(Sock, Exception, {A, B, C, D}) ->
     ok = inet_op(fun () -> rabbit_net:send(Sock, <<"AMQP",A,B,C,D>>) end),
     throw(Exception).
@@ -1122,9 +1130,8 @@ handle_method0(MethodName, FieldsBin,
             throw({connection_closed_abruptly, State});
           exit:#amqp_error{method = none} = Reason ->
             handle_exception(State, 0, Reason#amqp_error{method = MethodName});
-          Type:Reason ->
-            Stack = erlang:get_stacktrace(),
-            handle_exception(State, 0, {Type, Reason, MethodName, Stack})
+          Type:Reason:Stacktrace ->
+            handle_exception(State, 0, {Type, Reason, MethodName, Stacktrace})
     end.
 
 handle_method0(#'connection.start_ok'{mechanism = Mechanism,
@@ -1212,7 +1219,7 @@ handle_method0(#'connection.open'{virtual_host = VHost},
                            throttle         = Throttle}) ->
 
     ok = is_over_connection_limit(VHost, User),
-    ok = rabbit_access_control:check_vhost_access(User, VHost, Sock),
+    ok = rabbit_access_control:check_vhost_access(User, VHost, {socket, Sock}, #{}),
     ok = is_vhost_alive(VHost, User),
     NewConnection = Connection#connection{vhost = VHost},
     ok = send_on_channel0(Sock, #'connection.open_ok'{}, Protocol),
@@ -1256,6 +1263,44 @@ handle_method0(#'connection.close_ok'{},
                State = #v1{connection_state = closed}) ->
     self() ! terminate_connection,
     State;
+handle_method0(#'connection.update_secret'{new_secret = NewSecret, reason = Reason},
+               State = #v1{connection =
+                               #connection{protocol   = Protocol,
+                                           user       = User = #user{username = Username},
+                                           log_name   = ConnName} = Conn,
+                           sock       = Sock}) when ?IS_RUNNING(State) ->
+    rabbit_log_connection:debug(
+        "connection ~p (~s) of user '~s': "
+        "asked to update secret, reason: ~s~n",
+        [self(), dynamic_connection_name(ConnName), Username, Reason]),
+    case rabbit_access_control:update_state(User, NewSecret) of
+      {ok, User1} ->
+        %% User/auth backend state has been updated. Now we can propagate it to channels
+        %% asynchronously and return. All the channels have to do is to update their
+        %% own state.
+        %%
+        %% Any secret update errors coming from the authz backend will be handled in the other branch.
+        %% Therefore we optimistically do no error handling here. MK.
+        lists:foreach(fun(Ch) ->
+          rabbit_log:debug("Updating user/auth backend state for channel ~p", [Ch]),
+          _ = rabbit_channel:update_user_state(Ch, User1)
+        end, all_channels()),
+        ok = send_on_channel0(Sock, #'connection.update_secret_ok'{}, Protocol),
+        rabbit_log_connection:info(
+            "connection ~p (~s): "
+            "user '~s' updated secret, reason: ~s~n",
+            [self(), dynamic_connection_name(ConnName), Username, Reason]),
+        State#v1{connection = Conn#connection{user = User1}};
+      {refused, Message} ->
+        rabbit_log_connection:error("Secret update was refused for user '~p': ~p",
+                                    [Username, Message]),
+        rabbit_misc:protocol_error(not_allowed, "New secret was refused by one of the backends", []);
+      {error, Message} ->
+        rabbit_log_connection:error("Secret update for user '~p' failed: ~p",
+                                    [Username, Message]),
+        rabbit_misc:protocol_error(not_allowed,
+                                  "Secret update failed", [])
+    end;
 handle_method0(_Method, State) when ?IS_STOPPING(State) ->
     State;
 handle_method0(_Method, #v1{connection_state = S}) ->
@@ -1506,14 +1551,10 @@ ssl_info(F, #v1{sock = Sock}) ->
         {error, _}  -> '';
         {ok, Items} ->
             P = proplists:get_value(protocol, Items),
-            CS = proplists:get_value(cipher_suite, Items),
-            %% The first form is R14.
-            %% The second is R13 - the extra term is exportability (by
-            %% inspection, the docs are wrong).
-            case CS of
-                {K, C, H}    -> F({P, {K, C, H}});
-                {K, C, H, _} -> F({P, {K, C, H}})
-            end
+            #{cipher := C,
+              key_exchange := K,
+              mac := H} = proplists:get_value(selected_cipher_suite, Items),
+            F({P, {K, C, H}})
     end.
 
 cert_info(F, #v1{sock = Sock}) ->
@@ -1529,7 +1570,7 @@ maybe_emit_stats(State) ->
 
 emit_stats(State) ->
     [{_, Pid}, {_, Recv_oct}, {_, Send_oct}, {_, Reductions}] = I
-	= infos(?SIMPLE_METRICS, State),
+      = infos(?SIMPLE_METRICS, State),
     Infos = infos(?OTHER_METRICS, State),
     rabbit_core_metrics:connection_stats(Pid, Infos),
     rabbit_core_metrics:connection_stats(Pid, Recv_oct, Send_oct, Reductions),

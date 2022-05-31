@@ -71,8 +71,7 @@
 	%% Start/end of the processing of the request.
 	%%
 	%% This represents the time from this stream handler's init
-	%% to terminate. Note that this doesn't indicate the response
-	%% has been sent fully, it still may be queued up in a buffer.
+	%% to terminate.
 	req_start => integer(),
 	req_end => integer(),
 
@@ -106,6 +105,9 @@
 	resp_body_length => non_neg_integer()
 }.
 -export_type([metrics/0]).
+
+-type metrics_callback() :: fun((metrics()) -> any()).
+-export_type([metrics_callback/0]).
 
 -record(state, {
 	next :: any(),
@@ -220,6 +222,16 @@ fold([{response, Status, Headers, Body}|Tail],
 		resp_end=Resp,
 		resp_body_length=resp_body_length(Body)
 	});
+fold([{error_response, Status, Headers, Body}|Tail],
+		State=#state{resp_status=RespStatus}) ->
+	%% The error_response command only results in a response
+	%% if no response was sent before.
+	case RespStatus of
+		undefined ->
+			fold([{response, Status, Headers, Body}|Tail], State);
+		_ ->
+			fold(Tail, State)
+	end;
 fold([{headers, Status, Headers}|Tail],
 		State=#state{resp_headers_filter=RespHeadersFilter}) ->
 	RespStart = erlang:monotonic_time(),
@@ -231,6 +243,8 @@ fold([{headers, Status, Headers}|Tail],
 		end,
 		resp_start=RespStart
 	});
+%% @todo It might be worthwhile to keep the sendfile information around,
+%% especially if these frames ultimately result in a sendfile syscall.
 fold([{data, nofin, Data}|Tail], State=#state{resp_body_length=RespBodyLen}) ->
 	fold(Tail, State#state{
 		resp_body_length=RespBodyLen + resp_body_length(Data)

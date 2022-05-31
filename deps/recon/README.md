@@ -16,7 +16,7 @@ Current Status
 
 [![Build Status](https://travis-ci.org/ferd/recon.png)](https://travis-ci.org/ferd/recon)
 
-Versions supported: R15B02 and up
+Versions supported: OTP-17 and up. Support of R16B03-1 down to R15B02 is best effort. Builds with Rebar3 require OTP-17.1 and up because that's what the tool supports.
 
 Changelog
 ---------
@@ -27,6 +27,30 @@ all stable changes of the first version of Recon.
 
 *2.x*
 
+- 2.5.1
+  - Fix support for extra messages in traces (thanks to Péter Gömöri)
+  - Fix some typespecs for match specs (thanks to @chenduo)
+  - Support OTP-23 change of format in allocator blocks related to carrier migration support
+- 2.5.0
+  - Optional formatting of records in traces (thanks to @bartekgorny)
+  - Basic support for OTP-22 in `recon_alloc` (base handling of `foreign_blocks` type)
+- 2.4.0
+  - Optional formatting of records in traces (thanks to @bartekgorny)
+- 2.3.6
+  - Adapting for OTP-21. Includes the 'deprecation' of `recon:files/0`
+    since OTP-21 no longer supports listing all file descriptors, and
+    removing `error_logger_queue_len` from node stats since a new
+    logging mechanism was introduced in-process instead.
+- 2.3.5
+  - fixing timefold's first iteration to prevent errors at call-site
+    by sleeping before sampling
+- 2.3.4
+  - fixing edoc tag that broke some downstream packaging attempts
+- 2.3.3
+  - fixing `bin_leak` arith errors
+  - fixes to `recon_alloc:allocators/1` (incl. R16 compatibility)
+  - fix errors in scheduler wall time calculations
+  - `term_to_pid` supports binaries
 - 2.3.2
   - Allow the `return_to` option in `recon_trace`
   - More efficient sorting function for procs and ports attributes

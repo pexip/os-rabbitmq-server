@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_networking).
@@ -30,13 +21,16 @@
 
 -export([boot/0, start_tcp_listener/2, start_ssl_listener/3,
          stop_tcp_listener/1, on_node_down/1, active_listeners/0,
-         node_listeners/1, register_connection/1, unregister_connection/1,
+         node_listeners/1, node_client_listeners/1,
+         register_connection/1, unregister_connection/1,
          connections/0, connection_info_keys/0,
          connection_info/1, connection_info/2,
          connection_info_all/0, connection_info_all/1,
          emit_connection_info_all/4, emit_connection_info_local/3,
-         close_connection/2, force_connection_event_refresh/1, accept_ack/2,
-         tcp_host/1]).
+         close_connection/2, close_connections/2,
+         force_connection_event_refresh/1, handshake/2, tcp_host/1,
+         ranch_ref/1, ranch_ref/2, ranch_ref_of_protocol/1,
+         listener_of_protocol/1, stop_ranch_listener_of_protocol/1]).
 
 %% Used by TCP-based transports, e.g. STOMP adapter
 -export([tcp_listener_addresses/1, tcp_listener_spec/9,
@@ -44,10 +38,16 @@
 
 -export([tcp_listener_started/4, tcp_listener_stopped/4]).
 
-%% Internal
--export([connections_local/0]).
+-deprecated([{force_connection_event_refresh, 1, eventually}]).
+
+-export([
+    local_connections/0,
+    %% prefer local_connections/0
+    connections_local/0
+]).
 
 -include("rabbit.hrl").
+-include("rabbit_misc.hrl").
 
 %% IANA-suggested ephemeral port range is 49152 to 65535
 -define(FIRST_TEST_BIND_PORT, 49152).
@@ -68,67 +68,40 @@
 -type protocol() :: atom().
 -type label() :: string().
 
--spec start_tcp_listener(listener_config(), integer()) -> 'ok'.
--spec start_ssl_listener
-        (listener_config(), rabbit_types:infos(), integer()) -> 'ok'.
--spec stop_tcp_listener(listener_config()) -> 'ok'.
--spec active_listeners() -> [rabbit_types:listener()].
--spec node_listeners(node()) -> [rabbit_types:listener()].
--spec register_connection(pid()) -> ok.
--spec unregister_connection(pid()) -> ok.
--spec connections() -> [rabbit_types:connection()].
--spec connections_local() -> [rabbit_types:connection()].
--spec connection_info_keys() -> rabbit_types:info_keys().
--spec connection_info(rabbit_types:connection()) -> rabbit_types:infos().
--spec connection_info(rabbit_types:connection(), rabbit_types:info_keys()) ->
-          rabbit_types:infos().
--spec connection_info_all() -> [rabbit_types:infos()].
--spec connection_info_all(rabbit_types:info_keys()) ->
-          [rabbit_types:infos()].
--spec close_connection(pid(), string()) -> 'ok'.
--spec force_connection_event_refresh(reference()) -> 'ok'.
--spec accept_ack(any(), rabbit_net:socket()) -> ok.
-
--spec on_node_down(node()) -> 'ok'.
--spec tcp_listener_addresses(listener_config()) -> [address()].
--spec tcp_listener_spec
-        (name_prefix(), address(), [gen_tcp:listen_option()], module(), module(),
-         protocol(), any(), non_neg_integer(), label()) ->
-            supervisor:child_spec().
--spec ensure_ssl() -> rabbit_types:infos().
--spec poodle_check(atom()) -> 'ok' | 'danger'.
-
--spec boot() -> 'ok'.
--spec tcp_listener_started
-        (_, _,
-         string() |
-         {byte(),byte(),byte(),byte()} |
-         {char(),char(),char(),char(),char(),char(),char(),char()}, _) ->
-            'ok'.
--spec tcp_listener_stopped
-        (_, _,
-         string() |
-         {byte(),byte(),byte(),byte()} |
-         {char(),char(),char(),char(),char(),char(),char(),char()},
-         _) ->
-            'ok'.
-
-%%----------------------------------------------------------------------------
+-spec boot() -> 'ok' | no_return().
 
 boot() ->
     ok = record_distribution_listener(),
     _ = application:start(ranch),
-    ok = boot_tcp(application:get_env(rabbit, num_tcp_acceptors, 10)),
-    ok = boot_ssl(application:get_env(rabbit, num_ssl_acceptors, 1)),
-    _ = maybe_start_proxy_protocol(),
+    rabbit_log:debug("Started Ranch"),
+    %% Failures will throw exceptions
+    _ = boot_listeners(fun boot_tcp/1, application:get_env(rabbit, num_tcp_acceptors, 10), "TCP"),
+    _ = boot_listeners(fun boot_tls/1, application:get_env(rabbit, num_ssl_acceptors, 10), "TLS"),
     ok.
+
+boot_listeners(Fun, NumAcceptors, Type) ->
+    case Fun(NumAcceptors) of
+        ok                                                                  ->
+            ok;
+        {error, {could_not_start_listener, Address, Port, Details}} = Error ->
+            rabbit_log:error("Failed to start ~s listener [~s]:~p, error: ~p",
+                             [Type, Address, Port, Details]),
+            throw(Error)
+    end.
 
 boot_tcp(NumAcceptors) ->
     {ok, TcpListeners} = application:get_env(tcp_listeners),
-    [ok = start_tcp_listener(Listener, NumAcceptors) || Listener <- TcpListeners],
-    ok.
+    case lists:foldl(fun(Listener, ok) ->
+                             start_tcp_listener(Listener, NumAcceptors);
+                        (_Listener, Error) ->
+                             Error
+                     end,
+                     ok, TcpListeners) of
+        ok                 -> ok;
+        {error, _} = Error -> Error
+    end.
 
-boot_ssl(NumAcceptors) ->
+boot_tls(NumAcceptors) ->
     case application:get_env(ssl_listeners) of
         {ok, []} ->
             ok;
@@ -141,11 +114,15 @@ boot_ssl(NumAcceptors) ->
             ok
     end.
 
+-spec ensure_ssl() -> rabbit_types:infos().
+
 ensure_ssl() ->
     {ok, SslAppsConfig} = application:get_env(rabbit, ssl_apps),
     ok = app_utils:start_applications(SslAppsConfig),
-    {ok, SslOptsConfig} = application:get_env(rabbit, ssl_options),
-    rabbit_ssl_options:fix(SslOptsConfig).
+    {ok, SslOptsConfig0} = application:get_env(rabbit, ssl_options),
+    rabbit_ssl_options:fix(SslOptsConfig0).
+
+-spec poodle_check(atom()) -> 'ok' | 'danger'.
 
 poodle_check(Context) ->
     {ok, Vsn} = application:get_key(ssl, vsn),
@@ -172,14 +149,10 @@ log_poodle_fail(Context) ->
       "'rabbit' section of your configuration file.~n",
       [rabbit_misc:otp_release(), Context]).
 
-maybe_start_proxy_protocol() ->
-    case application:get_env(rabbit, proxy_protocol, false) of
-        false -> ok;
-        true  -> application:start(ranch_proxy_protocol)
-    end.
-
 fix_ssl_options(Config) ->
     rabbit_ssl_options:fix(Config).
+
+-spec tcp_listener_addresses(listener_config()) -> [address()].
 
 tcp_listener_addresses(Port) when is_integer(Port) ->
     tcp_listener_addresses_auto(Port);
@@ -201,26 +174,87 @@ tcp_listener_addresses_auto(Port) ->
     lists:append([tcp_listener_addresses(Listener) ||
                      Listener <- port_to_listeners(Port)]).
 
+-spec tcp_listener_spec
+        (name_prefix(), address(), [gen_tcp:listen_option()], module(), module(),
+         any(), protocol(), non_neg_integer(), label()) ->
+            supervisor:child_spec().
+
 tcp_listener_spec(NamePrefix, {IPAddress, Port, Family}, SocketOpts,
                   Transport, ProtoSup, ProtoOpts, Protocol, NumAcceptors, Label) ->
+    Args = [IPAddress, Port, Transport, [Family | SocketOpts], ProtoSup, ProtoOpts,
+            {?MODULE, tcp_listener_started, [Protocol, SocketOpts]},
+            {?MODULE, tcp_listener_stopped, [Protocol, SocketOpts]},
+            NumAcceptors, Label],
     {rabbit_misc:tcp_name(NamePrefix, IPAddress, Port),
-     {tcp_listener_sup, start_link,
-      [IPAddress, Port, Transport, [Family | SocketOpts], ProtoSup, ProtoOpts,
-       {?MODULE, tcp_listener_started, [Protocol, SocketOpts]},
-       {?MODULE, tcp_listener_stopped, [Protocol, SocketOpts]},
-       NumAcceptors, Label]},
+     {tcp_listener_sup, start_link, Args},
      transient, infinity, supervisor, [tcp_listener_sup]}.
 
+-spec ranch_ref(#listener{} | [{atom(), any()}] | 'undefined') -> ranch:ref() | undefined.
+ranch_ref(#listener{port = Port}) ->
+    [{IPAddress, Port, _Family} | _] = tcp_listener_addresses(Port),
+    {acceptor, IPAddress, Port};
+ranch_ref(Listener) when is_list(Listener) ->
+    Port = rabbit_misc:pget(port, Listener),
+    [{IPAddress, Port, _Family} | _] = tcp_listener_addresses(Port),
+    {acceptor, IPAddress, Port};
+ranch_ref(undefined) ->
+    undefined.
+
+-spec ranch_ref(inet:ip_address(), ip_port()) -> ranch:ref().
+
+%% Returns a reference that identifies a TCP listener in Ranch.
+ranch_ref(IPAddress, Port) ->
+    {acceptor, IPAddress, Port}.
+
+-spec ranch_ref_of_protocol(atom()) -> ranch:ref() | undefined.
+ranch_ref_of_protocol(Protocol) ->
+    ranch_ref(listener_of_protocol(Protocol)).
+
+-spec listener_of_protocol(atom()) -> #listener{}.
+listener_of_protocol(Protocol) ->
+    rabbit_misc:execute_mnesia_transaction(
+        fun() ->
+            MatchSpec = #listener{
+                node = node(),
+                protocol = Protocol,
+                _ = '_'
+            },
+            case mnesia:match_object(rabbit_listener, MatchSpec, read) of
+                []    -> undefined;
+                [Row] -> Row
+            end
+        end).
+
+-spec stop_ranch_listener_of_protocol(atom()) -> ok | {error, not_found}.
+stop_ranch_listener_of_protocol(Protocol) ->
+    case rabbit_networking:ranch_ref_of_protocol(Protocol) of
+        undefined -> ok;
+        Ref       ->
+            rabbit_log:debug("Stopping Ranch listener for protocol ~s", [Protocol]),
+            ranch:stop_listener(Ref)
+    end.
+
+-spec start_tcp_listener(
+        listener_config(), integer()) -> 'ok' | {'error', term()}.
+
 start_tcp_listener(Listener, NumAcceptors) ->
-    start_listener(Listener, NumAcceptors, amqp, "TCP Listener", tcp_opts()).
+    start_listener(Listener, NumAcceptors, amqp, "TCP listener", tcp_opts()).
+
+-spec start_ssl_listener(
+        listener_config(), rabbit_types:infos(), integer()) -> 'ok' | {'error', term()}.
 
 start_ssl_listener(Listener, SslOpts, NumAcceptors) ->
-    start_listener(Listener, NumAcceptors, 'amqp/ssl', "SSL Listener", tcp_opts() ++ SslOpts).
+    start_listener(Listener, NumAcceptors, 'amqp/ssl', "TLS (SSL) listener", tcp_opts() ++ SslOpts).
 
+
+-spec start_listener(
+        listener_config(), integer(), protocol(), label(), list()) -> 'ok' | {'error', term()}.
 start_listener(Listener, NumAcceptors, Protocol, Label, Opts) ->
-    [start_listener0(Address, NumAcceptors, Protocol, Label, Opts) ||
-        Address <- tcp_listener_addresses(Listener)],
-    ok.
+    lists:foldl(fun (Address, ok) ->
+                        start_listener0(Address, NumAcceptors, Protocol, Label, Opts);
+                    (_Address, {error, _} = Error) ->
+                        Error
+                end, ok, tcp_listener_addresses(Listener)).
 
 start_listener0(Address, NumAcceptors, Protocol, Label, Opts) ->
     Transport = transport(Protocol),
@@ -228,21 +262,24 @@ start_listener0(Address, NumAcceptors, Protocol, Label, Opts) ->
                              Transport, rabbit_connection_sup, [], Protocol,
                              NumAcceptors, Label),
     case supervisor:start_child(rabbit_sup, Spec) of
-        {ok, _}                -> ok;
-        {error, {shutdown, _}} -> {IPAddress, Port, _Family} = Address,
-                                  exit({could_not_start_tcp_listener,
-                                        {rabbit_misc:ntoa(IPAddress), Port}})
+        {ok, _}          -> ok;
+        {error, {{shutdown, {failed_to_start_child, _,
+                             {shutdown, {failed_to_start_child, _,
+                                         {listen_error, _, PosixError}}}}}, _}} ->
+            {IPAddress, Port, _Family} = Address,
+            {error, {could_not_start_listener, rabbit_misc:ntoa(IPAddress), Port, PosixError}};
+        {error, Other} ->
+            {IPAddress, Port, _Family} = Address,
+            {error, {could_not_start_listener, rabbit_misc:ntoa(IPAddress), Port, Other}}
     end.
 
 transport(Protocol) ->
-    ProxyProtocol = application:get_env(rabbit, proxy_protocol, false),
-    case {Protocol, ProxyProtocol} of
-        {amqp, false}       -> ranch_tcp;
-        {amqp, true}        -> ranch_proxy;
-        {'amqp/ssl', false} -> ranch_ssl;
-        {'amqp/ssl', true}  -> ranch_proxy_ssl
+    case Protocol of
+        amqp       -> ranch_tcp;
+        'amqp/ssl' -> ranch_ssl
     end.
 
+-spec stop_tcp_listener(listener_config()) -> 'ok'.
 
 stop_tcp_listener(Listener) ->
     [stop_tcp_listener0(Address) ||
@@ -253,6 +290,13 @@ stop_tcp_listener0({IPAddress, Port, _Family}) ->
     Name = rabbit_misc:tcp_name(rabbit_tcp_listener_sup, IPAddress, Port),
     ok = supervisor:terminate_child(rabbit_sup, Name),
     ok = supervisor:delete_child(rabbit_sup, Name).
+
+-spec tcp_listener_started
+        (_, _,
+         string() |
+         {byte(),byte(),byte(),byte()} |
+         {char(),char(),char(),char(),char(),char(),char(),char()}, _) ->
+            'ok'.
 
 tcp_listener_started(Protocol, Opts, IPAddress, Port) ->
     %% We need the ip to distinguish e.g. 0.0.0.0 and 127.0.0.1
@@ -267,6 +311,14 @@ tcp_listener_started(Protocol, Opts, IPAddress, Port) ->
                      port = Port,
                      opts = Opts}).
 
+-spec tcp_listener_stopped
+        (_, _,
+         string() |
+         {byte(),byte(),byte(),byte()} |
+         {char(),char(),char(),char(),char(),char(),char(),char()},
+         _) ->
+            'ok'.
+
 tcp_listener_stopped(Protocol, Opts, IPAddress, Port) ->
     ok = mnesia:dirty_delete_object(
            rabbit_listener,
@@ -277,16 +329,39 @@ tcp_listener_stopped(Protocol, Opts, IPAddress, Port) ->
                      port = Port,
                      opts = Opts}).
 
+-spec record_distribution_listener() -> ok | no_return().
+
 record_distribution_listener() ->
     {Name, Host} = rabbit_nodes:parts(node()),
-    {port, Port, _Version} = erl_epmd:port_please(Name, Host),
-    tcp_listener_started(clustering, [], {0,0,0,0,0,0,0,0}, Port).
+    case erl_epmd:port_please(Name, Host, infinity) of
+        {port, Port, _Version} ->
+            tcp_listener_started(clustering, [], {0,0,0,0,0,0,0,0}, Port);
+        noport ->
+            throw({error, no_epmd_port})
+    end.
+
+-spec active_listeners() -> [rabbit_types:listener()].
 
 active_listeners() ->
     rabbit_misc:dirty_read_all(rabbit_listener).
 
+-spec node_listeners(node()) -> [rabbit_types:listener()].
+
 node_listeners(Node) ->
     mnesia:dirty_read(rabbit_listener, Node).
+
+-spec node_client_listeners(node()) -> [rabbit_types:listener()].
+
+node_client_listeners(Node) ->
+    case node_listeners(Node) of
+        [] -> [];
+        Xs ->
+            lists:filter(fun (#listener{protocol = clustering}) -> false;
+                             (_) -> true
+                         end, Xs)
+    end.
+
+-spec on_node_down(node()) -> 'ok'.
 
 on_node_down(Node) ->
     case lists:member(Node, nodes()) of
@@ -299,22 +374,50 @@ on_node_down(Node) ->
                    "Keeping ~s listeners: the node is already back~n", [Node])
     end.
 
+-spec register_connection(pid()) -> ok.
+
 register_connection(Pid) -> pg_local:join(rabbit_connections, Pid).
+
+-spec unregister_connection(pid()) -> ok.
 
 unregister_connection(Pid) -> pg_local:leave(rabbit_connections, Pid).
 
-connections() ->
-    rabbit_misc:append_rpc_all_nodes(rabbit_mnesia:cluster_nodes(running),
-                                     rabbit_networking, connections_local, []).
+-spec connections() -> [rabbit_types:connection()].
 
+connections() ->
+    Running = rabbit_nodes:all_running(),
+    rabbit_misc:append_rpc_all_nodes(Running,
+                                     rabbit_networking, connections_local, [], ?RPC_TIMEOUT).
+
+-spec local_connections() -> [rabbit_types:connection()].
+%% @doc Returns pids of AMQP 0-9-1 and AMQP 1.0 connections local to this node.
+local_connections() ->
+    connections_local().
+
+-spec connections_local() -> [rabbit_types:connection()].
+%% @deprecated Prefer {@link local_connections}
 connections_local() -> pg_local:get_members(rabbit_connections).
+
+-spec connection_info_keys() -> rabbit_types:info_keys().
 
 connection_info_keys() -> rabbit_reader:info_keys().
 
+-spec connection_info(rabbit_types:connection()) -> rabbit_types:infos().
+
 connection_info(Pid) -> rabbit_reader:info(Pid).
+
+-spec connection_info(rabbit_types:connection(), rabbit_types:info_keys()) ->
+          rabbit_types:infos().
+
 connection_info(Pid, Items) -> rabbit_reader:info(Pid, Items).
 
+-spec connection_info_all() -> [rabbit_types:infos()].
+
 connection_info_all() -> cmap(fun (Q) -> connection_info(Q) end).
+
+-spec connection_info_all(rabbit_types:info_keys()) ->
+          [rabbit_types:infos()].
+
 connection_info_all(Items) -> cmap(fun (Q) -> connection_info(Q, Items) end).
 
 emit_connection_info_all(Nodes, Items, Ref, AggregatorPid) ->
@@ -326,6 +429,8 @@ emit_connection_info_local(Items, Ref, AggregatorPid) ->
     rabbit_control_misc:emitting_map_with_exit_handler(
       AggregatorPid, Ref, fun(Q) -> connection_info(Q, Items) end,
       connections_local()).
+
+-spec close_connection(pid(), string()) -> 'ok'.
 
 close_connection(Pid, Explanation) ->
     case lists:member(Pid, connections()) of
@@ -340,20 +445,58 @@ close_connection(Pid, Explanation) ->
             ok
     end.
 
+-spec close_connections([pid()], string()) -> 'ok'.
+close_connections(Pids, Explanation) ->
+    [close_connection(Pid, Explanation) || Pid <- Pids],
+    ok.
+
+-spec force_connection_event_refresh(reference()) -> 'ok'.
 force_connection_event_refresh(Ref) ->
     [rabbit_reader:force_event_refresh(C, Ref) || C <- connections()],
     ok.
 
-accept_ack(Ref, Sock) ->
-    ok = ranch:accept_ack(Ref),
-    case tune_buffer_size(Sock) of
-        ok         -> ok;
-        {error, _} -> rabbit_net:fast_close(Sock),
-                      exit(normal)
+-spec failed_to_recv_proxy_header(_, _) -> no_return().
+failed_to_recv_proxy_header(Ref, Error) ->
+    Msg = case Error of
+        closed -> "error when receiving proxy header: TCP socket was ~p prematurely";
+        _Other -> "error when receiving proxy header: ~p"
     end,
+    rabbit_log:debug(Msg, [Error]),
+    % The following call will clean up resources then exit
+    _ = ranch:handshake(Ref),
+    exit({shutdown, failed_to_recv_proxy_header}).
+
+handshake(Ref, ProxyProtocolEnabled) ->
+    case ProxyProtocolEnabled of
+        true ->
+            case ranch:recv_proxy_header(Ref, 3000) of
+                {error, Error} ->
+                    failed_to_recv_proxy_header(Ref, Error);
+                {error, protocol_error, Error} ->
+                    failed_to_recv_proxy_header(Ref, Error);
+                {ok, ProxyInfo} ->
+                    {ok, Sock} = ranch:handshake(Ref),
+                    setup_socket(Sock),
+                    {ok, {rabbit_proxy_socket, Sock, ProxyInfo}}
+            end;
+        false ->
+            {ok, Sock} = ranch:handshake(Ref),
+            setup_socket(Sock),
+            {ok, Sock}
+    end.
+
+setup_socket(Sock) ->
+    ok = tune_buffer_size(Sock),
     ok = file_handle_cache:obtain().
 
 tune_buffer_size(Sock) ->
+    case tune_buffer_size1(Sock) of
+        ok         -> ok;
+        {error, _} -> rabbit_net:fast_close(Sock),
+                      exit(normal)
+    end.
+
+tune_buffer_size1(Sock) ->
     case rabbit_net:getopts(Sock, [sndbuf, recbuf, buffer]) of
         {ok, BufSizes} -> BufSz = lists:max([Sz || {_Opt, Sz} <- BufSizes]),
                           rabbit_net:setopts(Sock, [{buffer, BufSz}]);
@@ -394,6 +537,7 @@ gethostaddr(Host, Family) ->
         {error, Reason} -> host_lookup_error(Host, Reason)
     end.
 
+-spec host_lookup_error(_, _) -> no_return().
 host_lookup_error(Host, Reason) ->
     rabbit_log:error("invalid host ~p - ~p~n", [Host, Reason]),
     throw({error, {invalid_host, Host, Reason}}).

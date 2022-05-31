@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% In practice Erlang shouldn't be allowed to grow to more than a half
@@ -26,10 +17,6 @@
 -module(vm_memory_monitor).
 
 -behaviour(gen_server).
-
-%% Transitional step until we can require Erlang/OTP 21 and
-%% use the now recommended try/catch syntax for obtaining the stack trace.
--compile(nowarn_deprecated_function).
 
 -export([start_link/1, start_link/3]).
 
@@ -313,10 +300,10 @@ get_process_memory_using_strategy(erlang, _State) ->
 get_total_memory_from_os() ->
     try
         get_total_memory(os:type())
-    catch _:Error ->
+    catch _:Error:Stacktrace ->
             rabbit_log:warning(
               "Failed to get total system memory: ~n~p~n~p~n",
-              [Error, erlang:get_stacktrace()]),
+              [Error, Stacktrace]),
             unknown
     end.
 
@@ -355,7 +342,7 @@ set_mem_limits(State, MemLimit) ->
                   "Only ~p MiB (~p bytes) of ~p MiB (~p bytes) memory usable due to "
                   "limited address space.~n"
                   "Crashes due to memory exhaustion are possible - see~n"
-                  "http://www.rabbitmq.com/memory.html#address-space~n",
+                  "https://www.rabbitmq.com/memory.html#address-space~n",
                   [trunc(Limit/?ONE_MiB), Limit, trunc(TotalMemory/?ONE_MiB),
                    TotalMemory]),
                 Limit;
@@ -422,7 +409,7 @@ emit_update_info(AlarmState, MemUsed, MemLimit) ->
       "vm_memory_high_watermark ~p. Memory used:~p allowed:~p~n",
       [AlarmState, MemUsed, MemLimit]).
 
-%% According to http://msdn.microsoft.com/en-us/library/aa366778(VS.85).aspx
+%% According to https://msdn.microsoft.com/en-us/library/aa366778(VS.85).aspx
 %% Windows has 2GB and 8TB of address space for 32 and 64 bit accordingly.
 get_vm_limit({win32,_OSname}) ->
     case erlang:system_info(wordsize) of
@@ -436,28 +423,42 @@ get_vm_limit(_OsType) ->
     case erlang:system_info(wordsize) of
         4 -> 2*1024*1024*1024;          %% 2 GB for 32 bits  2^31
         8 -> 256*1024*1024*1024*1024    %% 256 TB for 64 bits 2^48
-             %%http://en.wikipedia.org/wiki/X86-64#Virtual_address_space_details
+             %%https://en.wikipedia.org/wiki/X86-64#Virtual_address_space_details
     end.
 
 %%----------------------------------------------------------------------------
 %% Internal Helpers
 %%----------------------------------------------------------------------------
 cmd(Command) ->
+    cmd(Command, true).
+
+cmd(Command, ThrowIfMissing) ->
     Exec = hd(string:tokens(Command, " ")),
-    case os:find_executable(Exec) of
-        false -> throw({command_not_found, Exec});
-        _     -> os:cmd(Command)
+    case {ThrowIfMissing, os:find_executable(Exec)} of
+        {true, false} ->
+            throw({command_not_found, Exec});
+        {false, false} ->
+            {error, command_not_found};
+        {_, _Filename} ->
+            os:cmd(Command)
     end.
 
+default_linux_pagesize(CmdOutput) ->
+    rabbit_log:warning(
+      "Failed to get memory page size, using 4096. Reason: ~s",
+      [CmdOutput]),
+    4096.
+
 get_linux_pagesize() ->
-    CmdOutput = cmd("getconf PAGESIZE"),
-    case re:run(CmdOutput, "^[0-9]+", [{capture, first, list}]) of
-        {match, [Match]} -> list_to_integer(Match);
-        _ ->
-            rabbit_log:warning(
-                "Failed to get memory page size, using 4096:~n~p~n",
-                [CmdOutput]),
-            4096
+    case cmd("getconf PAGESIZE", false) of
+        {error, command_not_found} ->
+            default_linux_pagesize("getconf not found in PATH");
+        CmdOutput ->
+            case re:run(CmdOutput, "^[0-9]+", [{capture, first, list}]) of
+                {match, [Match]} -> list_to_integer(Match);
+                _ ->
+                    default_linux_pagesize(CmdOutput)
+            end
     end.
 
 %% get_total_memory(OS) -> Total
@@ -519,7 +520,8 @@ parse_line_linux(Line) ->
         end,
     Value1 = case UnitRest of
         []     -> list_to_integer(Value); %% no units
-        ["kB"] -> list_to_integer(Value) * 1024
+        ["kB"] -> list_to_integer(Value) * 1024;
+        ["KB"] -> list_to_integer(Value) * 1024
     end,
     {list_to_atom(Name), Value1}.
 

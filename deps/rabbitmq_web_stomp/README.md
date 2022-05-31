@@ -1,27 +1,24 @@
 # RabbitMQ Web STOMP plugin
 
-This project is a minimalistic bridge between the [RabbitMQ STOMP plugin](http://rabbitmq.com/stomp.html) and
-WebSockets.
+This plugin provides support for STOMP-over-WebSockets to RabbitMQ.
 
-## RabbitMQ Version Requirements
+## Installation
 
-The most recent version of this plugin requires RabbitMQ `3.7.0` or later.
+This plugin ships with modern versions of RabbitMQ.
+Like all plugins, it [must be enabled](https://www.rabbitmq.com/plugins.html) before it can be used:
 
-Since version `3.7.0` this plugin does not support SockJS anymore.
-SockJS URL path was removed.
-
-## Installation and Binary Builds
-
-This plugin is now available from the [RabbitMQ community plugins page](http://www.rabbitmq.com/community-plugins.html).
-Please consult the docs on [how to install RabbitMQ plugins](http://www.rabbitmq.com/plugins.html#installing-plugins).
+``` bash
+# this might require sudo
+rabbitmq-plugins enable rabbitmq_web_stomp
+```
 
 ## Documentation
 
-Please refer to the [RabbitMQ Web STOMP guide](http://www.rabbitmq.com/web-stomp.html).
+Please refer to the [RabbitMQ Web STOMP guide](https://www.rabbitmq.com/web-stomp.html).
 
 ## Building from Source
 
-See [Plugin Development guide](http://www.rabbitmq.com/plugin-development.html).
+See [Plugin Development guide](https://www.rabbitmq.com/plugin-development.html).
 
 TL;DR: running
 
@@ -32,6 +29,6 @@ will build the plugin and put build artifacts under the `./plugins` directory.
 
 ## Copyright and License
 
-(c) Pivotal Software Inc, 2007-2017
+(c) 2007-2020 VMware, Inc. or its affiliates.
 
 Released under the MPL, the same license as RabbitMQ.

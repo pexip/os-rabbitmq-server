@@ -1,6 +1,7 @@
 %% ====================================================================
 %% @author Gavin M. Roy <gavinmroy@gmail.com>
 %% @copyright 2016, Gavin M. Roy
+%% @copyright 2016-2020 VMware, Inc. or its affiliates.
 %% @private
 %% @doc rabbitmq_aws configuration functionality
 %% @end
@@ -12,6 +13,10 @@
          credentials/1,
          value/2,
          values/1,
+         instance_metadata_url/1,
+         instance_credentials_url/1,
+         instance_availability_zone_url/0,
+         instance_role_url/0,
          region/0,
          region/1]).
 
@@ -55,7 +60,10 @@
 %%      credentials.
 %%
 %%      When the EC2 instance metadata server is checked for but does not exist,
-%%      the operation will timeout in 100ms (``?INSTANCE_CONNECT_TIMEOUT``).
+%%      the operation will timeout in ``?DEFAULT_HTTP_TIMEOUT``ms.
+%%
+%%      When the EC2 instance metadata server exists, but data is not returned
+%%      quickly, the operation will timeout in ``?DEFAULT_HTTP_TIMEOUT``ms.
 %%
 %%      If the service does exist, it will attempt to use the
 %%      ``/meta-data/iam/security-credentials`` endpoint to request expiring
@@ -100,7 +108,10 @@ credentials() ->
 %%      credentials.
 %%
 %%      When the EC2 instance metadata server is checked for but does not exist,
-%%      the operation will timeout in 100ms (``?INSTANCE_CONNECT_TIMEOUT``).
+%%      the operation will timeout in ``?DEFAULT_HTTP_TIMEOUT``ms.
+%%
+%%      When the EC2 instance metadata server exists, but data is not returned
+%%      quickly, the operation will timeout in ``?DEFAULT_HTTP_TIMEOUT``ms.
 %%
 %%      If the service does exist, it will attempt to use the
 %%      ``/meta-data/iam/security-credentials`` endpoint to request expiring
@@ -375,8 +386,7 @@ ini_split_line(Line) ->
 %%      Metadata service
 %% @end
 instance_availability_zone_url() ->
-  instance_metadata_url(string:join(lists:append(?INSTANCE_METADATA_BASE,
-                                                 ?INSTANCE_AZ), "/")).
+  instance_metadata_url(string:join([?INSTANCE_METADATA_BASE, ?INSTANCE_AZ], "/")).
 
 
 -spec instance_credentials_url(string()) -> string().
@@ -384,16 +394,16 @@ instance_availability_zone_url() ->
 %%      Metadata service for the specified role
 %% @end
 instance_credentials_url(Role) ->
-  Base = lists:append(?INSTANCE_METADATA_BASE, ?INSTANCE_CREDENTIALS),
-  instance_metadata_url(string:join(lists:append(Base, [Role]), "/")).
+  instance_metadata_url(string:join([?INSTANCE_METADATA_BASE, ?INSTANCE_CREDENTIALS, Role], "/")).
 
 
 -spec instance_metadata_url(string()) -> string().
 %% @doc Build the Instance Metadata service URL for the specified path
 %% @end
 instance_metadata_url(Path) ->
-  rabbitmq_aws_urilib:build(#uri{authority={undefined, ?INSTANCE_HOST, undefined},
-                              path=Path, query=[]}).
+  rabbitmq_aws_urilib:build(#uri{scheme = "http",
+                                 authority = {undefined, ?INSTANCE_HOST, undefined},
+                                 path = Path, query = []}).
 
 
 -spec instance_role_url() -> string().
@@ -401,8 +411,7 @@ instance_metadata_url(Path) ->
 %%      instance from the Instance Metadata service
 %% @end
 instance_role_url() ->
-  instance_metadata_url(string:join(lists:append(?INSTANCE_METADATA_BASE,
-                                                 ?INSTANCE_CREDENTIALS), "/")).
+  instance_metadata_url(string:join([?INSTANCE_METADATA_BASE, ?INSTANCE_CREDENTIALS], "/")).
 
 
 -spec lookup_credentials(Profile :: string(),
@@ -616,7 +625,7 @@ parse_credentials_response({ok, {{_, 200, _}, _, Body}}) ->
 %% @end
 perform_http_get(URL) ->
   httpc:request(get, {URL, []},
-                [{connect_timeout, ?INSTANCE_CONNECT_TIMEOUT}], []).
+                [{timeout, ?DEFAULT_HTTP_TIMEOUT}], []).
 
 
 -spec parse_iso8601_timestamp(Timestamp :: string() | binary()) -> calendar:datetime().

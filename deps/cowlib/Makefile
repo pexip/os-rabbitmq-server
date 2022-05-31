@@ -2,7 +2,7 @@
 
 PROJECT = cowlib
 PROJECT_DESCRIPTION = Support library for manipulating Web protocols.
-PROJECT_VERSION = 2.1.0
+PROJECT_VERSION = 2.7.0
 
 # Options.
 
@@ -18,7 +18,7 @@ DIALYZER_OPTS = -Werror_handling -Wunmatched_returns
 
 LOCAL_DEPS = crypto
 
-TEST_DEPS = ci.erlang.mk horse proper
+TEST_DEPS = $(if $(CI_ERLANG_MK),ci.erlang.mk) horse proper
 dep_horse = git https://github.com/ninenines/horse.git master
 
 # CI configuration.

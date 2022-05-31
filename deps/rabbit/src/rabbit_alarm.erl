@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 %% There are two types of alarms handled by this module:
 %%
@@ -52,20 +43,14 @@
 -type resource_alarm() :: {resource_limit, resource_alarm_source(), node()}.
 -type alarm() :: local_alarm() | resource_alarm().
 
--spec start_link() -> rabbit_types:ok_pid_or_error().
--spec start() -> 'ok'.
--spec stop() -> 'ok'.
--spec register(pid(), rabbit_types:mfargs()) -> [atom()].
--spec set_alarm({alarm(), []}) -> 'ok'.
--spec clear_alarm(alarm()) -> 'ok'.
--spec on_node_up(node()) -> 'ok'.
--spec on_node_down(node()) -> 'ok'.
--spec get_alarms() -> [{alarm(), []}].
-
 %%----------------------------------------------------------------------------
+
+-spec start_link() -> rabbit_types:ok_pid_or_error().
 
 start_link() ->
     gen_event:start_link({local, ?SERVER}).
+
+-spec start() -> 'ok'.
 
 start() ->
     ok = rabbit_sup:start_restartable_child(?MODULE),
@@ -84,21 +69,38 @@ start() ->
       rabbit_disk_monitor, [DiskLimit]),
     ok.
 
+-spec stop() -> 'ok'.
+
 stop() -> ok.
 
 %% Registers a handler that should be called on every resource alarm change.
 %% Given a call rabbit_alarm:register(Pid, {M, F, A}), the handler would be
 %% called like this: `apply(M, F, A ++ [Pid, Source, Alert])', where `Source'
 %% has the type of resource_alarm_source() and `Alert' has the type of resource_alert().
+
+-spec register(pid(), rabbit_types:mfargs()) -> [atom()].
+
 register(Pid, AlertMFA) ->
     gen_event:call(?SERVER, ?MODULE, {register, Pid, AlertMFA}, infinity).
 
+-spec set_alarm({alarm(), []}) -> 'ok'.
+
 set_alarm(Alarm)   -> gen_event:notify(?SERVER, {set_alarm,   Alarm}).
+
+-spec clear_alarm(alarm()) -> 'ok'.
+
 clear_alarm(Alarm) -> gen_event:notify(?SERVER, {clear_alarm, Alarm}).
+
+-spec get_alarms() -> [{alarm(), []}].
 
 get_alarms() -> gen_event:call(?SERVER, ?MODULE, get_alarms, infinity).
 
+-spec on_node_up(node()) -> 'ok'.
+
 on_node_up(Node)   -> gen_event:notify(?SERVER, {node_up,   Node}).
+
+-spec on_node_down(node()) -> 'ok'.
+
 on_node_down(Node) -> gen_event:notify(?SERVER, {node_down, Node}).
 
 remote_conserve_resources(Pid, Source, {true, _, _}) ->

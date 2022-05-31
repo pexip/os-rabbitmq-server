@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% @private
@@ -24,7 +15,7 @@
 -export([start_link/2, connect/1, open_channel/3, hard_error_in_channel/3,
          channel_internal_error/3, server_misbehaved/2, channels_terminated/1,
          close/3, server_close/2, info/2, info_keys/0, info_keys/1,
-         register_blocked_handler/2]).
+         register_blocked_handler/2, update_secret/2]).
 -export([behaviour_info/1]).
 -export([init/1, terminate/2, code_change/3, handle_call/3, handle_cast/2,
          handle_info/2]).
@@ -83,6 +74,9 @@ close(Pid, Close, Timeout) ->
 
 server_close(Pid, Close) ->
     gen_server:cast(Pid, {server_close, Close}).
+
+update_secret(Pid, Method) ->
+    gen_server:call(Pid, {command, {update_secret, Method}}, amqp_util:call_timeout()).
 
 info(Pid, Items) ->
     gen_server:call(Pid, {info, Items}, amqp_util:call_timeout()).
@@ -273,7 +267,11 @@ handle_command({open_channel, ProposedNumber, Consumer}, _From,
                                                Mod:open_channel_args(MState)),
      State};
 handle_command({close, #'connection.close'{} = Close, Timeout}, From, State) ->
-    app_initiated_close(Close, From, Timeout, State).
+    app_initiated_close(Close, From, Timeout, State);
+handle_command({update_secret, #'connection.update_secret'{} = Method}, _From,
+               State = #state{module = Mod,
+                              module_state = MState}) ->
+    {reply, Mod:do(Method, MState), State}.
 
 %%---------------------------------------------------------------------------
 %% Handling methods from broker
@@ -295,6 +293,8 @@ handle_method(#'connection.unblocked'{} = Unblocked, State = #state{block_handle
     case BlockHandler of none        -> ok;
                          {Pid, _Ref} -> Pid ! Unblocked
     end,
+    {noreply, State};
+handle_method(#'connection.update_secret_ok'{} = _Method, State) ->
     {noreply, State};
 handle_method(Other, State) ->
     server_misbehaved_close(#amqp_error{name        = command_invalid,

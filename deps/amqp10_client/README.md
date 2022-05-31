@@ -10,22 +10,28 @@ protocol despite the name — [consider this one](https://github.com/rabbitmq/ra
 
 ## Project Maturity and Status
 
-This project is young and not 100% feature complete. It is used in the cross-protocol version of the
-RabbitMQ Shovel plugin (available as of 3.7.0).
+This client is used in the cross-protocol version of the RabbitMQ Shovel plugin. It is not 100%
+feature complete but moderately mature and was tested against at least three AMQP 1.0 servers:
+RabbitMQ, Azure ServiceBus, ActiveMQ.
 
-This client library is not officially supported by Pivotal at this time.
+This client library is not officially supported by VMware at this time.
 
 ## Usage
 
-### Connection Configuration
+### Connection Settings
 
 The `connection_config` map contains various configuration properties.
 
-```
+```                       
+-type address :: inet:socket_address() | inet:hostname().
+
 -type connection_config() ::
     #{container_id => binary(), % mandatory
-      address => inet:socket_address() | inet:hostname(), % mandatory
-      port => inet:port_number(), % mandatory
+      %% must provide a list of addresses or a single address
+      addresses => [address()],
+      address => address(), 
+      %% defaults to 5672, mandatory for TLS
+      port => inet:port_number(),
       % the dns name of the target host
       % required by some vendors such as Azure ServiceBus
       hostname => binary(),
@@ -50,10 +56,14 @@ in the amqp 1.0 protocol will be supported in the future. If no value is provide
 for `tls_opt` then a plain socket will be used.
 
 
-### Sending and receiving a message example
+### Basic Example
 
 ```
-% create a configuration map
+%% this will connect to a localhost node
+{ok, Hostname} = inet:gethostname(),
+User = <<"guest">>,
+Password = <<"guest">>,
+%% create a configuration map
 OpnConf = #{address => Hostname,
             port => Port,
             container_id => <<"test-container">>,
@@ -61,33 +71,29 @@ OpnConf = #{address => Hostname,
 {ok, Connection} = amqp10_client:open_connection(OpnConf),
 {ok, Session} = amqp10_client:begin_session(Connection),
 SenderLinkName = <<"test-sender">>,
-{ok, Sender} = amqp10_client:attach_sender_link(Session,
-                                                SenderLinkName,
-                                                <<"a-queue-maybe">>),
+{ok, Sender} = amqp10_client:attach_sender_link(Session, SenderLinkName, <<"a-queue-maybe">>),
 
-% wait for credit to be received
+%% wait for credit to be received
 receive
     {amqp10_event, {link, Sender, credited}} -> ok
 after 2000 ->
       exit(credited_timeout)
 end.
 
-% create a new message using a delivery-tag, body and indicate
-% it's settlement status (true meaning no disposition confirmation
-% will be sent by the receiver).
+%% create a new message using a delivery-tag, body and indicate
+%% it's settlement status (true meaning no disposition confirmation
+%% will be sent by the receiver).
 OutMsg = amqp10_msg:new(<<"my-tag">>, <<"my-body">>, true),
 ok = amqp10_client:send_msg(Sender, OutMsg),
 ok = amqp10_client:detach_link(Sender),
 
-% create a receiver link
-{ok, Receiver} = amqp10_client:attach_receiver_link(Session,
-                                                    <<"test-receiver">>,
-                                                    <<"a-queue-maybe">>),
+%% create a receiver link
+{ok, Receiver} = amqp10_client:attach_receiver_link(Session, <<"test-receiver">>, <<"a-queue-maybe">>),
 
-% grant some credit to the remote sender but don't auto-renew it
+%% grant some credit to the remote sender but don't auto-renew it
 ok = amqp10_client:flow_link_credit(Receiver, 5, never),
 
-% wait for a delivery
+%% wait for a delivery
 receive
     {amqp10_msg, Receiver, InMsg} -> ok
 after 2000 ->
@@ -95,7 +101,6 @@ after 2000 ->
 end.
 
 ok = amqp10_client:close_connection(Connection),
-
 ```
 
 

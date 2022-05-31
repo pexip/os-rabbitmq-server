@@ -1,35 +1,15 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(amqp10_client_session).
 
--behaviour(gen_fsm).
+-behaviour(gen_statem).
 
 -include("amqp10_client.hrl").
 -include_lib("amqp10_common/include/amqp10_framing.hrl").
-
--ifdef(nowarn_deprecated_gen_fsm).
--compile({nowarn_deprecated_function,
-          [{gen_fsm, reply, 2},
-           {gen_fsm, send_all_state_event, 2},
-           {gen_fsm, send_event, 2},
-           {gen_fsm, start_link, 3},
-           {gen_fsm, sync_send_all_state_event, 2},
-           {gen_fsm, sync_send_event, 2},
-           {gen_fsm, sync_send_event, 3}]}).
--endif.
 
 %% Public API.
 -export(['begin'/1,
@@ -48,21 +28,21 @@
          socket_ready/2
         ]).
 
-%% gen_fsm callbacks.
--export([init/1,
-         unmapped/2,
-         unmapped/3,
-         begin_sent/2,
-         begin_sent/3,
-         mapped/2,
-         mapped/3,
-         end_sent/2,
-         end_sent/3,
-         handle_event/3,
-         handle_sync_event/4,
-         handle_info/3,
+%% gen_statem callbacks
+-export([
+         init/1,
          terminate/3,
-         code_change/4]).
+         code_change/4,
+         callback_mode/0
+        ]).
+
+%% gen_statem state callbacks.
+-export([
+         unmapped/3,
+         begin_sent/3,
+         mapped/3,
+         end_sent/3
+        ]).
 
 -define(MAX_SESSION_WINDOW_SIZE, 65535).
 -define(DEFAULT_MAX_HANDLE, 16#ffffffff).
@@ -94,12 +74,14 @@
 
 % http://www.amqp.org/specification/1.0/filters
 -type filter() :: #{binary() => binary() | map() | list(binary())}.
+-type properties() :: #{binary() => tuple()}.
 
 -type attach_args() :: #{name => binary(),
                          role => attach_role(),
                          snd_settle_mode => snd_settle_mode(),
                          rcv_settle_mode => rcv_settle_mode(),
-                         filter => filter()
+                         filter => filter(),
+                         properties => properties()
                         }.
 
 -type link_ref() :: #link_ref{}.
@@ -111,6 +93,7 @@
               attach_role/0,
               target_def/0,
               source_def/0,
+              properties/0,
               filter/0]).
 
 -record(link,
@@ -186,30 +169,31 @@ begin_sync(Connection, Timeout) ->
 
 -spec 'end'(pid()) -> ok.
 'end'(Pid) ->
-    gen_fsm:send_event(Pid, 'end').
+    gen_statem:cast(Pid, 'end').
 
 -spec attach(pid(), attach_args()) -> {ok, link_ref()}.
 attach(Session, Args) ->
-    gen_fsm:sync_send_event(Session, {attach, Args}).
+    gen_statem:call(Session, {attach, Args}, {dirty_timeout, ?TIMEOUT}).
 
 -spec detach(pid(), link_handle()) -> ok | {error, link_not_found | half_attached}.
 detach(Session, Handle) ->
-    gen_fsm:sync_send_event(Session, {detach, Handle}).
+    gen_statem:call(Session, {detach, Handle}, {dirty_timeout, ?TIMEOUT}).
 
 -spec transfer(pid(), amqp10_msg:amqp10_msg(), timeout()) ->
     ok | {error, insufficient_credit | link_not_found | half_attached}.
 transfer(Session, Amqp10Msg, Timeout) ->
     [Transfer | Records] = amqp10_msg:to_amqp_records(Amqp10Msg),
-    gen_fsm:sync_send_event(Session, {transfer, Transfer, Records}, Timeout).
+    gen_statem:call(Session, {transfer, Transfer, Records},
+                    {dirty_timeout, Timeout}).
 
 flow(Session, Handle, Flow, RenewAfter) ->
-    gen_fsm:send_event(Session, {flow, Handle, Flow, RenewAfter}).
+    gen_statem:cast(Session, {flow, Handle, Flow, RenewAfter}).
 
 -spec disposition(pid(), link_role(), transfer_id(), transfer_id(), boolean(),
                   amqp10_client_types:delivery_state()) -> ok.
 disposition(Session, Role, First, Last, Settled, DeliveryState) ->
-    gen_fsm:sync_send_event(Session, {disposition, Role, First, Last, Settled,
-                                      DeliveryState}).
+    gen_statem:call(Session, {disposition, Role, First, Last, Settled,
+                              DeliveryState}, {dirty_timeout, ?TIMEOUT}).
 
 
 
@@ -218,15 +202,17 @@ disposition(Session, Role, First, Last, Settled, DeliveryState) ->
 %% -------------------------------------------------------------------
 
 start_link(From, Channel, Reader, ConnConfig) ->
-    gen_fsm:start_link(?MODULE, [From, Channel, Reader, ConnConfig], []).
+    gen_statem:start_link(?MODULE, [From, Channel, Reader, ConnConfig], []).
 
 -spec socket_ready(pid(), amqp10_client_connection:amqp10_socket()) -> ok.
 socket_ready(Pid, Socket) ->
-    gen_fsm:send_event(Pid, {socket_ready, Socket}).
+    gen_statem:cast(Pid, {socket_ready, Socket}).
 
 %% -------------------------------------------------------------------
-%% gen_fsm callbacks.
+%% gen_statem callbacks.
 %% -------------------------------------------------------------------
+
+callback_mode() -> [state_functions].
 
 init([FromPid, Channel, Reader, ConnConfig]) ->
     process_flag(trap_exit, true),
@@ -235,26 +221,25 @@ init([FromPid, Channel, Reader, ConnConfig]) ->
                    connection_config = ConnConfig},
     {ok, unmapped, State}.
 
-unmapped({socket_ready, Socket}, State) ->
+unmapped(cast, {socket_ready, Socket}, State) ->
     State1 = State#state{socket = Socket},
     ok = send_begin(State1),
-    {next_state, begin_sent, State1}.
-
-unmapped({attach, Attach}, From,
+    {next_state, begin_sent, State1};
+unmapped({call, From}, {attach, Attach},
                       #state{early_attach_requests = EARs} = State) ->
-    {next_state, unmapped,
+    {keep_state,
      State#state{early_attach_requests = [{From, Attach} | EARs]}}.
 
-begin_sent(#'v1_0.begin'{remote_channel = {ushort, RemoteChannel},
-                         next_outgoing_id = {uint, NOI},
-                         incoming_window = {uint, InWindow},
-                         outgoing_window = {uint, OutWindow}},
+begin_sent(cast, #'v1_0.begin'{remote_channel = {ushort, RemoteChannel},
+                               next_outgoing_id = {uint, NOI},
+                               incoming_window = {uint, InWindow},
+                               outgoing_window = {uint, OutWindow}},
            #state{early_attach_requests = EARs} = State) ->
 
     State1 = State#state{remote_channel = RemoteChannel},
     State2 = lists:foldr(fun({From, Attach}, S) ->
                                  {S2, H} = send_attach(fun send/2, Attach, From, S),
-                                 gen_fsm:reply(From, {ok, H}),
+                                 gen_statem:reply(From, {ok, H}),
                                  S2
                          end, State1, EARs),
 
@@ -263,21 +248,20 @@ begin_sent(#'v1_0.begin'{remote_channel = {ushort, RemoteChannel},
     {next_state, mapped, State2#state{early_attach_requests = [],
                                       next_incoming_id = NOI,
                                       remote_incoming_window = InWindow,
-                                      remote_outgoing_window = OutWindow}}.
-
-begin_sent({attach, Attach}, From,
-                      #state{early_attach_requests = EARs} = State) ->
-    {next_state, begin_sent,
+                                      remote_outgoing_window = OutWindow}};
+begin_sent({call, From}, {attach, Attach},
+           #state{early_attach_requests = EARs} = State) ->
+    {keep_state,
      State#state{early_attach_requests = [{From, Attach} | EARs]}}.
 
-mapped('end', State) ->
+mapped(cast, 'end', State) ->
     %% We send the first end frame and wait for the reply.
     send_end(State),
     {next_state, end_sent, State};
-mapped({flow, OutHandle, Flow0, RenewAfter}, State0) ->
+mapped(cast, {flow, OutHandle, Flow0, RenewAfter}, State0) ->
     State = send_flow(fun send/2, OutHandle, Flow0, RenewAfter, State0),
     {next_state, mapped, State};
-mapped(#'v1_0.end'{error = Err}, State) ->
+mapped(cast, #'v1_0.end'{error = Err}, State) ->
     %% We receive the first end frame, reply and terminate.
     _ = send_end(State),
     % TODO: send notifications for links?
@@ -287,11 +271,11 @@ mapped(#'v1_0.end'{error = Err}, State) ->
              end,
     ok = notify_session_ended(State, Reason),
     {stop, normal, State};
-mapped(#'v1_0.attach'{name = {utf8, Name},
-                      initial_delivery_count = IDC,
-                      handle = {uint, InHandle}},
-        #state{links = Links, link_index = LinkIndex,
-               link_handle_index = LHI} = State0) ->
+mapped(cast, #'v1_0.attach'{name = {utf8, Name},
+                            initial_delivery_count = IDC,
+                            handle = {uint, InHandle}},
+       #state{links = Links, link_index = LinkIndex,
+              link_handle_index = LHI} = State0) ->
 
     #{Name := OutHandle} = LinkIndex,
     #{OutHandle := Link0} = Links,
@@ -307,10 +291,9 @@ mapped(#'v1_0.attach'{name = {utf8, Name},
                          link_index = maps:remove(Name, LinkIndex),
                          link_handle_index = LHI#{InHandle => OutHandle}},
     {next_state, mapped, State};
-
-mapped(#'v1_0.detach'{handle = {uint, InHandle}, closed = Closed, error = Err},
-        #state{links = Links, link_handle_index = LHI} = State0)
-  when Closed =:= true orelse Closed =:= undefined ->
+mapped(cast, #'v1_0.detach'{handle = {uint, InHandle},
+                            error = Err},
+        #state{links = Links, link_handle_index = LHI} = State0) ->
     with_link(InHandle, State0,
               fun (#link{output_handle = OutHandle} = Link, State) ->
                       Reason = case Err of
@@ -322,11 +305,10 @@ mapped(#'v1_0.detach'{handle = {uint, InHandle}, closed = Closed, error = Err},
                        State#state{links = maps:remove(OutHandle, Links),
                                    link_handle_index = maps:remove(InHandle, LHI)}}
               end);
-
-mapped(#'v1_0.flow'{handle = undefined} = Flow, State0) ->
+mapped(cast, #'v1_0.flow'{handle = undefined} = Flow, State0) ->
     State = handle_session_flow(Flow, State0),
     {next_state, mapped, State};
-mapped(#'v1_0.flow'{handle = {uint, InHandle}} = Flow,
+mapped(cast, #'v1_0.flow'{handle = {uint, InHandle}} = Flow,
        #state{links = Links} = State0) ->
 
     State = handle_session_flow(Flow, State0),
@@ -340,8 +322,7 @@ mapped(#'v1_0.flow'{handle = {uint, InHandle}} = Flow,
     Links1 = Links#{OutHandle => Link},
     State1 = State#state{links = Links1},
     {next_state, mapped, State1};
-
-mapped({#'v1_0.transfer'{handle = {uint, InHandle},
+mapped(cast, {#'v1_0.transfer'{handle = {uint, InHandle},
                          more = true} = Transfer, Payload},
                          #state{links = Links} = State0) ->
 
@@ -353,22 +334,25 @@ mapped({#'v1_0.transfer'{handle = {uint, InHandle},
     State = book_partial_transfer_received(
               State0#state{links = Links#{OutHandle => Link1}}),
     {next_state, mapped, State};
-mapped({#'v1_0.transfer'{handle = {uint, InHandle},
-                         delivery_id = {uint, DeliveryId},
+mapped(cast, {#'v1_0.transfer'{handle = {uint, InHandle},
+                         delivery_id = MaybeDeliveryId,
                          settled = Settled} = Transfer0, Payload0},
                          #state{incoming_unsettled = Unsettled0} = State0) ->
 
     {ok, #link{target = {pid, TargetPid},
                output_handle = OutHandle,
-               ref = LinkRef} = Link} =
+               ref = LinkRef} = Link0} =
         find_link_by_input_handle(InHandle, State0),
 
-    {Transfer, Payload} = complete_partial_transfer(Transfer0, Payload0, Link),
+    {Transfer, Payload, Link} = complete_partial_transfer(Transfer0, Payload0, Link0),
     Msg = decode_as_msg(Transfer, Payload),
+
     % stash the DeliveryId - not sure for what yet
-    Unsettled = case Settled of
-                   true -> Unsettled0;
-                   _ -> Unsettled0#{DeliveryId => OutHandle}
+    Unsettled = case MaybeDeliveryId of
+                    {uint, DeliveryId} when Settled =/= true ->
+                        Unsettled0#{DeliveryId => OutHandle};
+                    _ ->
+                        Unsettled0
                 end,
 
     % link bookkeeping
@@ -397,7 +381,7 @@ mapped({#'v1_0.transfer'{handle = {uint, InHandle},
 
 % role=true indicates the disposition is from a `receiver`. i.e. from the
 % clients point of view these are dispositions relating to `sender`links
-mapped(#'v1_0.disposition'{role = true, settled = true, first = {uint, First},
+mapped(cast, #'v1_0.disposition'{role = true, settled = true, first = {uint, First},
                            last = Last0, state = DeliveryState},
        #state{unsettled = Unsettled0} = State) ->
     Last = case Last0 of
@@ -418,55 +402,54 @@ mapped(#'v1_0.disposition'{role = true, settled = true, first = {uint, First},
                     end, Unsettled0, lists:seq(First, Last)),
 
     {next_state, mapped, State#state{unsettled = Unsettled}};
-mapped(Frame, State) ->
+mapped(cast, Frame, State) ->
     error_logger:warning_msg("Unhandled session frame ~p in state ~p~n",
                              [Frame, State]),
-    {next_state, mapped, State}.
-
-%% mapped/3
-%% TODO:: settled = false is probably dependent on the snd_settle_mode
-%% e.g. if snd_settle_mode = settled it may not be valid to send an
-%% unsettled transfer. Who knows really?
-%%
-%% Transfer. See spec section: 2.6.12
-mapped({transfer, #'v1_0.transfer'{handle = {uint, OutHandle},
+    {next_state, mapped, State};
+mapped({call, From},
+       {transfer, #'v1_0.transfer'{handle = {uint, OutHandle},
                                    delivery_tag = {binary, DeliveryTag},
                                    settled = false} = Transfer0, Parts},
-       From, #state{next_outgoing_id = NOI, links = Links,
-                    unsettled = Unsettled} = State) ->
+       #state{next_outgoing_id = NOI, links = Links,
+              unsettled = Unsettled} = State) ->
     case Links of
         #{OutHandle := #link{input_handle = undefined}} ->
-            {reply, {error, half_attached}, mapped, State};
+            {keep_state, State, [{reply, From, {error, half_attached}}]};
         #{OutHandle := #link{link_credit = LC}} when LC =< 0 ->
-            {reply, {error, insufficient_credit}, mapped, State};
+            {keep_state, State, [{reply, From, {error, insufficient_credit}}]};
         #{OutHandle := Link} ->
             Transfer = Transfer0#'v1_0.transfer'{delivery_id = uint(NOI),
                                                  resume = false},
             {ok, NumFrames} = send_transfer(Transfer, Parts, State),
             State1 = State#state{unsettled = Unsettled#{NOI => {DeliveryTag, From}}},
-            {reply, ok, mapped, book_transfer_send(NumFrames, Link, State1)};
+            {keep_state, book_transfer_send(NumFrames, Link, State1),
+             [{reply, From, ok}]};
         _ ->
-            {reply, {error, link_not_found}, mapped, State}
+            {keep_state, State, [{reply, From, {error, link_not_found}}]}
+
     end;
-mapped({transfer, #'v1_0.transfer'{handle = {uint, OutHandle}} = Transfer0,
-        Parts}, _From, #state{next_outgoing_id = NOI,
-                              links = Links} = State) ->
+mapped({call, From},
+       {transfer, #'v1_0.transfer'{handle = {uint, OutHandle}} = Transfer0,
+        Parts}, #state{next_outgoing_id = NOI,
+                       links = Links} = State) ->
     case Links of
         #{OutHandle := #link{input_handle = undefined}} ->
-            {reply, {error, half_attached}, mapped, State};
+            {keep_state_and_data, [{reply, From, {error, half_attached}}]};
         #{OutHandle := #link{link_credit = LC}} when LC =< 0 ->
-            {reply, {error, insufficient_credit}, mapped, State};
+            {keep_state_and_data, [{reply, From, {error, insufficient_credit}}]};
         #{OutHandle := Link} ->
             Transfer = Transfer0#'v1_0.transfer'{delivery_id = uint(NOI)},
             {ok, NumFrames} = send_transfer(Transfer, Parts, State),
             % TODO look into if erlang will correctly wrap integers during
             % binary conversion.
-            {reply, ok, mapped, book_transfer_send(NumFrames, Link, State)};
+            {keep_state, book_transfer_send(NumFrames, Link, State),
+             [{reply, From, ok}]};
         _ ->
-            {reply, {error, link_not_found}, mapped, State}
+            {keep_state, [{reply, From, {error, link_not_found}}]}
     end;
 
-mapped({disposition, Role, First, Last, Settled0, DeliveryState}, _From,
+mapped({call, From},
+       {disposition, Role, First, Last, Settled0, DeliveryState},
        #state{incoming_unsettled = Unsettled0,
               links = Links0} = State0) ->
     Disposition =
@@ -496,35 +479,26 @@ mapped({disposition, Role, First, Last, Settled0, DeliveryState}, _From,
 
     Res = send(Disposition, State),
 
-    {reply, Res, mapped, State};
+    {keep_state, State, [{reply, From, Res}]};
 
-mapped({attach, Attach}, From, State) ->
+mapped({call, From}, {attach, Attach}, State) ->
     {State1, LinkRef} = send_attach(fun send/2, Attach, From, State),
-    {reply, {ok, LinkRef}, mapped, State1};
+    {keep_state, State1, [{reply, From, {ok, LinkRef}}]};
 
-mapped(Msg, From, State) ->
+mapped({call, From}, Msg, State) ->
     {Reply, State1} = send_detach(fun send/2, Msg, From, State),
-    {reply, Reply, mapped, State1}.
+    {keep_state, State1, [{reply, From, Reply}]};
 
-end_sent(#'v1_0.end'{}, State) ->
+mapped(_EvtType, Msg, _State) ->
+    error_logger:info_msg("amqp10_session: unhandled msg in mapped state ~W",
+                          [Msg, 10]),
+    keep_state_and_data.
+
+end_sent(_EvtType, #'v1_0.end'{}, State) ->
     {stop, normal, State};
-end_sent(_Frame, State) ->
+end_sent(_EvtType, _Frame, State) ->
     % just drop frames here
     {next_state, end_sent, State}.
-
-end_sent(_Frame, _From, State) ->
-    % just drop frames here
-    {next_state, end_sent, State}.
-
-handle_event(_Event, StateName, State) ->
-    {next_state, StateName, State}.
-
-handle_sync_event(_Event, _From, StateName, State) ->
-    Reply = ok,
-    {reply, Reply, StateName, State}.
-
-handle_info(_Info, StateName, State) ->
-    {next_state, StateName, State}.
 
 terminate(Reason, _StateName, #state{channel = Channel,
                                      remote_channel = RemoteChannel,
@@ -650,6 +624,19 @@ make_target(#{role := {sender, #{address := Address} = Target}}) ->
     #'v1_0.target'{address = {utf8, Address},
                    durable = {uint, Durable}}.
 
+make_properties(#{properties := Properties}) ->
+    translate_properties(Properties);
+make_properties(_) ->
+    undefined.
+
+translate_properties(Properties) when is_map(Properties) andalso map_size(Properties) =< 0 ->
+    undefined;
+translate_properties(Properties) when is_map(Properties) ->
+    {map, maps:fold(fun translate_property/3, [], Properties)}.
+
+translate_property(K, V, Acc) when is_tuple(V) ->
+    [{{symbol, K}, V} | Acc].
+
 translate_terminus_durability(none) -> 0;
 translate_terminus_durability(configuration) -> 1;
 translate_terminus_durability(unsettled_state) -> 2.
@@ -659,15 +646,15 @@ translate_filters(Filters) when is_map(Filters) -> {
     map,
     maps:fold(
         fun(<<"apache.org:legacy-amqp-direct-binding:string">> = K, V, Acc) when is_binary(V) ->
-            [{{symbol, K}, {utf8, V}} | Acc];
+            [{{symbol, K}, {described, {symbol, K}, {utf8, V}}} | Acc];
         (<<"apache.org:legacy-amqp-topic-binding:string">> = K, V, Acc) when is_binary(V) ->
-            [{{symbol, K}, {utf8, V}} | Acc];
+            [{{symbol, K}, {described, {symbol, K}, {utf8, V}}} | Acc];
         (<<"apache.org:legacy-amqp-headers-binding:map">> = K, V, Acc) when is_map(V) ->
-            [{{symbol, K}, translate_legacy_amqp_headers_binding(V)} | Acc];
+            [{{symbol, K}, {described, {symbol, K}, translate_legacy_amqp_headers_binding(V)}} | Acc];
         (<<"apache.org:no-local-filter:list">> = K, V, Acc) when is_list(V) ->
-            [{{symbol, K}, lists:map(fun(Id) -> {utf8, Id} end, V)} | Acc];
+            [{{symbol, K}, {described, {symbol, K}, lists:map(fun(Id) -> {utf8, Id} end, V)}} | Acc];
         (<<"apache.org:selector-filter:string">> = K, V, Acc) when is_binary(V) ->
-            [{{symbol, K}, {utf8, V}} | Acc]
+                [{{symbol, K}, {described, {symbol, K}, {utf8, V}}} | Acc]
         end,
         [],
         Filters)
@@ -720,6 +707,7 @@ send_attach(Send, #{name := Name, role := Role} = Args, {FromPid, _},
 
     Source = make_source(Args),
     Target = make_target(Args),
+    Properties = make_properties(Args),
 
     {LinkTarget, RoleAsBool} = case Role of
                                    {receiver, _, Pid} ->
@@ -733,6 +721,7 @@ send_attach(Send, #{name := Name, role := Role} = Args, {FromPid, _},
                             role = RoleAsBool,
                             handle = {uint, OutHandle},
                             source = Source,
+                            properties = Properties,
                             initial_delivery_count =
                                 {uint, ?INITIAL_DELIVERY_COUNT},
                             snd_settle_mode = snd_settle_mode(Args),
@@ -766,6 +755,7 @@ handle_session_flow(#'v1_0.flow'{next_incoming_id = MaybeNII,
     State#state{next_incoming_id = NOI,
                 remote_incoming_window = NII + InWin - OurNOI, % see: 2.5.6
                 remote_outgoing_window = OutWin}.
+
 
 -spec handle_link_flow(#'v1_0.flow'{}, #link{}) -> {ok | send_flow, #link{}}.
 handle_link_flow(#'v1_0.flow'{drain = true, link_credit = {uint, TheirCredit}},
@@ -880,9 +870,9 @@ notify_disposition({Pid, _}, SessionDeliveryTag) ->
     ok.
 
 book_transfer_send(Num, #link{output_handle = Handle} = Link,
-              #state{next_outgoing_id = NOI,
-                     remote_incoming_window = RIW,
-                     links = Links} = State) ->
+                   #state{next_outgoing_id = NOI,
+                          remote_incoming_window = RIW,
+                          links = Links} = State) ->
     State#state{next_outgoing_id = NOI+Num,
                 remote_incoming_window = RIW-Num,
                 links = Links#{Handle => incr_link_counters(Link)}}.
@@ -950,11 +940,12 @@ append_partial_transfer(_Transfer, Payload,
     Link#link{partial_transfers = {T, [Payload | Payloads]}}.
 
 complete_partial_transfer(Transfer, Payload,
-                          #link{partial_transfers = undefined}) ->
-    {Transfer, Payload};
+                          #link{partial_transfers = undefined} = Link) ->
+    {Transfer, Payload, Link};
 complete_partial_transfer(_Transfer, Payload,
-                          #link{partial_transfers = {T, Payloads}}) ->
-    {T, iolist_to_binary(lists:reverse([Payload | Payloads]))}.
+                          #link{partial_transfers = {T, Payloads}} = Link) ->
+    {T, iolist_to_binary(lists:reverse([Payload | Payloads])),
+     Link#link{partial_transfers = undefined}}.
 
 decode_as_msg(Transfer, Payload) ->
     Records = amqp10_framing:decode_bin(Payload),
@@ -969,6 +960,7 @@ socket_send(Sock, Data) ->
         {error, Reason} -> exit({socket_closed, Reason})
     end.
 
+-dialyzer({no_fail_call, socket_send0/2}).
 socket_send0({tcp, Socket}, Data) ->
     gen_tcp:send(Socket, Data);
 socket_send0({ssl, Socket}, Data) ->
@@ -1065,7 +1057,7 @@ translate_filters_legacy_amqp_direct_binding_filter_test() ->
     {map,
         [{
             {symbol,<<"apache.org:legacy-amqp-direct-binding:string">>},
-            {utf8,<<"my topic">>}
+            {described, {symbol, <<"apache.org:legacy-amqp-direct-binding:string">>}, {utf8,<<"my topic">>}}
         }]
     } = translate_filters(#{<<"apache.org:legacy-amqp-direct-binding:string">> => <<"my topic">>}).
 
@@ -1073,20 +1065,21 @@ translate_filters_legacy_amqp_topic_binding_filter_test() ->
     {map,
         [{
             {symbol, <<"apache.org:legacy-amqp-topic-binding:string">>},
-            {utf8, <<"*.stock.#">>}
+            {described, {symbol, <<"apache.org:legacy-amqp-topic-binding:string">>}, {utf8, <<"*.stock.#">>}}
         }]
     } = translate_filters(#{<<"apache.org:legacy-amqp-topic-binding:string">> => <<"*.stock.#">>}).
 
 translate_filters_legacy_amqp_headers_binding_filter_test() ->
     {map,
         [{
-            {symbol,<<"apache.org:legacy-amqp-headers-binding:map">>},
-            {map, [
+            {symbol, <<"apache.org:legacy-amqp-headers-binding:map">>},
+            {described, {symbol, <<"apache.org:legacy-amqp-headers-binding:map">>},
+             {map, [
                     {{utf8, <<"x-match">>}, {utf8, <<"all">>}},
                     {{utf8, <<"foo">>}, {utf8, <<"bar">>}},
                     {{utf8, <<"bar">>}, {utf8, <<"baz">>}}
                 ]
-            }
+            }}
         }]
     } = translate_filters(#{<<"apache.org:legacy-amqp-headers-binding:map">> => #{
             <<"x-match">> => <<"all">>,
@@ -1099,7 +1092,7 @@ translate_filters_legacy_amqp_no_local_filter_test() ->
     {map,
         [{
             {symbol, <<"apache.org:no-local-filter:list">>},
-            [{utf8, <<"foo">>}, {utf8, <<"bar">>}]
+            {described, {symbol, <<"apache.org:no-local-filter:list">>}, [{utf8, <<"foo">>}, {utf8, <<"bar">>}]}
         }]
     } = translate_filters(#{<<"apache.org:no-local-filter:list">> => [<<"foo">>, <<"bar">>]}).
 
@@ -1107,15 +1100,19 @@ translate_filters_selector_filter_test() ->
     {map,
         [{
             {symbol, <<"apache.org:selector-filter:string">>},
-            {utf8, <<"amqp.annotation.x-opt-enqueuedtimeutc > 123456789">>}
+            {described, {symbol, <<"apache.org:selector-filter:string">>},
+             {utf8, <<"amqp.annotation.x-opt-enqueuedtimeutc > 123456789">>}}
         }]
     } = translate_filters(#{<<"apache.org:selector-filter:string">> => <<"amqp.annotation.x-opt-enqueuedtimeutc > 123456789">>}).
 
 translate_filters_multiple_filters_test() ->
     {map,
         [
-            {{symbol, <<"apache.org:selector-filter:string">>}, {utf8, <<"amqp.annotation.x-opt-enqueuedtimeutc > 123456789">>}},
-            {{symbol, <<"apache.org:legacy-amqp-direct-binding:string">>}, {utf8,<<"my topic">>}}
+            {{symbol, <<"apache.org:selector-filter:string">>},
+             {described, {symbol, <<"apache.org:selector-filter:string">>},
+              {utf8, <<"amqp.annotation.x-opt-enqueuedtimeutc > 123456789">>}}},
+            {{symbol, <<"apache.org:legacy-amqp-direct-binding:string">>},
+             {described, {symbol, <<"apache.org:legacy-amqp-direct-binding:string">>}, {utf8,<<"my topic">>}}}
         ]
     } = translate_filters(#{
             <<"apache.org:legacy-amqp-direct-binding:string">> => <<"my topic">>,

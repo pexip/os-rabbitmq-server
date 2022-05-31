@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_shovel_parameters).
@@ -38,7 +29,8 @@ register() ->
 unregister() ->
     rabbit_registry:unregister(runtime_parameter, <<"shovel">>).
 
-validate(_VHost, <<"shovel">>, Name, Def, User) ->
+validate(_VHost, <<"shovel">>, Name, Def0, User) ->
+    Def = rabbit_data_coercion:to_proplist(Def0),
     Validations =
         shovel_validation()
         ++ src_validation(Def, User)
@@ -83,7 +75,7 @@ validate_amqp091_src(Def) ->
          one  -> ok;
          both -> {error, "Cannot specify 'src-exchange' and 'src-queue'", []}
      end,
-     case {pget(<<"delete-after">>, Def), pget(<<"ack-mode">>, Def)} of
+     case {pget(<<"src-delete-after">>, Def, pget(<<"delete-after">>, Def)), pget(<<"ack-mode">>, Def)} of
          {N, <<"no-ack">>} when is_integer(N) ->
              {error, "Cannot specify 'no-ack' and numerical 'delete-after'", []};
          _ ->
@@ -114,7 +106,7 @@ src_validation(Def, User) ->
     end.
 
 
-amqp10_src_validation(Def, User) ->
+amqp10_src_validation(_Def, User) ->
     [
      {<<"src-uri">>, validate_uri_fun(User), mandatory},
      {<<"src-address">>, fun rabbit_parameter_validation:binary/2, mandatory},
@@ -122,7 +114,7 @@ amqp10_src_validation(Def, User) ->
      {<<"src-delete-after">>, fun validate_delete_after/2, optional}
     ].
 
-amqp091_src_validation(Def, User) ->
+amqp091_src_validation(_Def, User) ->
     [
      {<<"src-uri">>,         validate_uri_fun(User), mandatory},
      {<<"src-exchange">>,    fun rabbit_parameter_validation:binary/2,optional},
@@ -130,17 +122,20 @@ amqp091_src_validation(Def, User) ->
      {<<"src-queue">>,       fun rabbit_parameter_validation:binary/2,optional},
      {<<"prefetch-count">>,  fun rabbit_parameter_validation:number/2,optional},
      {<<"src-prefetch-count">>,  fun rabbit_parameter_validation:number/2,optional},
+     %% a deprecated pre-3.7 setting
      {<<"delete-after">>, fun validate_delete_after/2, optional},
+     %% currently used multi-protocol friend name, introduced in 3.7
      {<<"src-delete-after">>, fun validate_delete_after/2, optional}
     ].
 
-dest_validation(Def, User) ->
+dest_validation(Def0, User) ->
+    Def = rabbit_data_coercion:to_proplist(Def0),
     case protocols(Def)  of
         {_, amqp091} -> amqp091_dest_validation(Def, User);
         {_, amqp10} -> amqp10_dest_validation(Def, User)
     end.
 
-amqp10_dest_validation(Def, User) ->
+amqp10_dest_validation(_Def, User) ->
     [{<<"dest-uri">>, validate_uri_fun(User), mandatory},
      {<<"dest-address">>, fun rabbit_parameter_validation:binary/2, mandatory},
      {<<"dest-add-forward-headers">>, fun rabbit_parameter_validation:boolean/2, optional},
@@ -151,7 +146,7 @@ amqp10_dest_validation(Def, User) ->
      {<<"dest-properties">>, fun validate_amqp10_map/2, optional}
     ].
 
-amqp091_dest_validation(Def, User) ->
+amqp091_dest_validation(_Def, User) ->
     [{<<"dest-uri">>,        validate_uri_fun(User), mandatory},
      {<<"dest-exchange">>,   fun rabbit_parameter_validation:binary/2,optional},
      {<<"dest-exchange-key">>,fun rabbit_parameter_validation:binary/2,optional},
@@ -190,12 +185,16 @@ validate_params_user(#amqp_params_direct{}, none) ->
     ok;
 validate_params_user(#amqp_params_direct{virtual_host = VHost},
                      User = #user{username = Username}) ->
-    case rabbit_vhost:exists(VHost) andalso
-        (catch rabbit_access_control:check_vhost_access(
-                 User, VHost, undefined)) of
+    VHostAccess = case catch rabbit_access_control:check_vhost_access(User, VHost, undefined, #{}) of
+                      ok -> ok;
+                      NotOK ->
+                          rabbit_log:debug("rabbit_access_control:check_vhost_access result: ~p", [NotOK]),
+                          NotOK
+                  end,
+    case rabbit_vhost:exists(VHost) andalso VHostAccess of
         ok -> ok;
-        _  -> {error, "user \"~s\" may not connect to vhost \"~s\"",
-                  [Username, VHost]}
+        _ ->
+            {error, "user \"~s\" may not connect to vhost \"~s\"", [Username, VHost]}
     end;
 validate_params_user(#amqp_params_network{}, _User) ->
     ok.
@@ -207,13 +206,21 @@ validate_delete_after(Name,  Term) ->
     {error, "~s should be number, \"never\" or \"queue-length\", actually was "
      "~p", [Name, Term]}.
 
-validate_amqp10_map(Name, Terms) ->
+validate_amqp10_map(Name, Terms0) ->
+    Terms = rabbit_data_coercion:to_proplist(Terms0),
     Str = fun rabbit_parameter_validation:binary/2,
     Validation = [{K, Str, optional} || {K, _} <- Terms],
     rabbit_parameter_validation:proplist(Name, Validation, Terms).
 
 %% TODO headers?
-validate_properties(Name, Term) ->
+validate_properties(Name, Term0) ->
+    Term = case Term0 of
+               T when is_map(T)  ->
+                   rabbit_data_coercion:to_proplist(Term0);
+               T when is_list(T) ->
+                   rabbit_data_coercion:to_proplist(Term0);
+               Other -> Other
+           end,
     Str = fun rabbit_parameter_validation:binary/2,
     Num = fun rabbit_parameter_validation:number/2,
     rabbit_parameter_validation:proplist(
@@ -261,9 +268,15 @@ parse_dest(VHostName, ClusterName, Def, SourceHeaders) ->
 parse_amqp10_dest({_VHost, _Name}, _ClusterName, Def, SourceHeaders) ->
     Uris = get_uris(<<"dest-uri">>, Def),
     Address = pget(<<"dest-address">>, Def),
-    Properties = pget(<<"dest-properties">>, Def, []),
-    AppProperties = pget(<<"dest-application-properties">>, Def, []),
-    MessageAnns = pget(<<"dest-message-annotations">>, Def, []),
+    Properties =
+        rabbit_data_coercion:to_proplist(
+            pget(<<"dest-properties">>, Def, [])),
+    AppProperties =
+        rabbit_data_coercion:to_proplist(
+            pget(<<"dest-application-properties">>, Def, [])),
+    MessageAnns =
+        rabbit_data_coercion:to_proplist(
+            pget(<<"dest-message-annotations">>, Def, [])),
     #{module => rabbit_amqp10_shovel,
       uris => Uris,
       target_address => Address,
@@ -426,7 +439,8 @@ set_properties(Props, []) ->
 set_properties(Props, [{Ix, V} | Rest]) ->
     set_properties(setelement(Ix, Props, V), Rest).
 
-lookup_indices(KVs, L) ->
+lookup_indices(KVs0, L) ->
+    KVs = rabbit_data_coercion:to_proplist(KVs0),
     [{1 + list_find(list_to_atom(binary_to_list(K)), L), V} || {K, V} <- KVs].
 
 list_find(K, L) -> list_find(K, L, 1).
@@ -435,6 +449,8 @@ list_find(K, [K|_], N) -> N;
 list_find(K, [],   _N) -> exit({not_found, K});
 list_find(K, [_|L], N) -> list_find(K, L, N + 1).
 
+protocols(Def) when is_map(Def) ->
+    protocols(rabbit_data_coercion:to_proplist(Def));
 protocols(Def) ->
     Src = case lists:keyfind(<<"src-protocol">>, 1, Def) of
               {_, SrcProtocol} ->

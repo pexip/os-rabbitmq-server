@@ -1,28 +1,14 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(amqp10_client).
 
 -include("amqp10_client.hrl").
 -include_lib("amqp10_common/include/amqp10_framing.hrl").
-
--ifdef(nowarn_deprecated_gen_fsm).
--compile({nowarn_deprecated_function,
-          [{gen_fsm, send_event, 2}]}).
--endif.
 
 -export([open_connection/1,
          open_connection/2,
@@ -41,11 +27,14 @@
          attach_receiver_link/4,
          attach_receiver_link/5,
          attach_receiver_link/6,
+         attach_receiver_link/7,
          attach_link/2,
          detach_link/1,
          send_msg/2,
          accept_msg/2,
          flow_link_credit/3,
+         flow_link_credit/4,
+         echo/1,
          link_handle/1,
          get_msg/1,
          get_msg/2,
@@ -65,6 +54,7 @@
 -type attach_role() :: amqp10_client_session:attach_role().
 -type attach_args() :: amqp10_client_session:attach_args().
 -type filter() :: amqp10_client_session:filter().
+-type properties() :: amqp10_client_session:properties().
 
 -type connection_config() :: amqp10_client_connection:connection_config().
 
@@ -81,6 +71,12 @@
               attach_args/0,
               connection_config/0
              ]).
+
+-ifdef (OTP_RELEASE).
+  -if(?OTP_RELEASE >= 23).
+    -compile({nowarn_deprecated_function, [{http_uri, decode, 1}]}).
+  -endif.
+-endif.
 
 %% @doc Convenience function for opening a connection providing only an
 %% address and port. This uses anonymous sasl authentication.
@@ -101,7 +97,13 @@ open_connection(Addr, Port) ->
     supervisor:startchild_ret().
 open_connection(ConnectionConfig0) ->
     Notify = maps:get(notify, ConnectionConfig0, self()),
-    amqp10_client_connection:open(ConnectionConfig0#{notify => Notify}).
+    NotifyWhenOpened = maps:get(notify_when_opened, ConnectionConfig0, self()),
+    NotifyWhenClosed = maps:get(notify_when_closed, ConnectionConfig0, self()),
+    amqp10_client_connection:open(ConnectionConfig0#{
+        notify => Notify,
+        notify_when_opened => NotifyWhenOpened,
+        notify_when_closed => NotifyWhenClosed
+    }).
 
 %% @doc Opens a connection using a connection_config map
 %% This is asynchronous and will notify completion to the caller using
@@ -151,7 +153,7 @@ begin_session_sync(Connection, Timeout) when is_pid(Connection) ->
 %% {amqp10_event, {session, SessionPid, {ended, Why}}}
 -spec end_session(pid()) -> ok.
 end_session(Pid) ->
-    gen_fsm:send_event(Pid, 'end').
+    amqp10_client_session:'end'(Pid).
 
 %% @doc Synchronously attach a link on 'Session'.
 %% This is a convenience function that awaits attached event
@@ -256,12 +258,24 @@ attach_receiver_link(Session, Name, Source, SettleMode, Durability) ->
                            snd_settle_mode(), terminus_durability(), filter()) ->
     {ok, link_ref()}.
 attach_receiver_link(Session, Name, Source, SettleMode, Durability, Filter) ->
+    attach_receiver_link(Session, Name, Source, SettleMode, Durability, Filter, #{}).
+
+%% @doc Attaches a receiver link to a source.
+%% This is asynchronous and will notify completion of the attach request to the
+%% caller using an amqp10_event of the following format:
+%% {amqp10_event, {link, LinkRef, attached | {detached, Why}}}
+-spec attach_receiver_link(pid(), binary(), binary(),
+                           snd_settle_mode(), terminus_durability(), filter(),
+                           properties()) ->
+    {ok, link_ref()}.
+attach_receiver_link(Session, Name, Source, SettleMode, Durability, Filter, Properties) ->
     AttachArgs = #{name => Name,
                    role => {receiver, #{address => Source,
                                         durable => Durability}, self()},
                    snd_settle_mode => SettleMode,
                    rcv_settle_mode => first,
-                   filter => Filter},
+                   filter => Filter,
+                   properties => Properties},
     amqp10_client_session:attach(Session, AttachArgs).
 
 -spec attach_link(pid(), attach_args()) -> {ok, link_ref()}.
@@ -283,12 +297,29 @@ detach_link(#link_ref{link_handle = Handle, session = Session}) ->
 %% the caller will be notified when the link_credit reaches 0 with an
 %% amqp10_event of the following format:
 %% {amqp10_event, {link, LinkRef, credit_exhausted}}
--spec flow_link_credit(link_ref(), non_neg_integer(), never | non_neg_integer()) -> ok.
+-spec flow_link_credit(link_ref(), Credit :: non_neg_integer(),
+                       RenewWhenBelow :: never | non_neg_integer()) -> ok.
+flow_link_credit(Ref, Credit, RenewWhenBelow) ->
+    flow_link_credit(Ref, Credit, RenewWhenBelow, false).
+
+-spec flow_link_credit(link_ref(), Credit :: non_neg_integer(),
+                       RenewWhenBelow :: never | non_neg_integer(),
+                       Drain :: boolean()) -> ok.
 flow_link_credit(#link_ref{role = receiver, session = Session,
-                           link_handle = Handle}, Credit, RenewWhenBelow) ->
-    Flow = #'v1_0.flow'{link_credit = {uint, Credit}},
+                           link_handle = Handle},
+                 Credit, RenewWhenBelow, Drain) ->
+    Flow = #'v1_0.flow'{link_credit = {uint, Credit},
+                        drain = Drain},
     ok = amqp10_client_session:flow(Session, Handle, Flow, RenewWhenBelow).
 
+%% @doc Request that the sender's flow state is echoed back
+%% This may be used to determine when the Link has finally quiesced.
+%% see §2.6.10 of the spec
+echo(#link_ref{role = receiver, session = Session,
+               link_handle = Handle}) ->
+    Flow = #'v1_0.flow'{link_credit = {uint, 0},
+                        echo = true},
+    ok = amqp10_client_session:flow(Session, Handle, Flow, 0).
 
 %%% messages
 
@@ -337,32 +368,41 @@ link_handle(#link_ref{link_handle = Handle}) -> Handle.
 -spec parse_uri(string()) ->
     {ok, connection_config()} | {error, term()}.
 parse_uri(Uri) ->
-    case http_uri:parse(Uri) of
-        {ok, Result} ->
+    case uri_string:parse(Uri) of
+        Map when is_map(Map) ->
             try
-                {ok, parse_result(Result)}
+                {ok, parse_result(Map)}
             catch
                 throw:Err -> {error, Err}
             end;
-        Err -> Err
+        {error, _, _} = Err -> Err
     end.
 
-parse_result({Scheme, UserInfo, Host, Port, "/", Query0}) ->
-    Query = lists:foldl(fun (W, Acc) ->
-                                [K, V] = string:tokens(W, "="),
-                                Acc#{K => V}
-                        end, #{},
-                        string:tokens(safe_substr(Query0, 2), "&")),
+parse_result(Map) ->
+    _ = case maps:get(path, Map, "/") of
+      "/" -> ok;
+      ""  -> ok;
+      _   -> throw(path_segment_not_supported)
+    end,
+    Scheme   = maps:get(scheme, Map, "amqp"),
+    UserInfo = maps:get(userinfo, Map, undefined),
+    Host     = maps:get(host, Map),
+    DefaultPort = case Scheme of
+      "amqp"  -> 5672;
+      "amqps" -> 5671
+    end,
+    Port   = maps:get(port, Map, DefaultPort),
+    Query0 = maps:get(query, Map, ""),
+    Query  = maps:from_list(uri_string:dissect_query(Query0)),
     Sasl = case Query of
                #{"sasl" := "anon"} -> anon;
-               #{"sasl" := "plain"} when length(UserInfo) =:= 0 ->
+               #{"sasl" := "plain"} when UserInfo =:= undefined orelse length(UserInfo) =:= 0 ->
                    throw(plain_sasl_missing_userinfo);
                _ ->
                    case UserInfo of
-                       [] ->
-                           none;
-                       U ->
-                           parse_usertoken(U)
+                       [] -> none;
+                       undefined -> none;
+                       U -> parse_usertoken(U)
                    end
            end,
     Ret0 = maps:fold(fun("idle_time_out", V, Acc) ->
@@ -371,6 +411,8 @@ parse_result({Scheme, UserInfo, Host, Port, "/", Query0}) ->
                              Acc#{max_frame_size => list_to_integer(V)};
                         ("hostname", V, Acc) ->
                              Acc#{hostname => list_to_binary(V)};
+                        ("container_id", V, Acc) ->
+                             Acc#{container_id => list_to_binary(V)};
                         ("transfer_limit_margin", V, Acc) ->
                              Acc#{transfer_limit_margin => list_to_integer(V)};
                         (_, _, Acc) -> Acc
@@ -379,22 +421,20 @@ parse_result({Scheme, UserInfo, Host, Port, "/", Query0}) ->
                             port => Port,
                             sasl => Sasl}, Query),
     case Scheme of
-        amqp -> Ret0;
-        amqps ->
+        "amqp"  -> Ret0;
+        "amqps" ->
             TlsOpts = parse_tls_opts(Query),
             Ret0#{tls_opts => {secure_port, TlsOpts}}
     end.
 
+
+parse_usertoken(undefined) ->
+    none;
+parse_usertoken("") ->
+    none;
 parse_usertoken(U) ->
     [User, Pass] = string:tokens(U, ":"),
-    {plain,
-     to_binary(http_uri:decode(User)),
-     to_binary(http_uri:decode(Pass))}.
-
-
-safe_substr(Str, Start) when length(Str) >= Start ->
-    string:substr(Str, Start);
-safe_substr(_Str, _Start) -> "".
+    {plain, to_binary(http_uri:decode(User)), to_binary(http_uri:decode(Pass))}.
 
 parse_tls_opts(M) ->
     lists:sort(maps:fold(fun parse_tls_opt/3, [], M)).
@@ -447,15 +487,20 @@ parse_uri_test_() ->
                           port => 9876,
                           hostname => <<"my_host">>,
                           sasl => none}}, parse_uri("amqp://my_host:9876")),
+     %% port defaults
+     ?_assertMatch({ok, #{port := 5671}}, parse_uri("amqps://my_host")),
+     ?_assertMatch({ok, #{port := 5672}}, parse_uri("amqp://my_host")),
      ?_assertEqual({ok, #{address => "my_proxy",
                           port => 9876,
                           hostname => <<"my_host">>,
+                          container_id => <<"my_container">>,
                           idle_time_out => 60000,
                           max_frame_size => 512,
                           tls_opts => {secure_port, []},
                           sasl => {plain, <<"fred">>, <<"passw">>}}},
-                   parse_uri("amqps://fred:passw@my_proxy:9876?sasl=plain&" ++
-                             "hostname=my_host&max_frame_size=512&idle_time_out=60000")),
+                   parse_uri("amqps://fred:passw@my_proxy:9876?sasl=plain&"
+                             "hostname=my_host&container_id=my_container&"
+                             "max_frame_size=512&idle_time_out=60000")),
      %% ensure URI encoded usernames and passwords are decodeded
      ?_assertEqual({ok, #{address => "my_proxy",
                           port => 9876,
@@ -501,13 +546,15 @@ parse_uri_test_() ->
      ?_assertEqual({error, {invalid_option, verify}},
                    parse_uri("amqps://fred:passw@my_proxy:9876?sasl=plain&" ++
                   "cacertfile=/etc/cacertfile.pem&certfile=/etc/certfile.pem&" ++
-                  "keyfile=/etc/keyfile.key&verify=verify_bananas&")),
+                  "keyfile=/etc/keyfile.key&verify=verify_bananas")),
      ?_assertEqual({error, {invalid_option, fail_if_no_peer_cert}},
                    parse_uri("amqps://fred:passw@my_proxy:9876?sasl=plain&" ++
                   "cacertfile=/etc/cacertfile.pem&certfile=/etc/certfile.pem&" ++
-                  "keyfile=/etc/keyfile.key&fail_if_no_peer_cert=banana&")),
+                  "keyfile=/etc/keyfile.key&fail_if_no_peer_cert=banana")),
      ?_assertEqual({error, plain_sasl_missing_userinfo},
-                   parse_uri("amqp://my_host:9876?sasl=plain"))
+                   parse_uri("amqp://my_host:9876?sasl=plain")),
+     ?_assertEqual({error, path_segment_not_supported},
+                   parse_uri("amqp://my_host/my_path_segment:9876"))
     ].
 
 -endif.

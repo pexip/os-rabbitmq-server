@@ -1,22 +1,14 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ Federation.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -record(upstream, {uris,
                    exchange_name,
                    queue_name,
+                   consumer_tag,
                    prefetch_count,
                    max_hops,
                    reconnect_delay,
@@ -26,7 +18,8 @@
                    ack_mode,
                    ha_policy,
                    name,
-                   bind_nowait}).
+                   bind_nowait,
+                   resource_cleanup_mode}).
 
 -record(upstream_params,
         {uri,
@@ -37,8 +30,15 @@
          safe_uri,
          table}).
 
+%% Name of the message header used to collect the hop (forwarding) path
+%% metadata as the message is forwarded by exchange federation.
 -define(ROUTING_HEADER, <<"x-received-from">>).
 -define(BINDING_HEADER, <<"x-bound-from">>).
 -define(MAX_HOPS_ARG,   <<"x-max-hops">>).
--define(NODE_NAME_ARG,  <<"x-downstream-name">>).
+%% Identifies a cluster, used by exchange federation cycle detection
+-define(DOWNSTREAM_NAME_ARG,  <<"x-downstream-name">>).
+%% Identifies a virtual host, used by exchange federation cycle detection
+-define(DOWNSTREAM_VHOST_ARG, <<"x-downstream-vhost">>).
 -define(DEF_PREFETCH, 1000).
+
+-define(FEDERATION_GUIDE_URL, <<"https://rabbitmq.com/federation.html">>).

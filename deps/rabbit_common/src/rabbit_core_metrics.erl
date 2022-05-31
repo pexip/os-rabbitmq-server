@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_core_metrics).
@@ -35,11 +26,14 @@
          channel_queue_exchange_down/1,
          channel_exchange_down/1]).
 
--export([consumer_created/7,
+-export([consumer_created/9,
+         consumer_updated/9,
          consumer_deleted/3]).
 
 -export([queue_stats/2,
          queue_stats/5,
+         queue_declared/1,
+         queue_created/1,
          queue_deleted/1,
          queues_deleted/1]).
 
@@ -64,6 +58,8 @@
 
 -type(channel_stats_type() :: queue_exchange_stats | queue_stats |
 			      exchange_stats | reductions).
+
+-type(activity_status() :: up | single_active | waiting | suspected_down).
 %%----------------------------------------------------------------------------
 %% Specs
 %%----------------------------------------------------------------------------
@@ -82,7 +78,9 @@
                                    rabbit_exchange:name()}}) -> ok.
 -spec channel_exchange_down({pid(), rabbit_exchange:name()}) -> ok.
 -spec consumer_created(pid(), binary(), boolean(), boolean(),
-                       rabbit_amqqueue:name(), integer(), list()) -> ok.
+                       rabbit_amqqueue:name(), integer(), boolean(), activity_status(), list()) -> ok.
+-spec consumer_updated(pid(), binary(), boolean(), boolean(),
+                       rabbit_amqqueue:name(), integer(), boolean(), activity_status(), list()) -> ok.
 -spec consumer_deleted(pid(), binary(), rabbit_amqqueue:name()) -> ok.
 -spec queue_stats(rabbit_amqqueue:name(), rabbit_types:infos()) -> ok.
 -spec queue_stats(rabbit_amqqueue:name(), integer(), integer(), integer(),
@@ -113,6 +111,8 @@ terminate() ->
 
 connection_created(Pid, Infos) ->
     ets:insert(connection_created, {Pid, Infos}),
+    ets:update_counter(connection_churn_metrics, node(), {2, 1},
+                       ?CONNECTION_CHURN_METRICS),
     ok.
 
 connection_closed(Pid) ->
@@ -120,6 +120,8 @@ connection_closed(Pid) ->
     ets:delete(connection_metrics, Pid),
     %% Delete marker
     ets:update_element(connection_coarse_metrics, Pid, {5, 1}),
+    ets:update_counter(connection_churn_metrics, node(), {3, 1},
+                       ?CONNECTION_CHURN_METRICS),
     ok.
 
 connection_stats(Pid, Infos) ->
@@ -133,12 +135,16 @@ connection_stats(Pid, Recv_oct, Send_oct, Reductions) ->
 
 channel_created(Pid, Infos) ->
     ets:insert(channel_created, {Pid, Infos}),
+    ets:update_counter(connection_churn_metrics, node(), {4, 1},
+                       ?CONNECTION_CHURN_METRICS),
     ok.
 
 channel_closed(Pid) ->
     ets:delete(channel_created, Pid),
     ets:delete(channel_metrics, Pid),
     ets:delete(channel_process_metrics, Pid),
+    ets:update_counter(connection_churn_metrics, node(), {5, 1},
+                       ?CONNECTION_CHURN_METRICS),
     ok.
 
 channel_stats(Pid, Infos) ->
@@ -151,15 +157,19 @@ channel_stats(reductions, Id, Value) ->
 
 channel_stats(exchange_stats, publish, Id, Value) ->
     %% Includes delete marker
-    _ = ets:update_counter(channel_exchange_metrics, Id, {2, Value}, {Id, 0, 0, 0, 0}),
+    _ = ets:update_counter(channel_exchange_metrics, Id, {2, Value}, {Id, 0, 0, 0, 0, 0}),
     ok;
 channel_stats(exchange_stats, confirm, Id, Value) ->
     %% Includes delete marker
-    _ = ets:update_counter(channel_exchange_metrics, Id, {3, Value}, {Id, 0, 0, 0, 0}),
+    _ = ets:update_counter(channel_exchange_metrics, Id, {3, Value}, {Id, 0, 0, 0, 0, 0}),
     ok;
 channel_stats(exchange_stats, return_unroutable, Id, Value) ->
     %% Includes delete marker
-    _ = ets:update_counter(channel_exchange_metrics, Id, {4, Value}, {Id, 0, 0, 0, 0}),
+    _ = ets:update_counter(channel_exchange_metrics, Id, {4, Value}, {Id, 0, 0, 0, 0, 0}),
+    ok;
+channel_stats(exchange_stats, drop_unroutable, Id, Value) ->
+    %% Includes delete marker
+    _ = ets:update_counter(channel_exchange_metrics, Id, {5, Value}, {Id, 0, 0, 0, 0, 0}),
     ok;
 channel_stats(queue_exchange_stats, publish, Id, Value) ->
     %% Includes delete marker
@@ -167,27 +177,31 @@ channel_stats(queue_exchange_stats, publish, Id, Value) ->
     ok;
 channel_stats(queue_stats, get, Id, Value) ->
     %% Includes delete marker
-    _ = ets:update_counter(channel_queue_metrics, Id, {2, Value}, {Id, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(channel_queue_metrics, Id, {2, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
 channel_stats(queue_stats, get_no_ack, Id, Value) ->
     %% Includes delete marker
-    _ = ets:update_counter(channel_queue_metrics, Id, {3, Value}, {Id, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(channel_queue_metrics, Id, {3, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
 channel_stats(queue_stats, deliver, Id, Value) ->
     %% Includes delete marker
-    _ = ets:update_counter(channel_queue_metrics, Id, {4, Value}, {Id, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(channel_queue_metrics, Id, {4, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
 channel_stats(queue_stats, deliver_no_ack, Id, Value) ->
     %% Includes delete marker
-    _ = ets:update_counter(channel_queue_metrics, Id, {5, Value}, {Id, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(channel_queue_metrics, Id, {5, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
 channel_stats(queue_stats, redeliver, Id, Value) ->
     %% Includes delete marker
-    _ = ets:update_counter(channel_queue_metrics, Id, {6, Value}, {Id, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(channel_queue_metrics, Id, {6, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
 channel_stats(queue_stats, ack, Id, Value) ->
     %% Includes delete marker
-    _ = ets:update_counter(channel_queue_metrics, Id, {7, Value}, {Id, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(channel_queue_metrics, Id, {7, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
+    ok;
+channel_stats(queue_stats, get_empty, Id, Value) ->
+    %% Includes delete marker
+    _ = ets:update_counter(channel_queue_metrics, Id, {8, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok.
 
 delete(Table, Key) ->
@@ -196,7 +210,7 @@ delete(Table, Key) ->
 
 channel_queue_down(Id) ->
     %% Delete marker
-    ets:update_element(channel_queue_metrics, Id, {8, 1}),
+    ets:update_element(channel_queue_metrics, Id, {9, 1}),
     ok.
 
 channel_queue_exchange_down(Id) ->
@@ -206,13 +220,19 @@ channel_queue_exchange_down(Id) ->
 
 channel_exchange_down(Id) ->
     %% Delete marker
-    ets:update_element(channel_exchange_metrics, Id, {5, 1}),
+    ets:update_element(channel_exchange_metrics, Id, {6, 1}),
     ok.
 
 consumer_created(ChPid, ConsumerTag, ExclusiveConsume, AckRequired, QName,
-                 PrefetchCount, Args) ->
+                 PrefetchCount, Active, ActivityStatus, Args) ->
     ets:insert(consumer_created, {{QName, ChPid, ConsumerTag}, ExclusiveConsume,
-                                   AckRequired, PrefetchCount, Args}),
+                                   AckRequired, PrefetchCount, Active, ActivityStatus, Args}),
+    ok.
+
+consumer_updated(ChPid, ConsumerTag, ExclusiveConsume, AckRequired, QName,
+                 PrefetchCount, Active, ActivityStatus, Args) ->
+    ets:insert(consumer_created, {{QName, ChPid, ConsumerTag}, ExclusiveConsume,
+                                   AckRequired, PrefetchCount, Active, ActivityStatus, Args}),
     ok.
 
 consumer_deleted(ChPid, ConsumerTag, QName) ->
@@ -229,8 +249,22 @@ queue_stats(Name, MessagesReady, MessagesUnacknowledge, Messages, Reductions) ->
                                       Messages, Reductions}),
     ok.
 
+queue_declared(_Name) ->
+    %% Name is not needed, but might be useful in the future.
+    ets:update_counter(connection_churn_metrics, node(), {6, 1},
+                       ?CONNECTION_CHURN_METRICS),
+    ok.
+
+queue_created(_Name) ->
+    %% Name is not needed, but might be useful in the future.
+    ets:update_counter(connection_churn_metrics, node(), {7, 1},
+                       ?CONNECTION_CHURN_METRICS),
+    ok.
+
 queue_deleted(Name) ->
     ets:delete(queue_coarse_metrics, Name),
+    ets:update_counter(connection_churn_metrics, node(), {8, 1},
+                       ?CONNECTION_CHURN_METRICS),
     %% Delete markers
     ets:update_element(queue_metrics, Name, {3, 1}),
     CQX = ets:select(channel_queue_exchange_metrics, match_spec_cqx(Name)),
@@ -239,10 +273,12 @@ queue_deleted(Name) ->
                   end, CQX),
     CQ = ets:select(channel_queue_metrics, match_spec_cq(Name)),
     lists:foreach(fun(Key) ->
-                          ets:update_element(channel_queue_metrics, Key, {8, 1})
+                          ets:update_element(channel_queue_metrics, Key, {9, 1})
                   end, CQ).
 
 queues_deleted(Queues) ->
+    ets:update_counter(connection_churn_metrics, node(), {8, length(Queues)},
+                       ?CONNECTION_CHURN_METRICS),
     [ delete_queue_metrics(Queue) || Queue <- Queues ],
     [
         begin
@@ -284,14 +320,14 @@ delete_channel_queue_metrics(MatchSpecCondition) ->
         channel_queue_metrics,
         [
             {
-                {{'$2', '$1'}, '_', '_', '_', '_', '_', '_', '_'},
+                {{'$2', '$1'}, '_', '_', '_', '_', '_', '_', '_', '_'},
                 [MatchSpecCondition],
                 [{{'$2', '$1'}}]
             }
         ]
     ),
     lists:foreach(fun(Key) ->
-        ets:update_element(channel_queue_metrics, Key, {8, 1})
+        ets:update_element(channel_queue_metrics, Key, {9, 1})
     end, ChannelQueueMetricsToUpdate).
 
 % [{'orelse',
@@ -331,7 +367,7 @@ match_spec_cqx(Id) ->
     [{{{'$2', {'$1', '$3'}}, '_', '_'}, [{'==', {Id}, '$1'}], [{{'$2', {{'$1', '$3'}}}}]}].
 
 match_spec_cq(Id) ->
-    [{{{'$2', '$1'}, '_', '_', '_', '_', '_', '_', '_'}, [{'==', {Id}, '$1'}], [{{'$2', '$1'}}]}].
+    [{{{'$2', '$1'}, '_', '_', '_', '_', '_', '_', '_', '_'}, [{'==', {Id}, '$1'}], [{{'$2', '$1'}}]}].
 
 gen_server2_stats(Pid, BufferLength) ->
     ets:insert(gen_server2_metrics, {Pid, BufferLength}),

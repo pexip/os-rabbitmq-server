@@ -1,17 +1,8 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ.
-%%
-%%   The Initial Developer of the Original Code is Pivotal Software, Inc.
-%%   Copyright (c) 2010-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -type(event_type() :: queue_stats | queue_exchange_stats | vhost_stats
@@ -53,7 +44,8 @@
                  {node_node_stats, set},
                  {node_node_coarse_stats, set},
                  {queue_msg_rates, set},
-                 {vhost_msg_rates, set}]).
+                 {vhost_msg_rates, set},
+                 {connection_churn_rates, set}]).
 
 -define(INDEX_TABLES, [consumer_stats_queue_index,
                        consumer_stats_channel_index,
@@ -83,24 +75,28 @@
 -define(channel_consumer_created_stats(Queue, ChPid, ConsumerTag),
         {Queue, {ChPid, ConsumerTag}}).
 -define(channel_stats(Id, Props), {Id, Props}).
--define(channel_stats_fine_stats(Publish, Confirm, Return_unroutable),
-        {Publish, Confirm, Return_unroutable}).
--define(channel_exchange_stats_fine_stats(Publish, Confirm, Return_unroutable),
-        {Publish, Confirm, Return_unroutable}).
+-define(channel_stats_fine_stats(Publish, Confirm, ReturnUnroutable, DropUnroutable),
+        {Publish, Confirm, ReturnUnroutable, DropUnroutable}).
+-define(channel_exchange_stats_fine_stats(Publish, Confirm, ReturnUnroutable, DropUnroutable),
+        {Publish, Confirm, ReturnUnroutable, DropUnroutable}).
 -define(channel_queue_stats_deliver_stats(Get, Get_no_ack, Deliver, Deliver_no_ack,
-                                          Redeliver, Ack, Deliver_get),
-        {Get, Get_no_ack, Deliver, Deliver_no_ack, Redeliver, Ack, Deliver_get}).
--define(vhost_stats_fine_stats(Publish, Confirm, Return_unroutable),
-        {Publish, Confirm, Return_unroutable}).
+                                          Redeliver, Ack, Deliver_get, Get_empty),
+        {Get, Get_no_ack, Deliver, Deliver_no_ack, Redeliver, Ack, Deliver_get,
+         Get_empty}).
+-define(vhost_stats_fine_stats(Publish, Confirm, ReturnUnroutable, DropUnroutable),
+        {Publish, Confirm, ReturnUnroutable, DropUnroutable}).
 -define(queue_stats_deliver_stats(Get, Get_no_ack, Deliver, Deliver_no_ack,
-                                  Redeliver, Ack, Deliver_get),
-        {Get, Get_no_ack, Deliver, Deliver_no_ack, Redeliver, Ack, Deliver_get}).
+                                  Redeliver, Ack, Deliver_get, Get_empty),
+        {Get, Get_no_ack, Deliver, Deliver_no_ack, Redeliver, Ack, Deliver_get,
+         Get_empty}).
 -define(vhost_stats_deliver_stats(Get, Get_no_ack, Deliver, Deliver_no_ack,
-                                  Redeliver, Ack, Deliver_get),
-        {Get, Get_no_ack, Deliver, Deliver_no_ack, Redeliver, Ack, Deliver_get}).
+                                  Redeliver, Ack, Deliver_get, Get_empty),
+        {Get, Get_no_ack, Deliver, Deliver_no_ack, Redeliver, Ack, Deliver_get,
+         Get_empty}).
 -define(channel_stats_deliver_stats(Get, Get_no_ack, Deliver, Deliver_no_ack,
-                                    Redeliver, Ack, Deliver_get),
-        {Get, Get_no_ack, Deliver, Deliver_no_ack, Redeliver, Ack, Deliver_get}).
+                                    Redeliver, Ack, Deliver_get, Get_empty),
+        {Get, Get_no_ack, Deliver, Deliver_no_ack, Redeliver, Ack, Deliver_get,
+         Get_empty}).
 -define(channel_process_stats(Reductions), {Reductions}).
 -define(queue_stats_publish(Publish), {Publish}).
 -define(queue_exchange_stats_publish(Publish), {Publish}).
@@ -136,7 +132,11 @@
 -define(queue_msg_rates(Disk_reads, Disk_writes), {Disk_reads, Disk_writes}).
 -define(vhost_msg_rates(Disk_reads, Disk_writes), {Disk_reads, Disk_writes}).
 -define(old_aggr_stats(Id, Stats), {Id, Stats}).
-
+-define(connection_churn_rates(Connection_created, Connection_closed, Channel_created,
+                               Channel_closed, Queue_declared, Queue_created,
+                               Queue_deleted),
+        {Connection_created, Connection_closed, Channel_created, Channel_closed,
+         Queue_declared, Queue_created, Queue_deleted}).
 
 -define(stats_per_table(Table),
         case Table of
@@ -147,12 +147,13 @@
             T when T =:= channel_stats_fine_stats;
                    T =:= channel_exchange_stats_fine_stats;
                    T =:= vhost_stats_fine_stats ->
-                [publish, confirm, return_unroutable];
+                [publish, confirm, return_unroutable, drop_unroutable];
             T when T =:= channel_queue_stats_deliver_stats;
                    T =:= queue_stats_deliver_stats;
                    T =:= vhost_stats_deliver_stats;
                    T =:= channel_stats_deliver_stats ->
-                [get, get_no_ack, deliver, deliver_no_ack, redeliver, ack, deliver_get];
+                [get, get_no_ack, deliver, deliver_no_ack, redeliver, ack, deliver_get,
+                 get_empty];
             T when T =:= channel_process_stats;
                    T =:= queue_process_stats ->
                 [reductions];
@@ -181,6 +182,8 @@
                 [send_bytes, recv_bytes];
             T when T =:= queue_msg_rates;
                    T =:= vhost_msg_rates ->
-                [disk_reads, disk_writes]
+                [disk_reads, disk_writes];
+            T when T =:= connection_churn_rates ->
+                [connection_created, connection_closed, channel_created, channel_closed, queue_declared, queue_created, queue_deleted]
         end).
 %%------------------------------------------------------------------------------

@@ -498,7 +498,7 @@ extract_q(KVRe, QRe, [Param | Rest], Acc) ->
 %%
 %%      The returned list of encodings is sorted, descendingly, according to the
 %%      Q values of the given list. The last element of this list is the given
-%%      default encoding unless this encoding is explicitily or implicitily
+%%      default encoding unless this encoding is explicitly or implicitly
 %%      marked with a Q value of 0.0 in the given Q values list.
 %%      Note: encodings with the same Q value are kept in the same order as
 %%            found in the input Q values list.
@@ -683,9 +683,9 @@ path_split_test() ->
 
 urlsplit_test() ->
     {"", "", "/foo", "", "bar?baz"} = urlsplit("/foo#bar?baz"),
-    {"http", "host:port", "/foo", "", "bar?baz"} =
-        urlsplit("http://host:port/foo#bar?baz"),
-    {"http", "host", "", "", ""} = urlsplit("http://host"),
+    {"https", "host:port", "/foo", "", "bar?baz"} =
+        urlsplit("https://host:port/foo#bar?baz"),
+    {"https", "host", "", "", ""} = urlsplit("https://host"),
     {"", "", "/wiki/Category:Fruit", "", ""} =
         urlsplit("/wiki/Category:Fruit"),
     ok.
@@ -701,8 +701,8 @@ urlsplit_path_test() ->
 
 urlunsplit_test() ->
     "/foo#bar?baz" = urlunsplit({"", "", "/foo", "", "bar?baz"}),
-    "http://host:port/foo#bar?baz" =
-        urlunsplit({"http", "host:port", "/foo", "", "bar?baz"}),
+    "https://host:port/foo#bar?baz" =
+        urlunsplit({"https", "host:port", "/foo", "", "bar?baz"}),
     ok.
 
 urlunsplit_path_test() ->

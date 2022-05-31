@@ -4,14 +4,15 @@ PROJECT_MOD = rabbit_mgmt_app
 
 define PROJECT_ENV
 [
-	    {listener,          [{port, 15672}]},
 	    {http_log_dir,      none},
 	    {load_definitions,  none},
 	    {management_db_cache_multiplier, 5},
 	    {process_stats_gc_timeout, 300000},
 	    {stats_event_max_backlog, 250},
+
 	    {cors_allow_origins, []},
-	    {cors_max_age, 1800}
+	    {cors_max_age, 1800},
+	    {content_security_policy, "script-src 'self' 'unsafe-eval' 'unsafe-inline'; object-src 'self'"}
 	  ]
 endef
 

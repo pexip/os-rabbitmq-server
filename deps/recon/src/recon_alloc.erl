@@ -130,13 +130,15 @@
                    | std_alloc.
 -type instance() :: non_neg_integer().
 -type allocdata(T) :: {{allocator(), instance()}, T}.
+-type allocdata_types(T) :: {{allocator(), [instance()]}, T}.
 -export_type([allocator/0, instance/0, allocdata/1]).
 
 -define(CURRENT_POS, 2). % pos in sizes tuples for current value
 -define(MAX_POS, 4). % pos in sizes tuples for max value
 
 -export([memory/1, memory/2, fragmentation/1, cache_hit_rates/0,
-         average_block_sizes/1, sbcs_to_mbcs/1, allocators/0]).
+         average_block_sizes/1, sbcs_to_mbcs/1, allocators/0,
+         allocators/1]).
 
 %% Snapshot handling
 -type memory() :: [{atom(),atom()}].
@@ -333,7 +335,7 @@ average_block_sizes(Keyword) ->
 %% larger than the `sbct', it gets sent to a single block carrier. When the
 %% data is smaller than the `sbct', it gets placed into a multiblock carrier.
 %%
-%% mbcs are to be prefered to sbcs because they basically represent pre-
+%% mbcs are to be preferred to sbcs because they basically represent pre-
 %% allocated memory, whereas sbcs will map to one call to sys_alloc
 %% or mseg_alloc, which is more expensive than redistributing
 %% data that was obtained for multiblock carriers. Moreover, the VM is able to
@@ -367,13 +369,136 @@ sbcs_to_mbcs(Keyword) ->
 allocators() ->
     UtilAllocators = erlang:system_info(alloc_util_allocators),
     Allocators = [sys_alloc,mseg_alloc|UtilAllocators],
-    %% versions is deleted in order to allow the use of the orddict api,
-    %% and never really having come across a case where it was useful to know.
-    [{{A,N},lists:sort(proplists:delete(versions,Props))} ||
+    [{{A,N}, format_alloc(A, Props)} ||
         A <- Allocators,
         Allocs <- [erlang:system_info({allocator,A})],
         Allocs =/= false,
         {_,N,Props} <- Allocs].
+
+format_alloc(Alloc, Props) ->
+    %% {versions,_,_} is implicitly deleted in order to allow the use of the
+    %% orddict api, and never really having come across a case where it was
+    %% useful to know.
+    [{K, format_blocks(Alloc, K, V)} || {K, V} <- lists:sort(Props)].
+
+format_blocks(_, _, []) ->
+    [];
+format_blocks(Alloc, Key, [{blocks, L} | List]) when is_list(L) ->
+    %% OTP-22 introduces carrier migrations across types, and OTP-23 changes the
+    %% format of data reported to be a bit richer; however it's not compatible
+    %% with most calculations made for this library.
+    %% So what we do here for `blocks' is merge all the info into the one the
+    %% library expects (`blocks' and `blocks_size'), then keep the original
+    %% one in case it is further needed.
+    %% There were further changes to `mbcs_pool' changing `foreign_blocks',
+    %% `blocks' and `blocks_size' into just `blocks' with a proplist, so we're breaking
+    %% up to use that one too.
+    %% In the end we go from `{blocks, [{Alloc, [...]}]}' to:
+    %%  - `{blocks, ...}' (4-tuple in mbcs and sbcs, 2-tuple in mbcs_pool)
+    %%  - `{blocks_size, ...}' (4-tuple in mbcs and sbcs, 2-tuple in mbcs_pool)
+    %%  - `{foreign_blocks, [...]}' (just append lists =/= `Alloc')
+    %%  - `{raw_blocks, [...]}' (original value)
+    Foreign = lists:filter(fun({A, _Props}) -> A =/= Alloc end, L),
+    Type = case Key of
+        mbcs_pool -> int;
+        _ -> quadruple
+    end,
+    MergeF = fun(K) ->
+        fun({_A, Props}, Acc) ->
+            case lists:keyfind(K, 1, Props) of
+                {K,Cur,Last,Max} -> {Cur, Last, Max};
+                {K,V} -> Acc+V
+            end
+        end
+    end,
+    %% Since tuple sizes change, hack around it using tuple_to_list conversion
+    %% and set the accumulator to a list so it defaults to not putting anything
+    {Blocks, BlocksSize} = case Type of
+        int ->
+            {{blocks, lists:foldl(MergeF(count), 0, L)},
+             {blocks_size, lists:foldl(MergeF(size), 0, L)}};
+        quadruple ->
+            {list_to_tuple([blocks | tuple_to_list(lists:foldl(MergeF(count), {0,0,0}, L))]),
+             list_to_tuple([blocks_size | tuple_to_list(lists:foldl(MergeF(size), {0,0,0}, L))])}
+    end,
+    [Blocks, BlocksSize, {foreign_blocks, Foreign}, {raw_blocks, L}
+     | format_blocks(Alloc, Key, List)];
+format_blocks(Alloc, Key, [H | T]) ->
+    [H | format_blocks(Alloc, Key, T)].
+
+%% @doc returns a dump of all allocator settings and values modified
+%%      depending on the argument.
+%% <ul>
+%%   <li>`types' report the settings and accumulated values for each
+%%       allocator type. This is useful when looking for anomalies
+%%       in the system as a whole and not specific instances.</li>
+%% </ul>
+-spec allocators(types) -> [allocdata_types(term())].
+allocators(types) ->
+    allocators_types(alloc(), []).
+
+allocators_types([{{Type,No},Vs}|T], As) ->
+    case lists:keytake(Type, 1, As) of
+        false ->
+            allocators_types(T,[{Type,[No],sort_values(Type, Vs)}|As]);
+        {value,{Type,Nos,OVs},NAs} ->
+            MergedValues = merge_values(sort_values(Type, Vs),OVs),
+            allocators_types(T,[{Type,[No|Nos],MergedValues}|NAs])
+    end;
+allocators_types([], As) ->
+    [{{Type,Nos},Vs} || {Type, Nos, Vs} <- As].
+
+merge_values([{Key,Vs}|T1], [{Key,OVs}|T2]) when Key =:= memkind ->
+    [{Key, merge_values(Vs, OVs)} | merge_values(T1, T2)];
+merge_values([{Key,Vs}|T1], [{Key,OVs}|T2]) when Key =:= calls;
+                                                 Key =:= fix_types;
+                                                 Key =:= sbmbcs;
+                                                 Key =:= mbcs;
+                                                 Key =:= mbcs_pool;
+                                                 Key =:= sbcs;
+                                                 Key =:= status ->
+    [{Key,lists:map(
+           fun({{K,MV1,V1}, {K,MV2,V2}}) ->
+                   %% Merge the MegaVs + Vs into one
+                   V = MV1 * 1000000 + V1 + MV2 * 1000000 + V2,
+                   {K, V div 1000000, V rem 1000000};
+              ({{K,V1}, {K,V2}}) when K =:= segments_watermark ->
+                   %% We take the maximum watermark as that is
+                   %% a value that we can use somewhat. Ideally
+                   %% maybe the average should be used, but the
+                   %% value is very rarely important so leave it
+                   %% like this for now.
+                   {K, lists:max([V1,V2])};
+              ({{K,V1}, {K,V2}}) when K =:= foreign_blocks; K =:= raw_blocks ->
+                   %% foreign blocks are just merged as a bigger list.
+                   {K, V1++V2};
+              ({{K,V1}, {K,V2}}) ->
+                   {K, V1 + V2};
+              ({{K,C1,L1,M1}, {K,C2,L2,M2}}) ->
+                   %% Merge the Curr, Last, Max into one
+                   {K, C1+C2, L1+L2, M1+M2}
+           end, lists:zip(Vs,OVs))} | merge_values(T1,T2)];
+merge_values([{Type,_Vs}=E|T1], T2) when Type =:= mbcs_pool ->
+    %% For values never showing up in instance 0 but in all other
+    [E|merge_values(T1,T2)];
+merge_values(T1, [{Type,_Vs}=E|T2]) when Type =:= fix_types ->
+    %% For values only showing up in instance 0
+    [E|merge_values(T1,T2)];
+merge_values([E|T1], [E|T2]) ->
+    %% For values that are constant
+    [E|merge_values(T1,T2)];
+merge_values([{options,_Vs1}|T1], [{options,_Vs2} = E|T2]) ->
+    %% Options change a but in between instance 0 and the other,
+    %% We show the others as they are the most interesting.
+    [E|merge_values(T1,T2)];
+merge_values([],[]) ->
+    [].
+
+sort_values(mseg_alloc, Vs) ->
+    {value, {memkind, MemKindVs}, OVs} = lists:keytake(memkind, 1, Vs),
+    lists:sort([{memkind, lists:sort(MemKindVs)} | OVs]);
+sort_values(_Type, Vs) ->
+    lists:sort(Vs).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Snapshot handling %%%

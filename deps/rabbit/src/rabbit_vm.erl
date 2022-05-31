@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_vm).
@@ -23,19 +14,13 @@
 %%----------------------------------------------------------------------------
 
 -spec memory() -> rabbit_types:infos().
--spec binary() -> rabbit_types:infos().
--spec ets_tables_memory(Owners) -> rabbit_types:infos()
-     when Owners :: all | OwnerProcessName | [OwnerProcessName],
-          OwnerProcessName :: atom().
-
-%%----------------------------------------------------------------------------
 
 memory() ->
     All = interesting_sups(),
     {Sums, _Other} = sum_processes(
                        lists:append(All), distinguishers(), [memory]),
 
-    [Qs, QsSlave, ConnsReader, ConnsWriter, ConnsChannel, ConnsOther,
+    [Qs, QsSlave, Qqs, ConnsReader, ConnsWriter, ConnsChannel, ConnsOther,
      MsgIndexProc, MgmtDbProc, Plugins] =
         [aggregate(Names, Sums, memory, fun (X) -> X end)
          || Names <- distinguished_interesting_sups()],
@@ -43,6 +28,7 @@ memory() ->
     MnesiaETS           = mnesia_memory(),
     MsgIndexETS         = ets_memory(msg_stores()),
     MetricsETS          = ets_memory([rabbit_metrics]),
+    QuorumETS           = ets_memory([ra_log_ets]),
     MetricsProc  = try
                        [{_, M}] = process_info(whereis(rabbit_metrics), [memory]),
                        M
@@ -69,7 +55,7 @@ memory() ->
 
     OtherProc = Processes
         - ConnsReader - ConnsWriter - ConnsChannel - ConnsOther
-        - Qs - QsSlave - MsgIndexProc - Plugins - MgmtDbProc - MetricsProc,
+        - Qs - QsSlave - Qqs - MsgIndexProc - Plugins - MgmtDbProc - MetricsProc,
 
     [
      %% Connections
@@ -81,6 +67,7 @@ memory() ->
      %% Queues
      {queue_procs,          Qs},
      {queue_slave_procs,    QsSlave},
+     {quorum_queue_procs,   Qqs},
 
      %% Processes
      {plugins,              Plugins},
@@ -92,7 +79,8 @@ memory() ->
 
      %% ETS
      {mnesia,               MnesiaETS},
-     {other_ets,            ETS - MnesiaETS - MetricsETS - MgmtDbETS - MsgIndexETS},
+     {quorum_ets,           QuorumETS},
+     {other_ets,            ETS - MnesiaETS - MetricsETS - MgmtDbETS - MsgIndexETS - QuorumETS},
 
      %% Messages (mostly, some binaries are not messages)
      {binary,               Bin},
@@ -114,6 +102,8 @@ memory() ->
 %% claims about negative memory. See
 %% http://erlang.org/pipermail/erlang-questions/2012-September/069320.html
 
+-spec binary() -> rabbit_types:infos().
+
 binary() ->
     All = interesting_sups(),
     {Sums, Rest} =
@@ -124,7 +114,7 @@ binary() ->
                                       sets:add_element({Ptr, Sz}, Acc0)
                               end, Acc, Info)
           end, distinguishers(), [{binary, sets:new()}]),
-    [Other, Qs, QsSlave, ConnsReader, ConnsWriter, ConnsChannel, ConnsOther,
+    [Other, Qs, QsSlave, Qqs, ConnsReader, ConnsWriter, ConnsChannel, ConnsOther,
      MsgIndexProc, MgmtDbProc, Plugins] =
         [aggregate(Names, [{other, Rest} | Sums], binary, fun sum_binary/1)
          || Names <- [[other] | distinguished_interesting_sups()]],
@@ -134,6 +124,7 @@ binary() ->
      {connection_other,    ConnsOther},
      {queue_procs,         Qs},
      {queue_slave_procs,   QsSlave},
+     {quorum_queue_procs,  Qqs},
      {plugins,             Plugins},
      {mgmt_db,             MgmtDbProc},
      {msg_index,           MsgIndexProc},
@@ -150,6 +141,10 @@ mnesia_memory() ->
 
 ets_memory(Owners) ->
     lists:sum([V || {_K, V} <- ets_tables_memory(Owners)]).
+
+-spec ets_tables_memory(Owners) -> rabbit_types:infos()
+     when Owners :: all | OwnerProcessName | [OwnerProcessName],
+          OwnerProcessName :: atom().
 
 ets_tables_memory(all) ->
     [{ets:info(T, name), bytes(ets:info(T, memory))}
@@ -173,10 +168,21 @@ bytes(Words) ->  try
                  end.
 
 interesting_sups() ->
-    [queue_sups(), conn_sups() | interesting_sups0()].
+    [queue_sups(), quorum_sups(), conn_sups() | interesting_sups0()].
 
 queue_sups() ->
     all_vhosts_children(rabbit_amqqueue_sup_sup).
+
+quorum_sups() ->
+    %% TODO: in the future not all ra servers may be queues and we needs
+    %% some way to filter this
+    case whereis(ra_server_sup_sup) of
+        undefined ->
+            [];
+        _ ->
+            [Pid || {_, Pid, _, _} <-
+                    supervisor:which_children(ra_server_sup_sup)]
+    end.
 
 msg_stores() ->
     all_vhosts_children(msg_store_transient)
@@ -229,6 +235,7 @@ distinguished_interesting_sups() ->
     [
      with(queue_sups(), master),
      with(queue_sups(), slave),
+     quorum_sups(),
      with(conn_sups(), reader),
      with(conn_sups(), writer),
      with(conn_sups(), channel),
