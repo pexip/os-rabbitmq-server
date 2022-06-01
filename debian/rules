@@ -5,7 +5,7 @@ DEB_DESTDIR=debian/rabbitmq-server
 VERSION = $(shell dpkg-parsechangelog -SVersion | sed -e 's/^[[:digit:]]*://' -e 's/[-].*//' -e 's/~/.0/' -e 's/+dfsg1//' | head -n 1)
 
 %:
-	dh $@ --parallel --with python2,systemd
+	dh $@ --with python3
 
 override_dh_auto_clean:
 	$(MAKE) clean distclean-manpages
@@ -35,7 +35,7 @@ override_dh_auto_install:
 		< scripts/rabbitmq-script-wrapper \
 		> $(DEB_DESTDIR)$(PREFIX)/sbin/rabbitmqctl
 	chmod 0755 $(DEB_DESTDIR)$(PREFIX)/sbin/rabbitmqctl
-	for script in rabbitmq-server rabbitmq-plugins; do \
+	for script in rabbitmq-server rabbitmq-plugins rabbitmq-diagnostics rabbitmq-queues rabbitmq-upgrade; do \
 		cp -a $(DEB_DESTDIR)$(PREFIX)/sbin/rabbitmqctl \
 		$(DEB_DESTDIR)$(PREFIX)/sbin/$$script; \
 	done
@@ -56,15 +56,19 @@ override_dh_auto_install:
 	rm -f $(DEB_DESTDIR)$(PREFIX)/lib/erlang/lib/rabbitmq_server-*/LICENSE
 	rm -f $(RABBIT_LIB)/LICENSE* $(RABBIT_LIB)/INSTALL*
 
+override_dh_install:
+	dh_install
+	sed -i s/%%VSN%%/$(VERSION)/ $(CURDIR)/debian/rabbitmq-server/usr/bin/rabbitmqadmin
+
 override_dh_auto_clean:
 	rm -f plugins-src/rabbitmq-server plugins/README
 	#dh_auto_clean
-
-override_dh_python2:
-	dh_python2 --shebang=/usr/bin/python
 
 #override_dh_link:
 #	dh_link
 #	mv $(CURDIR)/debian/rabbitmq-server/usr/sbin/rabbitmqctl $(CURDIR)/debian/rabbitmq-server/usr/sbin/rabbitmqctl-real
 #	cp $(CURDIR)/debian/rabbitmq-debian-wrapper $(CURDIR)/debian/rabbitmq-server/usr/sbin/rabbitmqctl
 #	ln -s rabbitmqctl $(CURDIR)/debian/rabbitmq-server/usr/lib/rabbitmq/bin/rabbitmqctl-real
+
+override_dh_python3:
+	dh_python3 --shebang=/usr/bin/python3

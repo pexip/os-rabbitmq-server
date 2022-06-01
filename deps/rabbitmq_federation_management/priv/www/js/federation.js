@@ -29,7 +29,7 @@ dispatcher_add(function(sammy) {
                 go_to('#/federation-upstreams');
             return false;
     });
-    sammy.del("#/restart-link", function(){
+    sammy.del("#/federation-restart-link", function(){
         if(sync_delete(this, '/federation-links/vhost/:vhost/:id/:node/restart')){
             update();
         }
@@ -81,6 +81,8 @@ HELP['ha-policy'] =
 HELP['queue'] =
     'The name of the upstream queue. Default is to use the same name as the federated queue.';
 
+HELP['consumer-tag'] =
+    'The consumer tag to use when consuming from upstream. Optional.';
 
 function link_fed_conn(vhost, name) {
     return _link_to(name, '#/federation-upstreams/' + esc(vhost) + '/' + esc(name));

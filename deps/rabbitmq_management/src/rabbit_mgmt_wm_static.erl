@@ -1,17 +1,8 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ Management Plugin.
-%%
-%%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2010-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% Alias for cowboy_static that accepts a list of directories
@@ -31,17 +22,22 @@
 -export([get_file/2]).
 
 
-init(Req, [{App, Path}]) ->
-    do_init(Req, App, Path);
-init(Req, [{App, Path}|Tail]) ->
-    PathInfo = cowboy_req:path_info(Req),
+init(Req0, {priv_file, _App, _Path}=Opts) ->
+    Req1 = rabbit_mgmt_headers:set_common_permission_headers(Req0, ?MODULE),
+    cowboy_static:init(Req1, Opts);
+init(Req0, [{App, Path}]) ->
+    Req1 = rabbit_mgmt_headers:set_common_permission_headers(Req0, ?MODULE),
+    do_init(Req1, App, Path);
+init(Req0, [{App, Path}|Tail]) ->
+    Req1 = rabbit_mgmt_headers:set_common_permission_headers(Req0, ?MODULE),
+    PathInfo = cowboy_req:path_info(Req1),
     Filepath = filename:join([code:priv_dir(App), Path|PathInfo]),
     %% We use erl_prim_loader because the file may be inside an .ez archive.
     FileInfo = erl_prim_loader:read_file_info(binary_to_list(Filepath)),
     case FileInfo of
-        {ok, #file_info{type = regular}} -> do_init(Req, App, Path);
-        {ok, #file_info{type = symlink}} -> do_init(Req, App, Path);
-        _                                -> init(Req, Tail)
+        {ok, #file_info{type = regular}} -> do_init(Req1, App, Path);
+        {ok, #file_info{type = symlink}} -> do_init(Req1, App, Path);
+        _                                -> init(Req0, Tail)
     end.
 
 do_init(Req, App, Path) ->

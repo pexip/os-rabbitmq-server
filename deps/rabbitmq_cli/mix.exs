@@ -1,7 +1,7 @@
 ## The contents of this file are subject to the Mozilla Public License
 ## Version 1.1 (the "License"); you may not use this file except in
 ## compliance with the License. You may obtain a copy of the License
-## at http://www.mozilla.org/MPL/
+## at https://www.mozilla.org/MPL/
 ##
 ## Software distributed under the License is distributed on an "AS IS"
 ## basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
@@ -11,7 +11,7 @@
 ## The Original Code is RabbitMQ.
 ##
 ## The Initial Developer of the Original Code is GoPivotal, Inc.
-## Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQCtl.MixfileBase do
   use Mix.Project
@@ -19,8 +19,8 @@ defmodule RabbitMQCtl.MixfileBase do
   def project do
     [
       app: :rabbitmqctl,
-      version: "3.7.8",
-      elixir: ">= 1.6.6 and < 1.8.0",
+      version: "3.8.0-dev",
+      elixir: ">= 1.8.0 and < 1.11.0",
       build_embedded: Mix.env == :prod,
       start_permanent: Mix.env == :prod,
       escript: [main_module: RabbitMQCtl,
@@ -38,7 +38,9 @@ defmodule RabbitMQCtl.MixfileBase do
     [applications: [:logger],
      env: [scopes: ['rabbitmq-plugins': :plugins,
                     rabbitmqctl: :ctl,
-                    'rabbitmq-diagnostics': :diagnostics]]
+                    'rabbitmq-diagnostics': :diagnostics,
+                    'rabbitmq-queues': :queues,
+                    'rabbitmq-upgrade': :upgrade]]
     ]
     |> add_modules(Mix.env)
   end
@@ -83,15 +85,27 @@ defmodule RabbitMQCtl.MixfileBase do
   #   {:mydep, git: "https://github.com/elixir-lang/mydep.git", tag: "0.1.0"}
   #
   # Type "mix help deps" for more examples and options
+  #
+  # CAUTION: Dependencies which are shipped with RabbitMQ *MUST* com
+  # from Hex.pm! Therefore it's ok to fetch dependencies from Git if
+  # they are test dependencies or it is temporary while testing a patch.
+  # But that's about it. If in doubt, use Hex.pm!
+  #
+  # The reason is that we have some Makefile code to put dependencies
+  # from Hex.pm in RabbitMQ source archive (the source archive must be
+  # self-contained and RabbitMQ must be buildable offline). However, we
+  # don't have the equivalent for other methods.
   defp deps() do
     elixir_deps = [
-      {:json, "~> 1.0.0"},
-      {:csv, "~> 2.0.0"},
-      {:simetric, "~> 0.2.0"},
+      {:json, "~> 1.2.0"},
+      {:csv, "~> 2.3.0"},
+      {:stdout_formatter, "~> 0.2.3"},
+      {:observer_cli, "~> 1.5.0"},
 
-      {:amqp, "~> 0.2.2", only: :test},
+      {:amqp, "~> 1.2.0", only: :test},
       {:dialyxir, "~> 0.5", only: :test, runtime: false},
       {:temp, "~> 0.4", only: :test},
+      {:x509, "~> 0.7", only: :test}
     ]
 
     rabbitmq_deps = case System.get_env("DEPS_DIR") do
@@ -99,7 +113,7 @@ defmodule RabbitMQCtl.MixfileBase do
         # rabbitmq_cli is built as a standalone Elixir application.
         [
           {:rabbit_common, "~> 3.7.0"},
-          {:amqp_client, "~> 3.7.0", only: :test},
+          {:amqp_client, "~> 3.7.0", only: :test}
         ]
       deps_dir ->
         # rabbitmq_cli is built as part of RabbitMQ.
@@ -119,6 +133,18 @@ defmodule RabbitMQCtl.MixfileBase do
           {
             :rabbit_common,
             path: Path.join(deps_dir, "rabbit_common"),
+            compile: false,
+            override: true
+          },
+          {
+            :goldrush,
+            path: Path.join(deps_dir, "goldrush"),
+            compile: false,
+            override: true
+          },
+          {
+            :lager,
+            path: Path.join(deps_dir, "lager"),
             compile: false,
             override: true
           },

@@ -4,6 +4,8 @@
 
 -behaviour(rabbit_trust_store_certificate_provider).
 
+-define(PROFILE, ?MODULE).
+
 -export([list_certs/1, list_certs/2, load_cert/3]).
 
 -record(http_state,{
@@ -13,22 +15,24 @@
 }).
 
 list_certs(Config) ->
-    init(),
+    init(Config),
     State = init_state(Config),
     list_certs(Config, State).
 
 list_certs(_, #http_state{url = Url,
                           http_options = HttpOptions,
                           headers = Headers} = State) ->
-    Res = httpc:request(get, {Url, Headers}, HttpOptions, [{body_format, binary}]),
-    case Res of
+    case (httpc:request(get, {Url, Headers}, HttpOptions, [{body_format, binary}], ?PROFILE)) of
         {ok, {{_, 200, _}, RespHeaders, Body}} ->
+            rabbit_log:debug("Trust store HTTP[S] provider responded with 200 OK"),
             Certs = decode_cert_list(Body),
             NewState = new_state(RespHeaders, State),
             {ok, Certs, NewState};
         {ok, {{_,304, _}, _, _}}  -> no_change;
         {ok, {{_,Code,_}, _, Body}} -> {error, {http_error, Code, Body}};
-        {error, Reason} -> {error, Reason}
+        {error, Reason} ->
+            rabbit_log:error("Trust store HTTP[S] provider request failed: ~p", [Reason]),
+            {error, Reason}
     end.
 
 load_cert(_, Attributes, Config) ->
@@ -40,7 +44,8 @@ load_cert(_, Attributes, Config) ->
     Res = httpc:request(get,
                         {Url, Headers},
                         HttpOptions,
-                        [{body_format, binary}, {full_result, false}]),
+                        [{body_format, binary}, {full_result, false}],
+                        ?PROFILE),
     case Res of
         {ok, {200, Body}} ->
             [{'Certificate', Cert, not_encrypted}] = public_key:pem_decode(Body),
@@ -54,9 +59,11 @@ join_url(BaseUrl, CertPath)  ->
     ++ "/" ++
     string:strip(rabbit_data_coercion:to_list(CertPath), left, $/).
 
-init() ->
-    inets:start(),
-    ssl:start().
+init(Config) ->
+    inets:start(httpc, [{profile, ?PROFILE}]),
+    application:ensure_all_started(ssl),
+    Options = proplists:get_value(proxy_options, Config, []),
+    httpc:set_options(Options, ?PROFILE).
 
 init_state(Config) ->
     Url = proplists:get_value(url, Config),
@@ -65,36 +72,33 @@ init_state(Config) ->
         undefined -> [];
         SslOpts   -> [{ssl, SslOpts}]
     end,
-    #http_state{url = Url, http_options = HttpOptions, headers = Headers}.
+    #http_state{url = Url, http_options = HttpOptions, headers = [{"connection", "close"} | Headers]}.
 
 decode_cert_list(Body) ->
-    Struct = rabbit_json:decode(Body),
-    #{<<"certificates">> := Certs} = Struct,
-    lists:map(
-        fun(Cert) ->
-            Path = maps:get(<<"path">>, Cert),
-            CertId = maps:get(<<"id">>, Cert),
-            {CertId, [{path, Path}]}
-        end,
-        Certs).
-
-new_state(RespHeaders, #http_state{headers = Headers} = State) ->
-    LastModified = proplists:get_value("Last-Modified",
-                                       RespHeaders,
-                                       proplists:get_value("last-modified",
-                                                           RespHeaders,
-                                                           undefined)),
-    case LastModified of
-        undefined -> State;
-        Value     ->
-            NewHeaders = lists:ukeymerge(1, Headers,
-                                            [{"If-Modified-Since", Value}]),
-            State#http_state{headers = NewHeaders}
+    try
+        Struct = rabbit_json:decode(Body),
+        #{<<"certificates">> := Certs} = Struct,
+        lists:map(
+            fun(Cert) ->
+                Path = maps:get(<<"path">>, Cert),
+                CertId = maps:get(<<"id">>, Cert),
+                {CertId, [{path, Path}]}
+            end, Certs)
+    catch _:badarg ->
+            rabbit_log:error("Trust store failed to decode an HTTP[S] response: JSON parser failed"),
+            [];
+          _:Error ->
+            rabbit_log:error("Trust store failed to decode an HTTP[S] response: ~p", [Error]),
+            []
     end.
 
-
-
-
-
-
-
+new_state(RespHeaders, #http_state{headers = Headers0} = State) ->
+    LastModified0 = proplists:get_value("last-modified", RespHeaders),
+    LastModified1 = proplists:get_value("Last-Modified", RespHeaders, LastModified0),
+    case LastModified1 of
+        undefined -> State;
+        Value     ->
+            Headers1 = lists:ukeysort(1, Headers0),
+            NewHeaders = lists:ukeymerge(1, [{"If-Modified-Since", Value}], Headers1),
+            State#http_state{headers = NewHeaders}
+    end.

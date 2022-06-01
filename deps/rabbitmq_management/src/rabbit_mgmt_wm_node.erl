@@ -1,17 +1,8 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ Management Console.
-%%
-%%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_node).
@@ -26,7 +17,7 @@
 %%--------------------------------------------------------------------
 
 init(Req, _State) ->
-    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
+    {cowboy_rest, rabbit_mgmt_headers:set_common_permission_headers(Req, ?MODULE), #context{}}.
 
 variances(Req, Context) ->
     {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
@@ -50,11 +41,8 @@ is_authorized(ReqData, Context) ->
 
 node0(ReqData) ->
     Node = list_to_atom(binary_to_list(rabbit_mgmt_util:id(node, ReqData))),
-    case [N || N <- rabbit_mgmt_wm_nodes:all_nodes(ReqData),
-               proplists:get_value(name, N) == Node] of
-        []     -> not_found;
-        [Data] -> augment(ReqData, Node, Data)
-    end.
+    [Data] = node_data(Node, ReqData),
+    augment(ReqData, Node, Data).
 
 augment(ReqData, Node, Data) ->
     lists:foldl(fun (Key, DataN) -> augment(Key, ReqData, Node, DataN) end,
@@ -68,4 +56,23 @@ augment(Key, ReqData, Node, Data) ->
                         end,
                   [{Key, Res} | Data];
         _      -> Data
+    end.
+
+node_data(Node, ReqData) ->
+    S = rabbit_mnesia:status(),
+    Nodes = proplists:get_value(nodes, S),
+    Running = proplists:get_value(running_nodes, S),
+    Type = find_type(Node, Nodes),
+    Basic = [[{name, Node}, {running, lists:member(Node, Running)}, {type, Type}]],
+    case rabbit_mgmt_util:disable_stats(ReqData) of
+        false ->
+            rabbit_mgmt_db:augment_nodes(Basic, rabbit_mgmt_util:range_ceil(ReqData));
+        true ->
+            Basic
+    end.
+
+find_type(Node, [{Type, Nodes} | Rest]) ->
+    case lists:member(Node, Nodes) of
+        true -> Type;
+        false -> find_type(Node, Rest)
     end.

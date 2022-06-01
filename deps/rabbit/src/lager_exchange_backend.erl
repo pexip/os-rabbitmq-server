@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% @doc RabbitMQ backend for lager.
@@ -28,8 +19,10 @@
 
 -behaviour(gen_event).
 
--export([init/1, terminate/2, code_change/3, handle_call/2, handle_event/2,
-         handle_info/2]).
+-export([init/1, terminate/2, code_change/3,
+         handle_call/2, handle_event/2, handle_info/2]).
+
+-export([maybe_init_exchange/0]).
 
 -include("rabbit.hrl").
 -include("rabbit_framing.hrl").
@@ -39,8 +32,8 @@
 -record(state, {level :: {'mask', integer()},
                 formatter :: atom(),
                 format_config :: any(),
-                init_exchange_ts = undefined :: rabbit_types:timestamp(),
-                exchange = undefined :: #resource{}}).
+                init_exchange_ts = undefined :: integer() | undefined,
+                exchange = undefined :: #resource{} | undefined}).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -82,6 +75,7 @@ init(Options) when is_list(Options) ->
             State0 = #state{level=L,
                             formatter=Formatter,
                             format_config=Config},
+            % NB: this will probably always fail since the / vhost isn't available
             State1 = maybe_init_exchange(State0),
             {ok, State1}
     catch
@@ -93,6 +87,18 @@ init(Level) when is_atom(Level) ->
     init([{level, Level}]);
 init(Other) ->
     {error, {fatal, {bad_lager_exchange_backend_config, Other}}}.
+
+% rabbitmq/rabbitmq-server#1973
+% This is called immediatly after the / vhost is created
+% or recovered
+maybe_init_exchange() ->
+    case lists:member(?MODULE, gen_event:which_handlers(lager_event)) of
+        true ->
+            _ = init_exchange(true),
+            ok;
+        _ ->
+            ok
+    end.
 
 validate_options([]) -> true;
 validate_options([{level, L}|T]) when is_atom(L) ->
@@ -165,8 +171,8 @@ handle_log_event({log, Message},
                                  headers      = Headers},
             Body = rabbit_data_coercion:to_binary(Formatter:format(Message, FormatConfig)),
             case rabbit_basic:publish(LogExch, RoutingKey, AmqpMsg, Body) of
-                {ok, _DeliveredQPids} -> ok;
-                {error, not_found}    -> ok
+                ok                 -> ok;
+                {error, not_found} -> ok
             end,
             {ok, State};
         false ->
@@ -179,7 +185,10 @@ maybe_init_exchange(#state{exchange=undefined, init_exchange_ts=undefined} = Sta
     handle_init_exchange(init_exchange(true), Now, State);
 maybe_init_exchange(#state{exchange=undefined, init_exchange_ts=Timestamp} = State) ->
     Now = erlang:monotonic_time(second),
-    Result = init_exchange(Now - Timestamp > ?INIT_EXCHANGE_INTERVAL_SECS),
+    % NB: since we may try to declare the exchange on every log message, this ensures
+    % that we only try once every 5 seconds
+    HasEnoughTimeElapsed = Now - Timestamp > ?INIT_EXCHANGE_INTERVAL_SECS,
+    Result = init_exchange(HasEnoughTimeElapsed),
     handle_init_exchange(Result, Now, State);
 maybe_init_exchange(State) ->
     State.
@@ -187,13 +196,15 @@ maybe_init_exchange(State) ->
 %% @private
 init_exchange(true) ->
     {ok, DefaultVHost} = application:get_env(rabbit, default_vhost),
-    VHost = rabbit_misc:r(DefaultVHost, exchange, ?LOG_EXCH_NAME),
+    Exchange = rabbit_misc:r(DefaultVHost, exchange, ?LOG_EXCH_NAME),
     try
-        #exchange{} = rabbit_exchange:declare(VHost, topic, true, false, true, [], ?INTERNAL_USER),
-        {ok, #resource{virtual_host=DefaultVHost, kind=exchange, name=?LOG_EXCH_NAME}}
+        %% durable
+        #exchange{} = rabbit_exchange:declare(Exchange, topic, true, false, true, [], ?INTERNAL_USER),
+        rabbit_log:info("Declared exchange '~s' in vhost '~s'", [?LOG_EXCH_NAME, DefaultVHost]),
+        {ok, Exchange}
     catch
         ErrType:Err ->
-            rabbit_log:debug("Could not initialize exchange '~s' in vhost '~s', reason: ~p:~p",
+            rabbit_log:error("Could not declare exchange '~s' in vhost '~s', reason: ~p:~p",
                              [?LOG_EXCH_NAME, DefaultVHost, ErrType, Err]),
             {ok, undefined}
     end;

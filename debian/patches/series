@@ -1,2 +1,4 @@
+lets-use-python3-not-python-binary.patch
+rabbitmq-dist.mk.patch
+Upstream_PR2965_fixing_rabbitmqctl_parsing
 logging.patch
-python2-connrefused.patch

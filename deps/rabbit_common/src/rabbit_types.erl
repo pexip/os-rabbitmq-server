@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_types).
@@ -24,17 +15,19 @@
               unencoded_content/0, encoded_content/0, message_properties/0,
               vhost/0, ctag/0, amqp_error/0, r/1, r2/2, r3/3, listener/0,
               binding/0, binding_source/0, binding_destination/0,
-              amqqueue/0, exchange/0,
+              exchange/0,
               connection/0, protocol/0, auth_user/0, user/0, internal_user/0,
               username/0, password/0, password_hash/0,
-              ok/1, error/1, ok_or_error/1, ok_or_error2/2, ok_pid_or_error/0,
+              ok/1, error/1, error/2, ok_or_error/1, ok_or_error2/2, ok_pid_or_error/0,
               channel_exit/0, connection_exit/0, mfargs/0, proc_name/0,
               proc_type_and_name/0, timestamp/0,
-              tracked_connection/0, node_type/0, topic_access_context/0]).
+              tracked_connection/0, node_type/0, topic_access_context/0,
+              authz_data/0, authz_context/0]).
 
 -type(maybe(T) :: T | 'none').
 -type(timestamp() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}).
--type(vhost() :: binary()).
+
+-type(vhost() :: vhost:name()).
 -type(ctag() :: binary()).
 
 %% TODO: make this more precise by tying specific class_ids to
@@ -111,16 +104,6 @@
                  key         :: rabbit_binding:key(),
                  args        :: rabbit_framing:amqp_table()}).
 
--type(amqqueue() ::
-        #amqqueue{name            :: rabbit_amqqueue:name(),
-                  durable         :: boolean(),
-                  auto_delete     :: boolean(),
-                  exclusive_owner :: rabbit_types:maybe(pid()),
-                  arguments       :: rabbit_framing:amqp_table(),
-                  pid             :: rabbit_types:maybe(pid()),
-                  slave_pids      :: [pid()],
-                  vhost           :: rabbit_types:vhost()}).
-
 -type(exchange() ::
         #exchange{name        :: rabbit_exchange:name(),
                   type        :: rabbit_exchange:type(),
@@ -158,6 +141,10 @@
                    tags     :: [atom()],
                    impl     :: any()}).
 
+-type(authz_data() ::
+        #{peeraddr := inet:ip_address() | binary(),
+          _ => _      } | undefined).
+
 -type(user() ::
         #user{username       :: username(),
               tags           :: [atom()],
@@ -174,6 +161,7 @@
 
 -type(ok(A) :: {'ok', A}).
 -type(error(A) :: {'error', A}).
+-type(error(A, B) :: {'error', A, B}).
 -type(ok_or_error(A) :: 'ok' | error(A)).
 -type(ok_or_error2(A, B) :: ok(A) | error(B)).
 -type(ok_pid_or_error() :: ok_or_error2(pid(), any())).
@@ -189,3 +177,5 @@
 -type(topic_access_context() :: #{routing_key  => rabbit_router:routing_key(),
                                   variable_map => map(),
                                   _ => _}).
+
+-type(authz_context() :: map()).

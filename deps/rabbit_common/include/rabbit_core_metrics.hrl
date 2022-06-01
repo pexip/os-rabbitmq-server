@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% These tables contain the raw metrics as stored by RabbitMQ core
@@ -30,9 +21,12 @@
                       {node_persister_metrics, set},
                       {node_coarse_metrics, set},
                       {node_metrics, set},
-                      {node_node_metrics, set}]).
+                      {node_node_metrics, set},
+                      {connection_churn_metrics, set}]).
 
 -define(CORE_EXTRA_TABLES, [{gen_server2_metrics, set}]).
+
+-define(CONNECTION_CHURN_METRICS, {node(), 0, 0, 0, 0, 0, 0, 0}).
 
 %% connection_created :: {connection_id, proplist}
 %% connection_metrics :: {connection_id, proplist}
@@ -53,3 +47,4 @@
 %% node_metrics :: {node_id, proplist}
 %% node_node_metrics :: {{node_id, node_id}, proplist}
 %% gen_server2_metrics :: {pid, buffer_length}
+%% connection_churn_metrics :: {node(), connection_created, connection_closed, channel_created, channel_closed, queue_declared, queue_created, queue_deleted}

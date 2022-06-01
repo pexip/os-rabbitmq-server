@@ -39,7 +39,7 @@ CLI core consists of several modules implementing command execution process:
  * `RabbitMQCtl`: entry point. Generic execution logic.
  * `Parser`: responsible for command line argument parsing (drives Elixir's `OptionParser`)
  * `CommandModules`: responsible for command module discovery and loading
- * `Config`: responsible for config unification: merges enviroment variable and command argument values
+ * `Config`: responsible for config unification: merges environment variable and command argument values
  * `Output`: responsible for output formatting
  * `Helpers`: self-explanatory
 
@@ -47,11 +47,11 @@ CLI core consists of several modules implementing command execution process:
 
 #### Arguments parsing
 
-Command line arguments are parsed with [OptionParser](http://elixir-lang.org/docs/stable/elixir/OptionParser.html)
-Parser returns a list of unnamed arguments and a map of options (named arguemtns)
+Command line arguments are parsed with [OptionParser](https://elixir-lang.org/docs/stable/elixir/OptionParser.html)
+Parser returns a list of unnamed arguments and a map of options (named arguments)
 First unnamed argument is a command name.
 Named arguments can be global or command specific.
-Command specific argument names and types are apecified in the `switches/0` callback.
+Command specific argument names and types are specified in the `switches/0` callback.
 Global argument names are described in [Global arguments]
 
 #### Command discovery
@@ -126,7 +126,7 @@ module.
 ##### Command Aliases with Variables
 
 Aliases can also contain arguments. Command name must be the first word after the `=`.
-Arguments specified in an alias will preceed those passed from the command line.
+Arguments specified in an alias will precede those passed from the command line.
 
 For example, if you specify the alias `passwd_user1 = change_password user1`,
 you can call it with `rabbitmqctl passwd_user1 new_password`.
@@ -158,7 +158,7 @@ Then the alias can be called like this:
 ```
 rabbitmqctl delete_vhost_queues -p vhost1
 # or
-rabbitmqctl delete_vhost_queues ---vhost vhost1
+rabbitmqctl delete_vhost_queues ---vhost <vhost>1
 ```
 
 Keep in mind that `eval` command can accept only [global arguments](#global-arguments) as named,
@@ -177,7 +177,7 @@ using functions from the [`rabbit_data_coercion` module](https://github.com/rabb
  which should format the output to a specific type.
  (see [Output formatting](#output-formatting))
 
- Output callback can return an an error, with a specific exit code.
+ Output callback can return an error, with a specific exit code.
 
 #### Printing and formatting
 
@@ -211,7 +211,7 @@ For example, commands in `rabbitmq-plugins` tool and those controlling clusterin
 
 Those directories can be defined using environment options or rabbitmq environment variables.
 
-In the broker distribution the escript file is called from a shell/cmd sctipt, which loads
+In the broker distribution the escript file is called from a shell/cmd script, which loads
 broker environment and exports it into the script.
 
 Environment variables also specify the locations of the enabled plugins file
@@ -382,7 +382,7 @@ Script names for scopes:
  * `rabbitmq-diagnostics` - `:diagnostics`
 
 This environment is extended by plugins `:scopes` environment variables,
-but cannot be overriden. Plugins scopes can override each other,
+but cannot be overridden. Plugins scopes can override each other,
 so should be used with caution.
 
 So all the commands in the `RabbitMQ.CLI.Ctl.Commands` namespace will be available
@@ -412,7 +412,7 @@ and returns a list of strings, that should be printed.
     format_stream(output_stream :: Enumerable.t, options :: Map.t) :: Enumerable.t
 
 Format a stream of return values. This function uses elixir
-Stream [http://elixir-lang.org/docs/stable/elixir/Stream.html] abstraction
+Stream [https://elixir-lang.org/docs/stable/elixir/Stream.html] abstraction
 to define processing of continuous data, so the CLI can output data in realtime.
 
 Used in `list_*` commands, that emit data asynchronously.
@@ -481,4 +481,3 @@ By default it will be loaded from environment variables, same as used in rabbitm
 | node                 | RABBITMQ_NODENAME             |
 | aliases-file         | RABBITMQ_CLI_ALIASES_FILE     |
 | erlang-cookie        | RABBITMQ_ERLANG_COOKIE        |
-

@@ -1,17 +1,8 @@
-%%  The contents of this file are subject to the Mozilla Public License
-%%  Version 1.1 (the "License"); you may not use this file except in
-%%  compliance with the License. You may obtain a copy of the License
-%%  at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Software distributed under the License is distributed on an "AS IS"
-%%  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%  the License for the specific language governing rights and
-%%  limitations under the License.
-%%
-%%  The Original Code is RabbitMQ.
-%%
-%%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module('Elixir.RabbitMQ.CLI.Ctl.Commands.ResetStatsDbCommand').
@@ -25,7 +16,8 @@
          banner/2,
          run/2,
          output/2,
-         switches/0
+         switches/0,
+         description/0
         ]).
 
 
@@ -44,12 +36,6 @@ merge_defaults(A, Opts) ->
 switches() ->
     [{all, boolean}].
 
-banner(_, #{all := true}) ->
-    <<"Resetting statistics database in all nodes">>;
-banner(_, #{node := Node}) ->
-    erlang:iolist_to_binary([<<"Resetting statistics database in node ">>,
-                             atom_to_binary(Node, utf8)]).
-
 run(_Args, #{node := Node, all := true}) ->
     rabbit_misc:rpc_call(Node, rabbit_mgmt_storage, reset_all, []);
 run(_Args, #{node := Node, all := false}) ->
@@ -57,3 +43,12 @@ run(_Args, #{node := Node, all := false}) ->
 
 output(Output, _Opts) ->
     'Elixir.RabbitMQ.CLI.DefaultOutput':output(Output).
+
+banner(_, #{all := true}) ->
+    <<"Resetting statistics database in all nodes">>;
+banner(_, #{node := Node}) ->
+    erlang:iolist_to_binary([<<"Resetting statistics database on node ">>,
+                             atom_to_binary(Node, utf8)]).
+
+description() ->
+    <<"Resets statistics database. This will remove all metrics data!">>.

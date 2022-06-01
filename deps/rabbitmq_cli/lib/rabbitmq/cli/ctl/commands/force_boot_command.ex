@@ -1,30 +1,16 @@
-## The contents of this file are subject to the Mozilla Public License
-## Version 1.1 (the "License"); you may not use this file except in
-## compliance with the License. You may obtain a copy of the License
-## at http://www.mozilla.org/MPL/
+## This Source Code Form is subject to the terms of the Mozilla Public
+## License, v. 2.0. If a copy of the MPL was not distributed with this
+## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Software distributed under the License is distributed on an "AS IS"
-## basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-## the License for the specific language governing rights and
-## limitations under the License.
-##
-## The Original Code is RabbitMQ.
-##
-## The Initial Developer of the Original Code is GoPivotal, Inc.
-## Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
-
-alias RabbitMQ.CLI.Core.Config
+## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.ForceBootCommand do
+  alias RabbitMQ.CLI.Core.{Config, DocGuide}
+
   @behaviour RabbitMQ.CLI.CommandBehaviour
-  use RabbitMQ.CLI.DefaultOutput
 
-  def merge_defaults(args, opts), do: {args, opts}
-
-  def validate(args, _) when length(args) > 0 do
-    {:validation_failure, :too_many_args}
-  end
-  def validate([], %{}), do: :ok
+  use RabbitMQ.CLI.Core.MergesNoDefaults
+  use RabbitMQ.CLI.Core.AcceptsNoPositionalArguments
 
   ##
   def validate_execution_environment(args, opts) do
@@ -38,21 +24,34 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ForceBootCommand do
   end
 
   def run([], %{node: node_name} = opts) do
-    case :rabbit_misc.rpc_call(node_name,
-                               :rabbit_mnesia, :force_load_next_boot, []) do
+    case :rabbit_misc.rpc_call(node_name, :rabbit_mnesia, :force_load_next_boot, []) do
       {:badrpc, :nodedown} ->
         case Config.get_option(:mnesia_dir, opts) do
-          nil        ->
-            {:error, :mnesia_dir_not_found};
+          nil ->
+            {:error, :mnesia_dir_not_found}
+
           dir ->
             File.write(Path.join(dir, "force_load"), "")
-        end;
-      _ -> :ok
+        end
+
+      _ ->
+        :ok
     end
   end
 
+  use RabbitMQ.CLI.DefaultOutput
+
   def usage, do: "force_boot"
 
-  def banner(_, _), do: nil
+  def usage_doc_guides() do
+    [
+      DocGuide.clustering()
+    ]
+  end
 
+  def help_section(), do: :cluster_management
+
+  def description(), do: "Forces node to start even if it cannot contact or rejoin any of its previously known peers"
+
+  def banner(_, _), do: nil
 end

@@ -23,16 +23,22 @@
 
 -record(state, {
 	next :: any(),
+	threshold :: non_neg_integer() | undefined,
 	compress = undefined :: undefined | gzip,
-	deflate = undefined :: undefined | zlib:zstream()
+	deflate = undefined :: undefined | zlib:zstream(),
+	deflate_flush = sync :: none | sync
 }).
 
 -spec init(cowboy_stream:streamid(), cowboy_req:req(), cowboy:opts())
 	-> {cowboy_stream:commands(), #state{}}.
 init(StreamID, Req, Opts) ->
 	State0 = check_req(Req),
+	CompressThreshold = maps:get(compress_threshold, Opts, 300),
+	DeflateFlush = buffering_to_zflush(maps:get(compress_buffering, Opts, false)),
 	{Commands0, Next} = cowboy_stream:init(StreamID, Req, Opts),
-	fold(Commands0, State0#state{next=Next}).
+	fold(Commands0, State0#state{next=Next,
+		threshold=CompressThreshold,
+		deflate_flush=DeflateFlush}).
 
 -spec data(cowboy_stream:streamid(), cowboy_stream:fin(), cowboy_req:resp_body(), State)
 	-> {cowboy_stream:commands(), State} when State::#state{}.
@@ -96,20 +102,20 @@ fold(Commands, State) ->
 
 fold([], State, Acc) ->
 	{lists:reverse(Acc), State};
-%% We do not compress sendfile bodies.
+%% We do not compress full sendfile bodies.
 fold([Response={response, _, _, {sendfile, _, _, _}}|Tail], State, Acc) ->
 	fold(Tail, State, [Response|Acc]);
 %% We compress full responses directly, unless they are lower than
-%% 300 bytes or we find we are not able to by looking at the headers.
-%% @todo It might be good to allow this size to be configured?
-fold([Response0={response, _, Headers, Body}|Tail], State0, Acc) ->
+%% the configured threshold or we find we are not able to by looking at the headers.
+fold([Response0={response, _, Headers, Body}|Tail],
+		State0=#state{threshold=CompressThreshold}, Acc) ->
 	case check_resp_headers(Headers, State0) of
 		State=#state{compress=undefined} ->
 			fold(Tail, State, [Response0|Acc]);
 		State1 ->
 			BodyLength = iolist_size(Body),
 			if
-				BodyLength =< 300 ->
+				BodyLength =< CompressThreshold ->
 					fold(Tail, State1, [Response0|Acc]);
 				true ->
 					{Response, State} = gzip_response(Response0, State1),
@@ -134,9 +140,25 @@ fold([Data0={data, _, _}|Tail], State0=#state{compress=gzip}, Acc) ->
 fold([Trailers={trailers, _}|Tail], State0=#state{compress=gzip}, Acc) ->
 	{{data, fin, Data}, State} = gzip_data({data, fin, <<>>}, State0),
 	fold(Tail, State, [Trailers, {data, nofin, Data}|Acc]);
+%% All the options from this handler can be updated for the current stream.
+%% The set_options command must be propagated as-is regardless.
+fold([SetOptions={set_options, Opts}|Tail], State=#state{
+		threshold=CompressThreshold0, deflate_flush=DeflateFlush0}, Acc) ->
+	CompressThreshold = maps:get(compress_threshold, Opts, CompressThreshold0),
+	DeflateFlush = case Opts of
+		#{compress_buffering := CompressBuffering} ->
+			buffering_to_zflush(CompressBuffering);
+		_ ->
+			DeflateFlush0
+	end,
+	fold(Tail, State#state{threshold=CompressThreshold, deflate_flush=DeflateFlush},
+		[SetOptions|Acc]);
 %% Otherwise, we have an unrelated command or compression is disabled.
 fold([Command|Tail], State, Acc) ->
 	fold(Tail, State, [Command|Acc]).
+
+buffering_to_zflush(true) -> none;
+buffering_to_zflush(false) -> sync.
 
 gzip_response({response, Status, Headers, Body}, State) ->
 	%% We can't call zlib:gzip/1 because it does an
@@ -169,11 +191,39 @@ gzip_headers({headers, Status, Headers0}, State) ->
 		<<"content-encoding">> => <<"gzip">>
 	}}, State#state{deflate=Z}}.
 
-gzip_data({data, nofin, Data0}, State=#state{deflate=Z}) ->
-	Data = zlib:deflate(Z, Data0),
+%% It is not possible to combine zlib and the sendfile
+%% syscall as far as I can tell, because the zlib format
+%% includes a checksum at the end of the stream. We have
+%% to read the file in memory, making this not suitable for
+%% large files.
+gzip_data({data, nofin, Sendfile={sendfile, _, _, _}},
+		State=#state{deflate=Z, deflate_flush=Flush}) ->
+	{ok, Data0} = read_file(Sendfile),
+	Data = zlib:deflate(Z, Data0, Flush),
+	{{data, nofin, Data}, State};
+gzip_data({data, fin, Sendfile={sendfile, _, _, _}}, State=#state{deflate=Z}) ->
+	{ok, Data0} = read_file(Sendfile),
+	Data = zlib:deflate(Z, Data0, finish),
+	zlib:deflateEnd(Z),
+	zlib:close(Z),
+	{{data, fin, Data}, State#state{deflate=undefined}};
+gzip_data({data, nofin, Data0}, State=#state{deflate=Z, deflate_flush=Flush}) ->
+	Data = zlib:deflate(Z, Data0, Flush),
 	{{data, nofin, Data}, State};
 gzip_data({data, fin, Data0}, State=#state{deflate=Z}) ->
 	Data = zlib:deflate(Z, Data0, finish),
 	zlib:deflateEnd(Z),
 	zlib:close(Z),
 	{{data, fin, Data}, State#state{deflate=undefined}}.
+
+read_file({sendfile, Offset, Bytes, Path}) ->
+	{ok, IoDevice} = file:open(Path, [read, raw, binary]),
+	try
+		_ = case Offset of
+			0 -> ok;
+			_ -> file:position(IoDevice, {bof, Offset})
+		end,
+		file:read(IoDevice, Bytes)
+	after
+		file:close(IoDevice)
+	end.

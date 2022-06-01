@@ -1,4 +1,4 @@
-%% Copyright (c) 2013-2015, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2013-2018, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -14,8 +14,9 @@
 
 -module(cow_http).
 
-%% @todo parse_request_line
+-export([parse_request_line/1]).
 -export([parse_status_line/1]).
+-export([status_to_integer/1]).
 -export([parse_headers/1]).
 
 -export([parse_fullpath/1]).
@@ -27,11 +28,62 @@
 -export([version/1]).
 
 -type version() :: 'HTTP/1.0' | 'HTTP/1.1'.
+-export_type([version/0]).
+
 -type status() :: 100..999.
+-export_type([status/0]).
+
 -type headers() :: [{binary(), iodata()}].
 -export_type([headers/0]).
 
 -include("cow_inline.hrl").
+
+%% @doc Parse the request line.
+
+-spec parse_request_line(binary()) -> {binary(), binary(), version(), binary()}.
+parse_request_line(Data) ->
+	{Pos, _} = binary:match(Data, <<"\r">>),
+	<<RequestLine:Pos/binary, "\r\n", Rest/bits>> = Data,
+	[Method, Target, Version0] = binary:split(RequestLine, <<$\s>>, [trim_all, global]),
+	Version = case Version0 of
+		<<"HTTP/1.1">> -> 'HTTP/1.1';
+		<<"HTTP/1.0">> -> 'HTTP/1.0'
+	end,
+	{Method, Target, Version, Rest}.
+
+-ifdef(TEST).
+parse_request_line_test_() ->
+	Tests = [
+		{<<"GET /path HTTP/1.0\r\nRest">>,
+			{<<"GET">>, <<"/path">>, 'HTTP/1.0', <<"Rest">>}},
+		{<<"GET /path HTTP/1.1\r\nRest">>,
+			{<<"GET">>, <<"/path">>, 'HTTP/1.1', <<"Rest">>}},
+		{<<"CONNECT proxy.example.org:1080 HTTP/1.1\r\nRest">>,
+			{<<"CONNECT">>, <<"proxy.example.org:1080">>, 'HTTP/1.1', <<"Rest">>}}
+	],
+	[{V, fun() -> R = parse_request_line(V) end}
+		|| {V, R} <- Tests].
+
+parse_request_line_error_test_() ->
+	Tests = [
+		<<>>,
+		<<"GET">>,
+		<<"GET /path\r\n">>,
+		<<"GET /path HTTP/1.1">>,
+		<<"GET /path HTTP/1.1\r">>,
+		<<"GET /path HTTP/1.1\n">>,
+		<<"GET /path HTTP/0.9\r\n">>,
+		<<"content-type: text/plain\r\n">>,
+		<<0:80, "\r\n">>
+	],
+	[{V, fun() -> {'EXIT', _} = (catch parse_request_line(V)) end}
+		|| V <- Tests].
+
+horse_parse_request_line_get_path() ->
+	horse:repeat(200000,
+		parse_request_line(<<"GET /path HTTP/1.1\r\n">>)
+	).
+-endif.
 
 %% @doc Parse the status line.
 
@@ -47,12 +99,26 @@ parse_status_line(<< "HTTP/1.1 ", Status/bits >>) ->
 parse_status_line(<< "HTTP/1.0 ", Status/bits >>) ->
 	parse_status_line(Status, 'HTTP/1.0').
 
-parse_status_line(<< H, T, U, " ", Rest/bits >>, Version)
-		when $0 =< H, H =< $9, $0 =< T, T =< $9, $0 =< U, U =< $9 ->
-	Status = (H - $0) * 100 + (T - $0) * 10 + (U - $0),
+parse_status_line(<<H, T, U, " ", Rest/bits>>, Version) ->
+	Status = status_to_integer(H, T, U),
 	{Pos, _} = binary:match(Rest, <<"\r">>),
 	<< StatusStr:Pos/binary, "\r\n", Rest2/bits >> = Rest,
 	{Version, Status, StatusStr, Rest2}.
+
+-spec status_to_integer(status() | binary()) -> status().
+status_to_integer(Status) when is_integer(Status) ->
+	Status;
+status_to_integer(Status) ->
+	case Status of
+		<<H, T, U>> ->
+			status_to_integer(H, T, U);
+		<<H, T, U, " ", _/bits>> ->
+			status_to_integer(H, T, U)
+	end.
+
+status_to_integer(H, T, U)
+		when $0 =< H, H =< $9, $0 =< T, T =< $9, $0 =< U, U =< $9 ->
+	(H - $0) * 100 + (T - $0) * 10 + (U - $0).
 
 -ifdef(TEST).
 parse_status_line_test_() ->
@@ -145,16 +211,32 @@ parse_hd_value(<< $\r, Rest/bits >>, Acc, Name, SoFar) ->
 		<< $\n, C, Rest2/bits >> when C =:= $\s; C =:= $\t ->
 			parse_hd_value(Rest2, Acc, Name, << SoFar/binary, C >>);
 		<< $\n, Rest2/bits >> ->
-			parse_header(Rest2, [{Name, SoFar}|Acc])
+			Value = clean_value_ws_end(SoFar, byte_size(SoFar) - 1),
+			parse_header(Rest2, [{Name, Value}|Acc])
 	end;
 parse_hd_value(<< C, Rest/bits >>, Acc, Name, SoFar) ->
 	parse_hd_value(Rest, Acc, Name, << SoFar/binary, C >>).
+
+%% This function has been copied from cowboy_http.
+clean_value_ws_end(_, -1) ->
+	<<>>;
+clean_value_ws_end(Value, N) ->
+	case binary:at(Value, N) of
+		$\s -> clean_value_ws_end(Value, N - 1);
+		$\t -> clean_value_ws_end(Value, N - 1);
+		_ ->
+			S = N + 1,
+			<< Value2:S/binary, _/bits >> = Value,
+			Value2
+	end.
 
 -ifdef(TEST).
 parse_headers_test_() ->
 	Tests = [
 		{<<"\r\nRest">>,
 			{[], <<"Rest">>}},
+		{<<"Server: Erlang/R17  \r\n\r\n">>,
+			{[{<<"server">>, <<"Erlang/R17">>}], <<>>}},
 		{<<"Server: Erlang/R17\r\n"
 			"Date: Sun, 23 Feb 2014 09:30:39 GMT\r\n"
 			"Multiline-Header: why hello!\r\n"
@@ -281,6 +363,7 @@ version_test() ->
 status(100) -> <<"100 Continue">>;
 status(101) -> <<"101 Switching Protocols">>;
 status(102) -> <<"102 Processing">>;
+status(103) -> <<"103 Early Hints">>;
 status(200) -> <<"200 OK">>;
 status(201) -> <<"201 Created">>;
 status(202) -> <<"202 Accepted">>;
@@ -298,6 +381,7 @@ status(304) -> <<"304 Not Modified">>;
 status(305) -> <<"305 Use Proxy">>;
 status(306) -> <<"306 Switch Proxy">>;
 status(307) -> <<"307 Temporary Redirect">>;
+status(308) -> <<"308 Permanent Redirect">>;
 status(400) -> <<"400 Bad Request">>;
 status(401) -> <<"401 Unauthorized">>;
 status(402) -> <<"402 Payment Required">>;

@@ -1,30 +1,21 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_fhc_helpers).
 
 -export([clear_read_cache/0]).
 
--include("rabbit.hrl"). % For #amqqueue record definition.
+-include("amqqueue.hrl").
 
 clear_read_cache() ->
     case application:get_env(rabbit, fhc_read_buffering) of
         {ok, true} ->
             file_handle_cache:clear_read_cache(),
-            clear_vhost_read_cache(rabbit_vhost:list());
+            clear_vhost_read_cache(rabbit_vhost:list_names());
         _ -> %% undefined or {ok, false}
             ok
     end.
@@ -37,7 +28,9 @@ clear_vhost_read_cache([VHost | Rest]) ->
 
 clear_queue_read_cache([]) ->
     ok;
-clear_queue_read_cache([#amqqueue{pid = MPid, slave_pids = SPids} | Rest]) ->
+clear_queue_read_cache([Q | Rest]) when ?is_amqqueue(Q) ->
+    MPid = amqqueue:get_pid(Q),
+    SPids = amqqueue:get_slave_pids(Q),
     %% Limit the action to the current node.
     Pids = [P || P <- [MPid | SPids], node(P) =:= node()],
     %% This function is executed in the context of the backing queue

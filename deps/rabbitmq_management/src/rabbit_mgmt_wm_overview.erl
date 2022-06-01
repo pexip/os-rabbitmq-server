@@ -1,17 +1,8 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ Management Plugin.
-%%
-%%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_overview).
@@ -28,7 +19,7 @@
 %%--------------------------------------------------------------------
 
 init(Req, _State) ->
-    {cowboy_rest, rabbit_mgmt_cors:set_headers(Req, ?MODULE), #context{}}.
+    {cowboy_rest, rabbit_mgmt_headers:set_common_permission_headers(Req, ?MODULE), #context{}}.
 
 variances(Req, Context) ->
     {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
@@ -38,33 +29,67 @@ content_types_provided(ReqData, Context) ->
 
 to_json(ReqData, Context = #context{user = User = #user{tags = Tags}}) ->
     RatesMode = rabbit_mgmt_agent_config:get_env(rates_mode),
+    SRP = get_sample_retention_policies(),
     %% NB: this duplicates what's in /nodes but we want a global idea
     %% of this. And /nodes is not accessible to non-monitor users.
-    ExchangeTypes = rabbit_mgmt_external_stats:list_registry_plugins(exchange),
-    Overview0 = [{management_version,  version(rabbitmq_management)},
-                 {rates_mode,          RatesMode},
-                 {exchange_types,      ExchangeTypes},
-                 {rabbitmq_version,    version(rabbit)},
-                 {cluster_name,        rabbit_nodes:cluster_name()},
-                 {erlang_version,      erlang_version()},
-                 {erlang_full_version, erlang_full_version()}],
+    ExchangeTypes = lists:sort(
+        fun(ET1, ET2) ->
+            proplists:get_value(name, ET1, none)
+            =<
+            proplists:get_value(name, ET2, none)
+        end,
+        rabbit_mgmt_external_stats:list_registry_plugins(exchange)),
+    Overview0 = [{management_version,        version(rabbitmq_management)},
+                 {rates_mode,                RatesMode},
+                 {sample_retention_policies, SRP},
+                 {exchange_types,            ExchangeTypes},
+                 {product_version,           list_to_binary(rabbit:product_version())},
+                 {product_name,              list_to_binary(rabbit:product_name())},
+                 {rabbitmq_version,          list_to_binary(rabbit:base_product_version())},
+                 {cluster_name,              rabbit_nodes:cluster_name()},
+                 {erlang_version,            erlang_version()},
+                 {erlang_full_version,       erlang_full_version()},
+                 {disable_stats,             rabbit_mgmt_util:disable_stats(ReqData)},
+                 {enable_queue_totals,       rabbit_mgmt_util:enable_queue_totals(ReqData)}],
     try
-        Range = rabbit_mgmt_util:range(ReqData),
-        Overview =
-            case rabbit_mgmt_util:is_monitor(Tags) of
-                true ->
-                    Overview0 ++
-                        [{K, maybe_map(V)} ||
-                            {K,V} <- rabbit_mgmt_db:get_overview(Range)] ++
-                        [{node,               node()},
-                         {listeners,          listeners()},
-                         {contexts,           web_contexts(ReqData)}];
-                _ ->
-                    Overview0 ++
-                        [{K, maybe_map(V)} ||
-                            {K, V} <- rabbit_mgmt_db:get_overview(User, Range)]
-            end,
-        rabbit_mgmt_util:reply(Overview, ReqData, Context)
+        case rabbit_mgmt_util:disable_stats(ReqData) of
+            false ->
+                Range = rabbit_mgmt_util:range(ReqData),
+                Overview =
+                    case rabbit_mgmt_util:is_monitor(Tags) of
+                        true ->
+                            Overview0 ++
+                                [{K, maybe_map(V)} ||
+                                    {K,V} <- rabbit_mgmt_db:get_overview(Range)] ++
+                                [{node,               node()},
+                                 {listeners,          listeners()},
+                                 {contexts,           web_contexts(ReqData)}];
+                        _ ->
+                            Overview0 ++
+                                [{K, maybe_map(V)} ||
+                                    {K, V} <- rabbit_mgmt_db:get_overview(User, Range)]
+                    end,
+                rabbit_mgmt_util:reply(Overview, ReqData, Context);
+            true ->
+                VHosts = case rabbit_mgmt_util:is_monitor(Tags) of
+                             true -> rabbit_vhost:list_names();
+                             _   -> rabbit_mgmt_util:list_visible_vhosts_names(User)
+                         end,
+
+                ObjectTotals = case rabbit_mgmt_util:is_monitor(Tags) of
+                                   true ->
+                                       [{queues, rabbit_amqqueue:count()},
+                                        {exchanges, rabbit_exchange:count()},
+                                        {connections, rabbit_connection_tracking:count()}];
+                                   _   ->
+                                       [{queues, length([Q || V <- VHosts, Q <- rabbit_amqqueue:list(V)])},
+                                        {exchanges, length([X || V <- VHosts, X <- rabbit_exchange:list(V)])}]
+                               end,
+                Overview = Overview0 ++
+                    [{node, node()},
+                     {object_totals, ObjectTotals}],
+                rabbit_mgmt_util:reply(Overview, ReqData, Context)
+        end
     catch
         {error, invalid_range_parameters, Reason} ->
             rabbit_mgmt_util:bad_request(iolist_to_binary(Reason), ReqData, Context)
@@ -106,3 +131,52 @@ erlang_version() -> list_to_binary(rabbit_misc:otp_release()).
 
 erlang_full_version() ->
     list_to_binary(rabbit_misc:otp_system_version()).
+
+get_sample_retention_policies() ->
+    P = rabbit_mgmt_agent_config:get_env(sample_retention_policies),
+    get_sample_retention_policies(P).
+
+get_sample_retention_policies(undefined) ->
+    [{global, []}, {basic, []}, {detailed, []}];
+get_sample_retention_policies(Policies) ->
+    [transform_retention_policy(Pol, Policies) || Pol <- [global, basic, detailed]].
+
+transform_retention_policy(Pol, Policies) ->
+    case proplists:lookup(Pol, Policies) of
+        none ->
+            {Pol, []};
+        {Pol, Intervals} ->
+            {Pol, transform_retention_intervals(Intervals, [])}
+    end.
+
+transform_retention_intervals([], Acc) ->
+    lists:sort(Acc);
+transform_retention_intervals([{MaxAgeInSeconds, _}|Rest], Acc) ->
+    %
+    % Seconds | Interval
+    % 60      | last minute
+    % 600     | last 10 minutes
+    % 3600    | last hour
+    % 28800   | last 8 hours
+    % 86400   | last day
+    %
+    % rabbitmq/rabbitmq-management#635
+    %
+    % We check for the max age in seconds to be within 10% of the value above.
+    % The reason being that the default values are "bit higher" to accommodate
+    % edge cases (see deps/rabbitmq_management_agent/Makefile)
+    AccVal = if
+                 MaxAgeInSeconds >= 0 andalso MaxAgeInSeconds =< 66 ->
+                     60;
+                 MaxAgeInSeconds >= 540 andalso MaxAgeInSeconds =< 660 ->
+                     600;
+                 MaxAgeInSeconds >= 3240 andalso MaxAgeInSeconds =< 3960 ->
+                     3600;
+                 MaxAgeInSeconds >= 25920 andalso MaxAgeInSeconds =< 31681 ->
+                     28800;
+                 MaxAgeInSeconds >= 77760 andalso MaxAgeInSeconds =< 95041 ->
+                     86400;
+                 true ->
+                     0
+             end,
+    transform_retention_intervals(Rest, [AccVal|Acc]).

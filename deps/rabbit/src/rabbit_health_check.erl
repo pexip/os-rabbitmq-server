@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(rabbit_health_check).
 
@@ -21,12 +12,11 @@
 %% Internal API
 -export([local/0]).
 
--spec node(node(), timeout()) -> ok | {badrpc, term()} | {error_string, string()}.
--spec local() -> ok | {error_string, string()}.
-
 %%----------------------------------------------------------------------------
 %% External functions
 %%----------------------------------------------------------------------------
+
+-spec node(node(), timeout()) -> ok | {badrpc, term()} | {error_string, string()}.
 
 node(Node) ->
     %% same default as in CLI
@@ -34,7 +24,11 @@ node(Node) ->
 node(Node, Timeout) ->
     rabbit_misc:rpc_call(Node, rabbit_health_check, local, [], Timeout).
 
+-spec local() -> ok | {error_string, string()}.
+
 local() ->
+    rabbit_log:warning("rabbitmqctl node_health_check and its HTTP API counterpart are DEPRECATED. "
+                       "See https://www.rabbitmq.com/monitoring.html#health-checks for replacement options."),
     run_checks([list_channels, list_queues, alarms, rabbit_node_monitor]).
 
 %%----------------------------------------------------------------------------
@@ -53,23 +47,18 @@ run_checks([C|Cs]) ->
 node_health_check(list_channels) ->
     case rabbit_channel:info_local([pid]) of
         L when is_list(L) ->
-            ok;
-        Other ->
-            ErrorMsg = io_lib:format("list_channels unexpected output: ~p",
-                                     [Other]),
-            {error_string, ErrorMsg}
+            ok
     end;
 
 node_health_check(list_queues) ->
-    health_check_queues(rabbit_vhost:list());
+    health_check_queues(rabbit_vhost:list_names());
 
 node_health_check(rabbit_node_monitor) ->
     case rabbit_node_monitor:partitions() of
-        L when is_list(L) ->
+        [] ->
             ok;
-        Other ->
-            ErrorMsg = io_lib:format("rabbit_node_monitor reports unexpected partitions value: ~p",
-                                     [Other]),
+        L when is_list(L), length(L) > 0 ->
+            ErrorMsg = io_lib:format("cluster partition in effect: ~p", [L]),
             {error_string, ErrorMsg}
     end;
 
@@ -87,9 +76,5 @@ health_check_queues([]) ->
 health_check_queues([VHost|RestVHosts]) ->
     case rabbit_amqqueue:info_local(VHost) of
         L when is_list(L) ->
-            health_check_queues(RestVHosts);
-        Other ->
-            ErrorMsg = io_lib:format("list_queues unexpected output for vhost ~s: ~p",
-                                     [VHost, Other]),
-            {error_string, ErrorMsg}
+            health_check_queues(RestVHosts)
     end.

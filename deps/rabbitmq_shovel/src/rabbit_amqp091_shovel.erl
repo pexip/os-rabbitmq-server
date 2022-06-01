@@ -1,17 +1,8 @@
-%%  The contents of this file are subject to the Mozilla Public License
-%%  Version 1.1 (the "License"); you may not use this file except in
-%%  compliance with the License. You may obtain a copy of the License
-%%  at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Software distributed under the License is distributed on an "AS IS"
-%%  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%  the License for the specific language governing rights and
-%%  limitations under the License.
-%%
-%%  The Original Code is RabbitMQ.
-%%
-%%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_amqp091_shovel).
@@ -250,8 +241,7 @@ handle_dest(#'basic.nack'{delivery_tag = Seq, multiple = Multiple},
                        end, Seq, Multiple, State);
 
 handle_dest(#'basic.cancel'{}, #{name := Name}) ->
-    rabbit_log:warning("Shovel ~p received 'basic.cancel' from the broker~n",
-                       [Name]),
+    rabbit_log:warning("Shovel ~p received a 'basic.cancel' from the server", [Name]),
     {stop, {shutdown, restart}};
 
 handle_dest({'EXIT', Conn, Reason}, #{dest := #{current := {Conn, _, _}}}) ->
@@ -314,12 +304,12 @@ publish(IncomingTag, Method, Msg,
 
 make_conn_and_chan([], {VHost, Name} = _ShovelName) ->
     rabbit_log:error(
-          "Shovel '~s' in vhost '~s' has no more URIs to try for connection and will terminate~n",
+          "Shovel '~s' in vhost '~s' has no more URIs to try for connection",
           [Name, VHost]),
     erlang:error(failed_to_connect_using_provided_uris);
 make_conn_and_chan([], ShovelName) ->
     rabbit_log:error(
-          "Shovel '~s' has no more URIs to try for connection and will terminate~n",
+          "Shovel '~s' has no more URIs to try for connection",
           [ShovelName]),
     erlang:error(failed_to_connect_using_provided_uris);
 make_conn_and_chan(URIs, ShovelName) ->

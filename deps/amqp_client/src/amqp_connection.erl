@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% @type close_reason(Type) = {shutdown, amqp_reason(Type)}.
@@ -73,7 +64,7 @@
 -export([start/1, start/2, close/1, close/2, close/3, close/4]).
 -export([error_atom/1]).
 -export([info/2, info_keys/1, info_keys/0]).
--export([connection_name/1]).
+-export([connection_name/1, update_secret/3]).
 -export([socket_adapter_info/2]).
 
 -define(DEFAULT_CONSUMER, {amqp_selective_consumer, []}).
@@ -117,7 +108,7 @@
 %%     defaults to 0</li>
 %% <li>frame_max :: non_neg_integer() - The frame_max handshake parameter,
 %%     defaults to 0 (network only)</li>
-%% <li>heartbeat :: non_neg_integer() - The hearbeat interval in seconds,
+%% <li>heartbeat :: non_neg_integer() - The heartbeat interval in seconds,
 %%     defaults to 0 (turned off) (network only)</li>
 %% <li>connection_timeout :: non_neg_integer() | 'infinity'
 %%     - The connection timeout in milliseconds,
@@ -128,8 +119,8 @@
 %%     client properties to be sent to the server, defaults to []</li>
 %% <li>socket_options :: [any()] - Extra socket options.  These are
 %%     appended to the default options.  See
-%%     <a href="http://www.erlang.org/doc/man/inet.html#setopts-2">inet:setopts/2</a>
-%%     and <a href="http://www.erlang.org/doc/man/gen_tcp.html#connect-4">
+%%     <a href="https://www.erlang.org/doc/man/inet.html#setopts-2">inet:setopts/2</a>
+%%     and <a href="https://www.erlang.org/doc/man/gen_tcp.html#connect-4">
 %%     gen_tcp:connect/4</a> for descriptions of the available options.</li>
 %% </ul>
 
@@ -161,14 +152,21 @@ start(AmqpParams) ->
 %% user specified connection name.
 start(AmqpParams, ConnName) when ConnName == undefined; is_binary(ConnName) ->
     ensure_started(),
-    AmqpParams1 =
+    AmqpParams0 =
         case AmqpParams of
+            #amqp_params_direct{password = Password} ->
+                AmqpParams#amqp_params_direct{password = credentials_obfuscation:encrypt(Password)};
+            #amqp_params_network{password = Password} ->
+                AmqpParams#amqp_params_network{password = credentials_obfuscation:encrypt(Password)}
+        end,
+    AmqpParams1 =
+        case AmqpParams0 of
             #amqp_params_network{port = undefined, ssl_options = none} ->
-                AmqpParams#amqp_params_network{port = ?PROTOCOL_PORT};
+                AmqpParams0#amqp_params_network{port = ?PROTOCOL_PORT};
             #amqp_params_network{port = undefined, ssl_options = _} ->
-                AmqpParams#amqp_params_network{port = ?PROTOCOL_SSL_PORT};
+                AmqpParams0#amqp_params_network{port = ?PROTOCOL_SSL_PORT};
             _ ->
-                AmqpParams
+                AmqpParams0
         end,
     AmqpParams2 = set_connection_name(ConnName, AmqpParams1),
     AmqpParams3 = amqp_ssl:maybe_enhance_ssl_options(AmqpParams2),
@@ -197,7 +195,7 @@ set_connection_name(ConnName,
 %% application which is making this call.
 ensure_started() ->
     [ensure_started(App) || App <- [syntax_tools, compiler, xmerl,
-                                    rabbit_common, amqp_client]].
+                                    rabbit_common, amqp_client, credentials_obfuscation]].
 
 ensure_started(App) ->
     case is_pid(application_controller:get_master(App)) andalso amqp_sup:is_ready() of
@@ -299,6 +297,16 @@ close(ConnectionPid, Code, Text, Timeout) ->
 
 register_blocked_handler(ConnectionPid, BlockHandler) ->
     amqp_gen_connection:register_blocked_handler(ConnectionPid, BlockHandler).
+
+-spec update_secret(pid(), term(), binary()) ->
+    {'ok', rabbit_types:auth_user()} |
+    {'refused', string(), [any()]} |
+    {'error', any()}.
+
+update_secret(ConnectionPid, NewSecret, Reason) ->
+  Update = #'connection.update_secret'{new_secret = NewSecret,
+                                       reason = Reason},
+  amqp_gen_connection:update_secret(ConnectionPid, Update).
 
 %%---------------------------------------------------------------------------
 %% Other functions

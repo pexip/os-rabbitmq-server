@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ Federation.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_federation_upstream_exchange).
@@ -52,13 +43,18 @@ route(X = #exchange{arguments = Args},
     %% This arg was introduced in the same release as this exchange type;
     %% it must be set
     {long, MaxHops} = rabbit_misc:table_lookup(Args, ?MAX_HOPS_ARG),
-    %% This was introduced later; it might be missing
-    DName = case rabbit_misc:table_lookup(Args, ?NODE_NAME_ARG) of
-                {longstr, N} -> N;
-                _            -> unknown
+    %% Will be missing for pre-3.3.0 versions
+    DName = case rabbit_misc:table_lookup(Args, ?DOWNSTREAM_NAME_ARG) of
+                {longstr, Val0} -> Val0;
+                _               -> unknown
+            end,
+    %% Will be missing for pre-3.8.9 versions
+    DVhost = case rabbit_misc:table_lookup(Args, ?DOWNSTREAM_VHOST_ARG) of
+                {longstr, Val1} -> Val1;
+                _               -> unknown
             end,
     Headers = rabbit_basic:extract_headers(Content),
-    case rabbit_federation_util:should_forward(Headers, MaxHops, DName) of
+    case rabbit_federation_util:should_forward(Headers, MaxHops, DName, DVhost) of
         true  -> rabbit_exchange_type_fanout:route(X, D);
         false -> []
     end.

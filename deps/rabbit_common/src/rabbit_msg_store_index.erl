@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_msg_store_index).
@@ -21,7 +12,7 @@
 %% Behaviour module to provide pluggable message store index.
 %% The index is used to locate message on disk and for reference-counting.
 
-%% Message store have several addtitional assumptions about performance and
+%% Message store have several additional assumptions about performance and
 %% atomicity of some operations. See comments for each callback.
 
 -type(dir() :: string()).
@@ -59,7 +50,7 @@
 
 %% Update an entry in the index.
 %% Is called by a msg_store process only.
-%% The function is called duting message store recovery after crash.
+%% The function is called during message store recovery after crash.
 %% The difference between update and insert functions, is that update
 %% should not fail if entry already exist, and should be atomic.
 -callback update(msg_location(), index_state()) -> 'ok'.

@@ -1,31 +1,21 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_net).
 -include("rabbit.hrl").
 
 -include_lib("kernel/include/inet.hrl").
--include_lib("ssl/src/ssl_api.hrl").
 
 -export([is_ssl/1, ssl_info/1, controlling_process/2, getstat/2,
-         recv/1, sync_recv/2, async_recv/3, port_command/2, getopts/2,
-         setopts/2, send/2, close/1, fast_close/1, sockname/1, peername/1,
-         peercert/1, connection_string/2, socket_ends/2, is_loopback/1,
-         tcp_host/1, unwrap_socket/1, maybe_get_proxy_socket/1,
-         hostname/0]).
+    recv/1, sync_recv/2, async_recv/3, port_command/2, getopts/2,
+    setopts/2, send/2, close/1, fast_close/1, sockname/1, peername/1,
+    peercert/1, connection_string/2, socket_ends/2, is_loopback/1,
+    tcp_host/1, unwrap_socket/1, maybe_get_proxy_socket/1,
+    hostname/0, getifaddrs/0]).
 
 %%---------------------------------------------------------------------------
 
@@ -89,7 +79,9 @@
 
 -define(SSL_CLOSE_TIMEOUT, 5000).
 
--define(IS_SSL(Sock), is_record(Sock, sslsocket)).
+-define(IS_SSL(Sock), is_tuple(Sock)
+    andalso (tuple_size(Sock) =:= 3)
+    andalso (element(1, Sock) =:= sslsocket)).
 
 is_ssl(Sock) -> ?IS_SSL(Sock).
 
@@ -114,6 +106,11 @@ controlling_process(Sock, Pid) when is_port(Sock) ->
 getstat(Sock, Stats) when ?IS_SSL(Sock) ->
     inet:getstat(ssl_get_socket(Sock), Stats);
 getstat(Sock, Stats) when is_port(Sock) ->
+    inet:getstat(Sock, Stats);
+%% Used by Proxy protocol support in plugins
+getstat({rabbit_proxy_socket, Sock, _}, Stats) when ?IS_SSL(Sock) ->
+    inet:getstat(ssl_get_socket(Sock), Stats);
+getstat({rabbit_proxy_socket, Sock, _}, Stats) when is_port(Sock) ->
     inet:getstat(Sock, Stats).
 
 recv(Sock) when ?IS_SSL(Sock) ->
@@ -231,15 +228,12 @@ socket_ends(Sock, Direction) when ?IS_SSL(Sock);
         {_, {error, _Reason} = Error} ->
             Error
     end;
-socket_ends(Sock, Direction = inbound) when is_tuple(Sock) ->
-    %% proxy protocol support
-    %% hack: we have to check the record type
-    {ok, {{FromAddress, FromPort}, {_, _}}} = case element(1, Sock) of
-        proxy_socket -> ranch_proxy_protocol:proxyname(undefined, Sock);
-        ssl_socket   -> ranch_proxy_ssl:proxyname(Sock)
-    end,
+socket_ends({rabbit_proxy_socket, CSocket, ProxyInfo}, Direction = inbound) ->
+    #{
+        src_address := FromAddress,
+        src_port := FromPort
+    } = ProxyInfo,
     {_From, To} = sock_funs(Direction),
-    CSocket = unwrap_socket(Sock),
     case To(CSocket) of
         {ok, {ToAddress, ToPort}} ->
             {ok, {rdns(FromAddress), FromPort,
@@ -270,6 +264,29 @@ hostname() ->
         {error, _Reason}                 -> Hostname
     end.
 
+format_nic_attribute({Key, undefined}) ->
+    {Key, undefined};
+format_nic_attribute({Key = flags, List}) when is_list(List) ->
+    Val = string:join(lists:map(fun rabbit_data_coercion:to_list/1, List), ", "),
+    {Key, rabbit_data_coercion:to_binary(Val)};
+format_nic_attribute({Key, Tuple}) when is_tuple(Tuple) and (Key =:= addr orelse
+                                                             Key =:= broadaddr orelse
+                                                             Key =:= netmask orelse
+                                                             Key =:= dstaddr) ->
+    Val = inet_parse:ntoa(Tuple),
+    {Key, rabbit_data_coercion:to_binary(Val)};
+format_nic_attribute({Key = hwaddr, List}) when is_list(List) ->
+    %% [140, 133, 144, 28, 241, 121] => 8C:85:90:1C:F1:79
+    Val = string:join(lists:map(fun(N) -> integer_to_list(N, 16) end, List), ":"),
+    {Key, rabbit_data_coercion:to_binary(Val)}.
+
+getifaddrs() ->
+    {ok, AddrList} = inet:getifaddrs(),
+    Addrs0 = maps:from_list(AddrList),
+    maps:map(fun (_Key, Proplist) ->
+                lists:map(fun format_nic_attribute/1, Proplist)
+             end, Addrs0).
+
 rdns(Addr) ->
     case application:get_env(rabbit, reverse_dns_lookups) of
         {ok, true} -> list_to_binary(tcp_host(Addr));
@@ -293,34 +310,12 @@ is_loopback(_)                       -> false.
 
 ipv4(AB, CD) -> {AB bsr 8, AB band 255, CD bsr 8, CD band 255}.
 
-unwrap_socket(Sock) when ?IS_SSL(Sock);
-                         is_port(Sock) ->
+unwrap_socket({rabbit_proxy_socket, Sock, _}) ->
     Sock;
-unwrap_socket(Sock) when is_tuple(Sock) ->
-    %% proxy protocol support
-    %% hack: we have to check the record type
-    case element(1, Sock) of
-        proxy_socket ->
-            ranch_proxy_protocol:get_csocket(Sock);
-        ssl_socket   ->
-            ranch_proxy_ssl:get_csocket(Sock)
-    end;
 unwrap_socket(Sock) ->
     Sock.
 
-maybe_get_proxy_socket(Sock) when ?IS_SSL(Sock);
-                                  is_port(Sock) ->
-    undefined;
-maybe_get_proxy_socket(Sock) when is_tuple(Sock) ->
-    %% proxy protocol support
-    %% hack: we have to check the record type
-    case element(1, Sock) of
-        proxy_socket ->
-            Sock;
-        ssl_socket   ->
-            Sock;
-        _            ->
-            undefined
-    end;
+maybe_get_proxy_socket(Sock={rabbit_proxy_socket, _, _}) ->
+    Sock;
 maybe_get_proxy_socket(_Sock) ->
     undefined.

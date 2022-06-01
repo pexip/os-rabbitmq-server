@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_federation_parameters).
@@ -28,6 +19,7 @@
          {runtime_parameter, <<"federation-upstream">>},
          {runtime_parameter, <<"federation-upstream-set">>},
          {policy_validator,  <<"federation-upstream">>},
+         {policy_validator,  <<"federation-upstream-pattern">>},
          {policy_validator,  <<"federation-upstream-set">>}]).
 
 -rabbit_boot_step({?MODULE,
@@ -73,8 +65,9 @@ notify(_VHost, <<"federation-upstream">>, Name, _Term, _Username) ->
 notify_clear(_VHost, <<"federation-upstream-set">>, Name, _Username) ->
     adjust({clear_upstream_set, Name});
 
-notify_clear(_VHost, <<"federation-upstream">>, Name, _Username) ->
-    adjust({clear_upstream, Name}).
+notify_clear(VHost, <<"federation-upstream">>, Name, _Username) ->
+    rabbit_federation_exchange_link_sup_sup:adjust({clear_upstream, VHost, Name}),
+    rabbit_federation_queue_link_sup_sup:adjust({clear_upstream, VHost, Name}).
 
 adjust(Thing) ->
     rabbit_federation_exchange_link_sup_sup:adjust(Thing),
@@ -85,6 +78,7 @@ adjust(Thing) ->
 shared_validation() ->
     [{<<"exchange">>,       fun rabbit_parameter_validation:binary/2, optional},
      {<<"queue">>,          fun rabbit_parameter_validation:binary/2, optional},
+     {<<"consumer-tag">>,   fun rabbit_parameter_validation:binary/2, optional},
      {<<"prefetch-count">>, fun rabbit_parameter_validation:number/2, optional},
      {<<"reconnect-delay">>,fun rabbit_parameter_validation:number/2, optional},
      {<<"max-hops">>,       fun rabbit_parameter_validation:number/2, optional},
@@ -93,6 +87,7 @@ shared_validation() ->
      {<<"trust-user-id">>,  fun rabbit_parameter_validation:boolean/2, optional},
      {<<"ack-mode">>,       rabbit_parameter_validation:enum(
                               ['no-ack', 'on-publish', 'on-confirm']), optional},
+     {<<"resource-cleanup-mode">>, rabbit_parameter_validation:enum(['default', 'never']), optional},
      {<<"ha-policy">>,      fun rabbit_parameter_validation:binary/2, optional},
      {<<"bind-nowait">>,    fun rabbit_parameter_validation:boolean/2, optional}].
 
@@ -123,13 +118,22 @@ validate_policy([{<<"federation-upstream-set">>, Value}])
 validate_policy([{<<"federation-upstream-set">>, Value}]) ->
     {error, "~p is not a valid federation upstream set name", [Value]};
 
+validate_policy([{<<"federation-upstream-pattern">>, Value}])
+  when is_binary(Value) ->
+    case re:compile(Value) of
+        {ok, _}         -> ok;
+        {error, Reason} -> {error, "could not compile pattern ~s to a regular expression. "
+                                   "Error: ~p", [Value, Reason]}
+    end;
+validate_policy([{<<"federation-upstream-pattern">>, Value}]) ->
+    {error, "~p is not a valid federation upstream pattern name", [Value]};
+
 validate_policy([{<<"federation-upstream">>, Value}])
   when is_binary(Value) ->
     ok;
 validate_policy([{<<"federation-upstream">>, Value}]) ->
     {error, "~p is not a valid federation upstream name", [Value]};
 
-validate_policy(L) when length(L) =:= 2 ->
-    {error, "cannot specify federation-upstream and federation-upstream-set "
-     "together", []}.
-
+validate_policy(L) when length(L) >= 2 ->
+    {error, "cannot specify federation-upstream, federation-upstream-set "
+            "or federation-upstream-pattern together", []}.

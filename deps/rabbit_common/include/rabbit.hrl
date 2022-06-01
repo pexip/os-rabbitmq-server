@@ -1,18 +1,11 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is Pivotal Software, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
-%%
+
+-include("resource.hrl").
 
 %% Passed around most places
 -record(user, {username,
@@ -23,8 +16,6 @@
 -record(auth_user, {username,
                     tags,
                     impl}).
-%% Passed to authz backends.
--record(authz_socket_info, {sockname, peername}).
 
 %% Implementation for the internal auth backend
 -record(internal_user, {
@@ -40,21 +31,6 @@
 -record(user_permission, {user_vhost, permission}).
 -record(topic_permission_key, {user_vhost, exchange}).
 -record(topic_permission, {topic_permission_key, permission}).
-
-%% Represents a vhost.
-%%
-%% Historically this record had 2 arguments although the 2nd
-%% was never used (`dummy`, always undefined). This is because
-%% single field records were/are illegal in OTP.
-%%
-%% As of 3.6.x, the second argument is vhost limits,
-%% which is actually used and has the same default.
-%% Nonetheless, this required a migration, see rabbit_upgrade_functions.
--record(vhost, {
-          %% vhost name as a binary
-          virtual_host,
-          %% proplist of limits configured, if any
-          limits}).
 
 %% Client connection, used by rabbit_reader
 %% and related modules.
@@ -111,14 +87,6 @@
          payload_fragments_rev %% list of binaries, in reverse order (!)
          }).
 
--record(resource, {
-    virtual_host,
-    %% exchange, queue, ...
-    kind,
-    %% name as a binary
-    name
-}).
-
 %% fields described as 'transient' here are cleared when writing to
 %% rabbit_durable_<thing>
 -record(exchange, {
@@ -128,22 +96,6 @@
           operator_policy, %% durable, implicitly updated when policy changes
           decorators,
           options = #{}}).    %% transient, recalculated in store/1 (i.e. recovery)
-
--record(amqqueue, {
-          name, durable, auto_delete, exclusive_owner = none, %% immutable
-          arguments,                   %% immutable
-          pid,                         %% durable (just so we know home node)
-          slave_pids, sync_slave_pids, %% transient
-          recoverable_slaves,          %% durable
-          policy,                      %% durable, implicit update as above
-          operator_policy,             %% durable, implicit update as above
-          gm_pids,                     %% transient
-          decorators,                  %% transient, recalculated as above
-          state,                       %% durable (have we crashed?)
-          policy_version,
-          slave_pids_pending_shutdown,
-          vhost,                       %% secondary index
-          options = #{}}).
 
 -record(exchange_serial, {name, next}).
 
@@ -191,7 +143,7 @@
                  version,          %% string()
                  description,      %% string()
                  type,             %% 'ez' or 'dir'
-                 dependencies,     %% [{atom(), string()}]
+                 dependencies,     %% [atom()]
                  location,         %% string()
                  %% List of supported broker version ranges,
                  %% e.g. ["3.5.7", "3.6.1"]
@@ -230,12 +182,16 @@
           connected_at
          }).
 
+%% Indicates maintenance state of a node
+-record(node_maintenance_state, {
+          node,
+          status = regular,
+          context = #{}
+        }).
 %%----------------------------------------------------------------------------
 
--define(COPYRIGHT_MESSAGE, "Copyright (C) 2007-2018 Pivotal Software, Inc.").
--define(INFORMATION_MESSAGE, "Licensed under the MPL.  See http://www.rabbitmq.com/").
--define(OTP_MINIMUM, "19.3").
--define(ERTS_MINIMUM, "8.3").
+-define(COPYRIGHT_MESSAGE, "Copyright (c) 2007-2020 VMware, Inc. or its affiliates.").
+-define(INFORMATION_MESSAGE, "Licensed under the MPL 2.0. Website: https://rabbitmq.com").
 
 %% EMPTY_FRAME_SIZE, 8 = 1 + 2 + 4 + 1
 %%  - 1 byte of frame type
@@ -251,6 +207,8 @@
         rabbit_misc:get_env(rabbit, supervisor_shutdown_timeout, infinity)).
 -define(WORKER_WAIT,
         rabbit_misc:get_env(rabbit, worker_shutdown_timeout, 30000)).
+-define(MSG_STORE_WORKER_WAIT,
+        rabbit_misc:get_env(rabbit, msg_store_shutdown_timeout, 600000)).
 
 -define(HIBERNATE_AFTER_MIN,        1000).
 -define(DESIRED_HIBERNATE,         10000).
@@ -271,26 +229,17 @@
 %% Max supported number of priorities for a priority queue.
 -define(MAX_SUPPORTED_PRIORITY, 255).
 
-%% Trying to send a term across a cluster larger than 2^31 bytes will
-%% cause the VM to exit with "Absurdly large distribution output data
-%% buffer". So we limit the max message size to 2^31 - 10^6 bytes (1MB
-%% to allow plenty of leeway for the #basic_message{} and #content{}
-%% wrapping the message body).
--define(MAX_MSG_SIZE, 2147383648).
-
-%% First number is maximum size in bytes before we start to
-%% truncate. The following 4-tuple is:
-%%
-%% 1) Maximum size of printable lists and binaries.
-%% 2) Maximum size of any structural term.
-%% 3) Amount to decrease 1) every time we descend while truncating.
-%% 4) Amount to decrease 2) every time we descend while truncating.
-%%
-%% Whole thing feeds into truncate:log_event/2.
--define(LOG_TRUNC, {100000, {2000, 100, 50, 5}}).
+%% Max message size is hard limited to 512 MiB.
+%% If user configures a greater rabbit.max_message_size,
+%% this value is used instead.
+-define(MAX_MSG_SIZE, 536870912).
 
 -define(store_proc_name(N), rabbit_misc:store_proc_name(?MODULE, N)).
 
 %% For event audit purposes
 -define(INTERNAL_USER, <<"rmq-internal">>).
 -define(UNKNOWN_USER,  <<"unknown">>).
+
+%% Store metadata in the trace files when message tracing is enabled.
+-define(LG_INFO(Info), is_pid(whereis(lg)) andalso (lg ! Info)).
+-define(LG_PROCESS_TYPE(Type), ?LG_INFO(#{process_type => Type})).

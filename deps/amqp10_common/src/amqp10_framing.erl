@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(amqp10_framing).
@@ -23,6 +14,45 @@
 -export([fill_from_list/2, fill_from_map/2]).
 
 -include("amqp10_framing.hrl").
+
+-type amqp10_frame() :: #'v1_0.header'{} |
+#'v1_0.delivery_annotations'{} |
+#'v1_0.message_annotations'{} |
+#'v1_0.properties'{} |
+#'v1_0.application_properties'{} |
+#'v1_0.data'{} |
+#'v1_0.amqp_sequence'{} |
+#'v1_0.amqp_value'{} |
+#'v1_0.footer'{} |
+#'v1_0.received'{} |
+#'v1_0.accepted'{} |
+#'v1_0.rejected'{} |
+#'v1_0.released'{} |
+#'v1_0.modified'{} |
+#'v1_0.source'{} |
+#'v1_0.target'{} |
+#'v1_0.delete_on_close'{} |
+#'v1_0.delete_on_no_links'{} |
+#'v1_0.delete_on_no_messages'{} |
+#'v1_0.delete_on_no_links_or_messages'{} |
+#'v1_0.sasl_mechanisms'{} |
+#'v1_0.sasl_init'{} |
+#'v1_0.sasl_challenge'{} |
+#'v1_0.sasl_response'{} |
+#'v1_0.sasl_outcome'{} |
+#'v1_0.attach'{} |
+#'v1_0.flow'{} |
+#'v1_0.transfer'{} |
+#'v1_0.disposition'{} |
+#'v1_0.detach'{} |
+#'v1_0.end'{} |
+#'v1_0.close'{} |
+#'v1_0.error'{} |
+#'v1_0.coordinator'{} |
+#'v1_0.declare'{} |
+#'v1_0.discharge'{} |
+#'v1_0.declared'{} |
+#'v1_0.transactional_state'{}.
 
 version() ->
     {1, 0, 0}.
@@ -107,6 +137,14 @@ decode(Other) ->
 decode_map(Fields) ->
     [{decode(K), decode(V)} || {K, V} <- Fields].
 
+-spec encode_described(list | map | binary | annotations | '*',
+                       non_neg_integer(),
+                       amqp10_frame()) ->
+    amqp10_binary_generator:amqp10_described().
+encode_described(list, CodeNumber,
+                 #'v1_0.amqp_sequence'{content = Content}) ->
+    {described, {ulong, CodeNumber},
+     {list, lists:map(fun encode/1, Content)}};
 encode_described(list, CodeNumber, Frame) ->
     {described, {ulong, CodeNumber},
      {list, lists:map(fun encode/1, tl(tuple_to_list(Frame)))}};
@@ -134,7 +172,10 @@ encode(X) ->
 encode_bin(X) ->
     amqp10_binary_generator:generate(encode(X)).
 
-decode_bin(X) -> [decode(PerfDesc) || PerfDesc <- decode_bin0(X)].
+
+decode_bin(X) ->
+    [decode(PerfDesc) || PerfDesc <- decode_bin0(X)].
+
 decode_bin0(<<>>) -> [];
 decode_bin0(X)    -> {PerfDesc, Rest} = amqp10_binary_parser:parse(X),
                      [PerfDesc | decode_bin0(Rest)].
@@ -159,10 +200,18 @@ pprint(Other) -> Other.
 encode_decode_test_() ->
     Data = [{{utf8, <<"k">>}, {binary, <<"v">>}}],
     Test = fun(M) -> [M] = decode_bin(iolist_to_binary(encode_bin(M))) end,
-    [fun() -> Test(#'v1_0.application_properties'{content = Data}) end,
+    [
+     fun() -> Test(#'v1_0.application_properties'{content = Data}) end,
      fun() -> Test(#'v1_0.delivery_annotations'{content = Data}) end,
      fun() -> Test(#'v1_0.message_annotations'{content = Data}) end,
-     fun() -> Test(#'v1_0.footer'{content = Data}) end].
+     fun() -> Test(#'v1_0.footer'{content = Data}) end
+    ].
 
+encode_decode_amqp_sequence_test() ->
+    L = [{utf8, <<"k">>},
+         {binary, <<"v">>}],
+    F = #'v1_0.amqp_sequence'{content = L},
+    [F] = decode_bin(iolist_to_binary(encode_bin(F))),
+    ok.
 
 -endif.

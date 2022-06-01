@@ -1,32 +1,41 @@
 %% ====================================================================
 %% @author Gavin M. Roy <gavinmroy@gmail.com>
 %% @copyright 2016, Gavin M. Roy
+%% @copyright 2016-2020 VMware, Inc. or its affiliates.
 %% @headerfile
 %% @private
 %% @doc rabbitmq_aws client library constants and records
 %% @end
 %% ====================================================================
 
--include_lib("ssl/src/ssl_api.hrl").
-
 -define(MIME_AWS_JSON, "application/x-amz-json-1.0").
 -define(SCHEME, https).
 
 -define(DEFAULT_REGION, "us-east-1").
-
 -define(DEFAULT_PROFILE, "default").
--define(INSTANCE_AZ, ["placement", "availability-zone"]).
+
+-define(INSTANCE_AZ, "placement/availability-zone").
 -define(INSTANCE_HOST, "169.254.169.254").
--define(INSTANCE_CONNECT_TIMEOUT, 100).
--define(INSTANCE_CREDENTIALS, ["iam", "security-credentials"]).
--define(INSTANCE_METADATA_BASE, ["latest", "meta-data"]).
+
+% rabbitmq/rabbitmq-peer-discovery-aws#25
+
+% Note: this timeout must not be greater than the default
+% gen_server:call timeout of 5000ms. INSTANCE_HOST is
+% a pseudo-ip that should have good performance, and the
+% data should be returned quickly. Note that `timeout`,
+% when set, is used as the connect and then request timeout
+% by `httpc`
+-define(DEFAULT_HTTP_TIMEOUT, 2250).
+
+-define(INSTANCE_CREDENTIALS, "iam/security-credentials").
+-define(INSTANCE_METADATA_BASE, "latest/meta-data").
 
 -type access_key() :: nonempty_string().
 -type secret_access_key() :: nonempty_string().
 -type expiration() :: calendar:datetime() | undefined.
 -type security_token() :: nonempty_string() | undefined.
 -type region() :: nonempty_string() | undefined.
-
+-type path() :: ssl:path().
 
 -type sc_ok() :: {ok, access_key(), secret_access_key(), expiration(), security_token()}.
 -type sc_error() :: {error, Reason :: atom()}.
@@ -71,7 +80,7 @@
 -type headers() :: [header()].
 -type body() :: string() | binary().
 
--type ssl_options() :: [ssl_option()].
+-type ssl_options() :: [ssl:ssl_option()].
 
 -type http_option() :: {timeout, timeout()} |
                        {connect_timeout, timeout()} |

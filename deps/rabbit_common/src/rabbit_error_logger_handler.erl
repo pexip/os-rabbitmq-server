@@ -1,18 +1,10 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
-%%
+
 -module(rabbit_error_logger_handler).
 
 -behaviour(gen_event).
@@ -21,7 +13,7 @@
 -export([start_link/0, add_handler/0]).
 
 %% gen_event callbacks
--export([init/1, handle_event/2, handle_call/2, 
+-export([init/1, handle_event/2, handle_call/2,
          handle_info/2, terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
@@ -158,7 +150,9 @@ code_change(_OldVsn, State, _Extra) ->
 format({check_dflag_xnc_failed, _What}) ->
     {"  * Remote node uses an incompatible Erlang version ~n", []};
 format({recv_challenge_failed, no_node, Node}) ->
-    {"  * Hostname mismatch: node ~p believes its host is different. Please ensure that hostnames resolve the same way locally and on ~p~n", [Node, Node]};
+    {"  * Node name (or hostname) mismatch: node ~p believes its node name is not ~p but something else.~n"
+     "    All nodes and CLI tools must refer to node ~p using the same name the node itself uses (see its logs to find out what it is)~n",
+     [Node, Node, Node]};
 format({recv_challenge_failed, Error}) ->
     {"  * Distribution failed unexpectedly while waiting for challenge: ~p~n", [Error]};
 format({recv_challenge_ack_failed, bad_cookie}) ->

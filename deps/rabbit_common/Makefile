@@ -3,13 +3,9 @@ PROJECT_DESCRIPTION = Modules shared by rabbitmq-server and rabbitmq-erlang-clie
 
 define PROJECT_APP_EXTRA_KEYS
 %% Hex.pm package informations.
-	{maintainers, [
-	    "RabbitMQ Team <info@rabbitmq.com>",
-	    "Jean-Sebastien Pedron <jean-sebastien@rabbitmq.com>"
-	  ]},
-	{licenses, ["MPL 1.1"]},
+	{licenses, ["MPL-2.0"]},
 	{links, [
-	    {"Website", "http://www.rabbitmq.com/"},
+	    {"Website", "https://www.rabbitmq.com/"},
 	    {"GitHub", "https://github.com/rabbitmq/rabbitmq-common"}
 	  ]},
 	{build_tools, ["make", "rebar3"]},
@@ -19,8 +15,10 @@ define PROJECT_APP_EXTRA_KEYS
 	  ]}
 endef
 
-LOCAL_DEPS = compiler syntax_tools xmerl
-DEPS = lager jsx ranch ranch_proxy_protocol recon
+LOCAL_DEPS = compiler crypto public_key sasl ssl syntax_tools tools xmerl
+DEPS = lager jsx ranch recon credentials_obfuscation
+
+dep_credentials_obfuscation = hex 2.2.0
 
 # FIXME: Use erlang.mk patched for RabbitMQ, while waiting for PRs to be
 # reviewed and merged.
@@ -46,6 +44,8 @@ DEP_PLUGINS = $(PROJECT)/mk/rabbitmq-build.mk \
 	      $(PROJECT)/mk/rabbitmq-tools.mk
 
 WITHOUT = plugins/proper
+
+PLT_APPS += mnesia crypto ssl
 
 include mk/rabbitmq-components.mk
 include erlang.mk

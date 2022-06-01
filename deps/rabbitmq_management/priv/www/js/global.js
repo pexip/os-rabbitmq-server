@@ -19,11 +19,13 @@ var KNOWN_ARGS = {'alternate-exchange':        {'short': 'AE',  'type': 'string'
                   'x-expires':                 {'short': 'Exp', 'type': 'int'},
                   'x-max-length':              {'short': 'Lim', 'type': 'int'},
                   'x-max-length-bytes':        {'short': 'Lim B', 'type': 'int'},
+                  'x-delivery-limit':          {'short': 'DlL', 'type': 'int'},
                   'x-overflow':                {'short': 'Ovfl', 'type': 'string'},
                   'x-dead-letter-exchange':    {'short': 'DLX', 'type': 'string'},
                   'x-dead-letter-routing-key': {'short': 'DLK', 'type': 'string'},
                   'x-queue-master-locator':    {'short': 'ML', 'type': 'string'},
-                  'x-max-priority':            {'short': 'Pri', 'type': 'int'}};
+                  'x-max-priority':            {'short': 'Pri', 'type': 'int'},
+                  'x-single-active-consumer':  {'short': 'SAC', 'type': 'boolean'}};
 
 // Things that are like arguments that we format the same way in listings.
 var IMPLICIT_ARGS = {'durable':         {'short': 'D',    'type': 'boolean'},
@@ -45,19 +47,17 @@ var NAVIGATION = {'Overview':    ['#/',            "management"],
                   'Admin':
                     [{'Users':         ['#/users',              "administrator"],
                       'Virtual Hosts': ['#/vhosts',             "administrator"],
+                      'Feature Flags': ['#/feature-flags',      "administrator"],
                       'Policies':      ['#/policies',           "management"],
-                      'Limits':        ['#/limits',   "management"],
+                      'Limits':        ['#/limits',             "management"],
                       'Cluster':       ['#/cluster-name',       "administrator"]},
                      "management"]
                  };
 
-var CHART_PERIODS = {'60|5':       'Last minute',
-                     '600|5':      'Last ten minutes',
-                     '3600|60':    'Last hour',
-                     '28800|600':  'Last eight hours',
-                     '86400|1800': 'Last day'};
+var CHART_RANGES = {'global': [], 'basic': []};
+var ALL_CHART_RANGES = {};
 
-var COLUMNS =
+var ALL_COLUMNS =
     {'exchanges' :
      {'Overview': [['type',                 'Type',                   true],
                    ['features',             'Features (with policy)', true],
@@ -66,7 +66,8 @@ var COLUMNS =
       'Message rates': [['rate-in',         'rate in',                true],
                         ['rate-out',        'rate out',               true]]},
      'queues' :
-     {'Overview': [['features',             'Features (with policy)', true],
+     {'Overview': [['type',                 'Type',                   true],
+                   ['features',             'Features (with policy)', true],
                    ['features_no_policy',   'Features (no policy)',   false],
                    ['policy',               'Policy',                 false],
                    ['consumers',            'Consumer count',         false],
@@ -97,15 +98,16 @@ var COLUMNS =
                        ['acks-uncommitted', 'Acks uncommitted', false]],
       'Message rates': [['rate-publish',   'publish',            true],
                         ['rate-confirm',   'confirm',            true],
-                        ['rate-return',    'return (mandatory)', false],
+                        ['rate-unroutable-drop',    'unroutable (drop)', true],
+                        ['rate-unroutable-return',    'unroutable (return)', false],
                         ['rate-deliver',   'deliver / get',      true],
                         ['rate-redeliver', 'redelivered',        false],
                         ['rate-ack',       'ack',                true]]},
      'connections':
      {'Overview': [['user',   'User name', true],
                    ['state',  'State',     true]],
-      'Details': [['ssl',            'SSL / TLS',      true],
-                  ['ssl_info',       'SSL Details',    false],
+      'Details': [['ssl',            'TLS',      true],
+                  ['ssl_info',       'TLS details',    false],
                   ['protocol',       'Protocol',       true],
                   ['channels',       'Channels',       true],
                   ['channel_max',    'Channel max',    false],
@@ -118,7 +120,9 @@ var COLUMNS =
                   ['connected_at', 'Connected at', false]]},
 
      'vhosts':
-     {'Overview': [['cluster-state',   'Cluster state',  false]],
+     {'Overview': [['cluster-state',   'Cluster state',  false],
+                   ['description',   'Description',  false],
+                   ['tags',   'Tags',  false]],
       'Messages': [['msgs-ready',      'Ready',          true],
                    ['msgs-unacked',    'Unacknowledged', true],
                    ['msgs-total',      'Total',          true]],
@@ -136,8 +140,37 @@ var COLUMNS =
                   ['info',      'Info',         true],
                   ['reset_stats',     'Reset stats',        true]]}};
 
+var DISABLED_STATS_COLUMNS =
+    {'exchanges' :
+     {'Overview': [['type',                 'Type',                   true],
+                   ['features',             'Features (with policy)', true],
+                   ['features_no_policy',   'Features (no policy)',   false],
+                   ['policy',               'Policy',                 false]]},
+     'queues' :
+     {'Overview': [['type',                 'Type',                   true],
+                   ['features',             'Features (with policy)', true],
+                   ['features_no_policy',   'Features (no policy)',   false],
+                   ['policy',               'Policy',                 false],
+                   ['state',                'State',                  true]],
+      'Messages': [['msgs-ready',      'Ready',          true],
+                   ['msgs-unacked',    'Unacknowledged', true],
+                   ['msgs-ram',        'In memory',      false],
+                   ['msgs-persistent', 'Persistent',     false],
+                   ['msgs-total',      'Total',          true]]},
+     'connections':
+     {'Overview': [['user',   'User name', true],
+                   ['state',  'State',     true]]},
+
+     'vhosts':
+     {'Overview': [['cluster-state',   'Cluster state',  false]]}};
+
+var COLUMNS;
+
 // All help ? popups
 var HELP = {
+    'delivery-limit':
+      'The number of allowed unsuccessful delivery attempts. Once a message has been delivered unsucessfully this many times it will be dropped or dead-lettered, depending on the queue configuration.',
+
     'exchange-auto-delete':
       'If yes, the exchange will delete itself after at least one queue or exchange has been bound to this one, and then all queues or exchanges have been unbound.',
 
@@ -145,40 +178,52 @@ var HELP = {
       'If yes, clients cannot publish to this exchange directly. It can only be used with exchange to exchange bindings.',
 
     'exchange-alternate':
-      'If messages to this exchange cannot otherwise be routed, send them to the alternate exchange named here.<br/>(Sets the "<a target="_blank" href="http://rabbitmq.com/ae.html">alternate-exchange</a>" argument.)',
+      'If messages to this exchange cannot otherwise be routed, send them to the alternate exchange named here.<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/ae.html">alternate-exchange</a>" argument.)',
 
     'queue-message-ttl':
-    'How long a message published to a queue can live before it is discarded (milliseconds).<br/>(Sets the "<a target="_blank" href="http://rabbitmq.com/ttl.html#per-queue-message-ttl">x-message-ttl</a>" argument.)',
+    'How long a message published to a queue can live before it is discarded (milliseconds).<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/ttl.html#per-queue-message-ttl">x-message-ttl</a>" argument.)',
 
     'queue-expires':
-      'How long a queue can be unused for before it is automatically deleted (milliseconds).<br/>(Sets the "<a target="_blank" href="http://rabbitmq.com/ttl.html#queue-ttl">x-expires</a>" argument.)',
+      'How long a queue can be unused for before it is automatically deleted (milliseconds).<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/ttl.html#queue-ttl">x-expires</a>" argument.)',
 
     'queue-max-length':
-      'How many (ready) messages a queue can contain before it starts to drop them from its head.<br/>(Sets the "<a target="_blank" href="http://rabbitmq.com/maxlength.html">x-max-length</a>" argument.)',
+      'How many (ready) messages a queue can contain before it starts to drop them from its head.<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/maxlength.html">x-max-length</a>" argument.)',
 
     'queue-max-length-bytes':
-      'Total body size for ready messages a queue can contain before it starts to drop them from its head.<br/>(Sets the "<a target="_blank" href="http://rabbitmq.com/maxlength.html">x-max-length-bytes</a>" argument.)',
+      'Total body size for ready messages a queue can contain before it starts to drop them from its head.<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/maxlength.html">x-max-length-bytes</a>" argument.)',
+
+    'queue-max-in-memory-length':
+      'How many (ready) messages a quorum queue can contain in memory before it starts storing them on disk only.<br/>(Sets the x-max-in-memory-length argument.)',
+
+    'queue-max-in-memory-bytes':
+      'Total body size for ready messages a quorum queue can contain in memory before it starts storing them on disk only.<br/>(Sets the x-max-in-memory-bytes argument.)',
 
     'queue-auto-delete':
       'If yes, the queue will delete itself after at least one consumer has connected, and then all consumers have disconnected.',
 
     'queue-dead-letter-exchange':
-      'Optional name of an exchange to which messages will be republished if they are rejected or expire.<br/>(Sets the "<a target="_blank" href="http://rabbitmq.com/dlx.html">x-dead-letter-exchange</a>" argument.)',
+      'Optional name of an exchange to which messages will be republished if they are rejected or expire.<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/dlx.html">x-dead-letter-exchange</a>" argument.)',
 
     'queue-dead-letter-routing-key':
-      'Optional replacement routing key to use when a message is dead-lettered. If this is not set, the message\'s original routing key will be used.<br/>(Sets the "<a target="_blank" href="http://rabbitmq.com/dlx.html">x-dead-letter-routing-key</a>" argument.)',
+      'Optional replacement routing key to use when a message is dead-lettered. If this is not set, the message\'s original routing key will be used.<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/dlx.html">x-dead-letter-routing-key</a>" argument.)',
+
+    'queue-single-active-consumer':
+      'If set, makes sure only one consumer at a time consumes from the queue and fails over to another registered consumer in case the active one is cancelled or dies.<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/consumers.html#single-active-consumer">x-single-active-consumer</a>" argument.)',
 
     'queue-max-priority':
-      'Maximum number of priority levels for the queue to support; if not set, the queue will not support message priorities.<br/>(Sets the "<a target="_blank" href="http://rabbitmq.com/priority.html">x-max-priority</a>" argument.)',
+      'Maximum number of priority levels for the queue to support; if not set, the queue will not support message priorities.<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/priority.html">x-max-priority</a>" argument.)',
 
     'queue-lazy':
       'Set the queue into lazy mode, keeping as many messages as possible on disk to reduce RAM usage; if not set, the queue will keep an in-memory cache to deliver messages as fast as possible.<br/>(Sets the "<a target="_blank" href="https://www.rabbitmq.com/lazy-queues.html">x-queue-mode</a>" argument.)',
 
     'queue-overflow':
-      'Sets the <a target="_blank" href="https://www.rabbitmq.com/maxlength.html#overflow-behaviour">queue overflow behaviour</a>. This determines what happens to messages when the maximum length of a queue is reached. Valid values are <code>drop-head</code> or <code>reject-publish</code>.',
+      'Sets the <a target="_blank" href="https://www.rabbitmq.com/maxlength.html#overflow-behaviour">queue overflow behaviour</a>. This determines what happens to messages when the maximum length of a queue is reached. Valid values are <code>drop-head</code>, <code>reject-publish</code> or <code>reject-publish-dlx</code>. The quorum queue type only supports <code>drop-head</code>.',
 
     'queue-master-locator':
        'Set the queue into master location mode, determining the rule by which the queue master is located when declared on a cluster of nodes.<br/>(Sets the "<a target="_blank" href="https://www.rabbitmq.com/ha.html">x-queue-master-locator</a>" argument.)',
+
+    'queue-type':
+       'Set the queue type, determining the type of queue to use: raft-based high availability or classic queue. Valid values are <code>quorum</code> or <code>classic</code>. It defaults to <code>classic<code>. <br/>',
 
     'queue-messages':
       '<p>Message counts.</p><p>Note that "in memory" and "persistent" are not mutually exclusive; persistent messages can be in memory as well as on disc, and transient messages can be paged out if memory is tight. Non-durable queues will consider all messages to be transient.</p>',
@@ -201,7 +246,7 @@ var HELP = {
       'Only users within the internal RabbitMQ database are shown here. Other users (e.g. those authenticated over LDAP) will not appear.',
 
     'export-definitions':
-    'The definitions consist of users, virtual hosts, permissions, parameters, exchanges, queues and bindings. They do not include the contents of queues or the cluster name. Exclusive queues will not be exported.',
+    'The definitions consist of users, virtual hosts, permissions, parameters, exchanges, queues, policies and bindings. They do not include the contents of queues. Exclusive queues will not be exported.',
 
     'export-definitions-vhost':
     'The definitions exported for a single virtual host consist of exchanges, queues, bindings and policies.',
@@ -221,9 +266,9 @@ var HELP = {
     'channel-mode':
       'Channel guarantee mode. Can be one of the following, or neither:<br/> \
       <dl> \
-        <dt><abbr title="Confirm">C</abbr> &ndash; <a target="_blank" href="http://www.rabbitmq.com/confirms.html">confirm</a></dt> \
+        <dt><abbr title="Confirm">C</abbr> &ndash; <a target="_blank" href="https://www.rabbitmq.com/confirms.html">confirm</a></dt> \
         <dd>Channel will send streaming publish confirmations.</dd> \
-        <dt><abbr title="Transactional">T</abbr> &ndash; <a target="_blank" href="http://www.rabbitmq.com/amqp-0-9-1-reference.html#class.tx">transactional</a></dt> \
+        <dt><abbr title="Transactional">T</abbr> &ndash; <a target="_blank" href="https://www.rabbitmq.com/amqp-0-9-1-reference.html#class.tx">transactional</a></dt> \
         <dd>Channel is transactional.</dd> \
       </dl>',
 
@@ -249,7 +294,7 @@ var HELP = {
       the limit on Windows, set the ERL_MAX_PORTS environment variable</p> \
       <p>To report used file handles on Windows, handle.exe from \
       sysinternals must be installed in your path. You can download it \
-      <a target="_blank" href="http://technet.microsoft.com/en-us/sysinternals/bb896655">here</a>.</p>',
+      <a target="_blank" href="https://technet.microsoft.com/en-us/sysinternals/bb896655">here</a>.</p>',
 
     'socket-descriptors':
       'The network sockets count and limit managed by RabbitMQ.<br/> \
@@ -257,7 +302,7 @@ var HELP = {
       network connections.',
 
     'memory-alarm':
-      '<p>The <a target="_blank" href="http://www.rabbitmq.com/memory.html#memsup">memory \
+      '<p>The <a target="_blank" href="https://www.rabbitmq.com/memory.html#memsup">memory \
       alarm</a> for this node has gone off. It will block \
       incoming network traffic until the memory usage drops below \
       the watermark.</p>\
@@ -265,7 +310,7 @@ var HELP = {
       in relation to how much memory is used in total. </p>',
 
     'disk-free-alarm':
-      'The <a target="_blank" href="http://www.rabbitmq.com/memory.html#diskfreesup">disk \
+      'The <a target="_blank" href="https://www.rabbitmq.com/memory.html#diskfreesup">disk \
       free space alarm</a> for this node has gone off. It will block \
       incoming network traffic until the amount of free space exceeds \
       the limit.',
@@ -314,7 +359,7 @@ var HELP = {
 
     'user-tags':
       'Comma-separated list of tags to apply to the user. Currently \
-       <a target="_blank" href="http://www.rabbitmq.com/management.html#permissions">supported \
+       <a target="_blank" href="https://www.rabbitmq.com/management.html#permissions">supported \
        by the management plugin</a>: \
       <dl> \
         <dt>management</dt> \
@@ -372,6 +417,8 @@ var HELP = {
         <dd>Rate at which messages requiring acknowledgement are being delivered in response to basic.get.</dd>\
         <dt>Get (auto ack)</dt>\
         <dd>Rate at which messages not requiring acknowledgement are being delivered in response to basic.get.</dd>\
+        <dt>Get (empty)</dt>\
+        <dd>Rate at which empty queues are hit in response to basic.get.</dd>\
         <dt>Return</dt>\
         <dd>Rate at which basic.return is sent to publishers for unroutable messages published with the \'mandatory\' flag set.</dd>\
         <dt>Disk read</dt>\
@@ -385,15 +432,15 @@ var HELP = {
         statistics.\
       </p>',
 
-    'disk-monitoring-no-watermark' : 'There is no <a target="_blank" href="http://www.rabbitmq.com/memory.html#diskfreesup">disk space low watermark</a> set. RabbitMQ will not take any action to avoid running out of disk space.',
+    'disk-monitoring-no-watermark' : 'There is no <a target="_blank" href="https://www.rabbitmq.com/memory.html#diskfreesup">disk space low watermark</a> set. RabbitMQ will not take any action to avoid running out of disk space.',
 
     'resource-counts' : 'Shows total number of objects for all virtual hosts the current user has access to.',
 
-    'memory-use' : '<p>Note that the memory details shown here are only updated on request - they could be too expensive to calculate every few seconds on a busy server.</p><p><a target="_blank" href="http://www.rabbitmq.com/memory-use.html">Read more</a> on memory use.</p>',
+    'memory-use' : '<p>Note that the memory details shown here are only updated on request - they could be too expensive to calculate every few seconds on a busy server.</p><p><a target="_blank" href="https://www.rabbitmq.com/memory-use.html">Read more</a> on memory use.</p>',
 
-    'memory-calculation-strategy-breakdown' : '<p>The setting <code>vm_memory_calculation_strategy</code> defines which of the below memory values is used to check if the memory usage reaches the watermark or paging to disk is required.</p><p><a target="_blank" href="http://www.rabbitmq.com/memory-use.html">Read more</a> on memory use.</p>',
+    'memory-calculation-strategy-breakdown' : '<p>The setting <code>vm_memory_calculation_strategy</code> defines which of the below memory values is used to check if the memory usage reaches the watermark or paging to disk is required.</p><p><a target="_blank" href="https://www.rabbitmq.com/memory-use.html">Read more</a> on memory use.</p>',
 
-    'memory-calculation-strategy' : '<p>This value can be calculated using different strategies the <code>vm_memory_calculation_strategy</code> config setting.</p><p><a target="_blank" href="http://www.rabbitmq.com/memory-use.html">Read more</a> on memory use.</p>',
+    'memory-calculation-strategy' : '<p>This value can be calculated using different strategies the <code>vm_memory_calculation_strategy</code> config setting.</p><p><a target="_blank" href="https://www.rabbitmq.com/memory-use.html">Read more</a> on memory use.</p>',
 
     'binary-use' : '<p>Binary accounting is not exact; binaries are shared between processes (and thus the same binary might be counted in more than one section), and the VM does not allow us to track binaries that are not associated with processes (so some binary use might not appear at all).</p>',
 
@@ -403,11 +450,11 @@ var HELP = {
     if <code>ha-mode</code> is <code>exactly</code>, or a list\
     of strings if <code>ha-mode</code> is <code>nodes</code>.',
 
-    'policy-ha-sync-mode' : 'One of <code>manual</code> or <code>automatic</code>. <a target="_blank" href="http://www.rabbitmq.com/ha.html#unsynchronised-mirrors">Learn more</a>',
+    'policy-ha-sync-mode' : 'One of <code>manual</code> or <code>automatic</code>. <a target="_blank" href="https://www.rabbitmq.com/ha.html#unsynchronised-mirrors">Learn more</a>',
 
-    'policy-ha-promote-on-shutdown' : 'One of <code>when-synced</code> or <code>always</code>. <a target="_blank" href="http://www.rabbitmq.com/ha.html#unsynchronised-mirrors">Learn more</a>',
+    'policy-ha-promote-on-shutdown' : 'One of <code>when-synced</code> or <code>always</code>. <a target="_blank" href="https://www.rabbitmq.com/ha.html#unsynchronised-mirrors">Learn more</a>',
 
-    'policy-ha-promote-on-failure' : 'One of <code>when-synced</code> or <code>always</code>. <a target="_blank" href="http://www.rabbitmq.com/ha.html#unsynchronised-mirrors">Learn more</a>',
+    'policy-ha-promote-on-failure' : 'One of <code>when-synced</code> or <code>always</code>. <a target="_blank" href="https://www.rabbitmq.com/ha.html#unsynchronised-mirrors">Learn more</a>',
 
     'policy-federation-upstream-set' :
     'A string; only if the federation plugin is enabled. Chooses the name of a set of upstreams to use with federation, or "all" to use all upstreams. Incompatible with <code>federation-upstream</code>.',
@@ -415,19 +462,26 @@ var HELP = {
     'policy-federation-upstream' :
     'A string; only if the federation plugin is enabled. Chooses a specific upstream set to use for federation. Incompatible with <code>federation-upstream-set</code>.',
 
-    'handle-exe' : 'In order to monitor the number of file descriptors in use on Windows, RabbitMQ needs the <a href="http://technet.microsoft.com/en-us/sysinternals/bb896655" target="_blank">handle.exe command line tool from Microsoft</a>. Download it and place it in the path (e.g. in C:\Windows).',
+    'handle-exe' : 'In order to monitor the number of file descriptors in use on Windows, RabbitMQ needs the <a href="https://technet.microsoft.com/en-us/sysinternals/bb896655" target="_blank">handle.exe command line tool from Microsoft</a>. Download it and place it in the path (e.g. in C:\Windows).',
 
     'filter-regex' :
     'Whether to enable regular expression matching. Both string literals \
-    and regular expressions are matched in a case-insensitive manner.<br/></br/> \
+    and regular expressions are matched in a case-insensitive manner.<br/><br/> \
     (<a href="https://developer.mozilla.org/en/docs/Web/JavaScript/Guide/Regular_Expressions" target="_blank">Regular expression reference</a>)',
+
+    'consumer-active' :
+    'Whether the consumer is active or not, i.e. whether the consumer can get messages from the queue. \
+    When single active consumer is enabled for the queue, only one consumer at a time is active. \
+    When single active consumer is disabled for the queue, consumers are active by default. \
+    For a quorum queue, a consumer can be inactive because its owning node is suspected down. <br/><br/> \
+    (<a href="https://www.rabbitmq.com/consumers.html#active-consumer" target="_blank">Documentation</a>)',
 
     'plugins' :
     'Note that only plugins which are both explicitly enabled and running are shown here.',
 
     'io-operations':
     'Rate of I/O operations. Only operations performed by the message \
-      persister are shown here (e.g. metadata changes in Mnesia or writes \
+      persister are shown here (e.g. changes in the schema data store or writes \
       to the log files are not shown).\
       <dl>\
         <dt>Read</dt>\
@@ -438,30 +492,30 @@ var HELP = {
         <dd>Rate at which the broker switches position while reading or \
          writing to disk.</dd>\
         <dt>Sync</dt>\
-        <dd>Rate at which the broker invokes <code>fsync()</code> to ensure \
+        <dd>Rate at which the node invokes <code>fsync()</code> to ensure \
          data is flushed to disk.</dd>\
         <dt>Reopen</dt>\
-        <dd>Rate at which the broker recycles file handles in order to support \
+        <dd>Rate at which the node recycles file handles in order to support \
          more queues than it has file handles. If this operation is occurring \
          frequently you may get a performance boost from increasing the number \
          of file handles available.</dd>\
       </dl>',
 
     'mnesia-transactions':
-    'Rate at which Mnesia transactions are initiated on this node (this node \
-     will also take part in Mnesia transactions initiated on other nodes).\
+    'Rate at which schema data store transactions are initiated on this node (this node \
+     will also take part in the transactions initiated on other nodes).\
       <dl>\
         <dt>RAM only</dt>\
-        <dd>Rate at which RAM-only transactions take place (e.g. creation / \
+        <dd>Rate at which RAM-only schema data store transactions take place (e.g. creation or \
             deletion of transient queues).</dd>\
         <dt>Disk</dt>\
-        <dd>Rate at which disk (and RAM) transactions take place (.e.g \
-            creation / deletion of durable queues).</dd>\
+        <dd>Rate at which all schema data store transactions take place (e.g. \
+            creation or deletion of durable queues).</dd>\
       </dl>',
 
     'persister-operations-msg':
     'Rate at which per-message persister operations take place on this node. See \
-     <a href="http://www.rabbitmq.com/persistence-conf.html" target="_blank">here</a> \
+     <a href="https://www.rabbitmq.com/persistence-conf.html" target="_blank">here</a> \
      for more information on the persister. \
       <dl>\
         <dt>QI Journal</dt>\
@@ -475,7 +529,7 @@ var HELP = {
 
     'persister-operations-bulk':
     'Rate at which whole-file persister operations take place on this node. See \
-     <a href="http://www.rabbitmq.com/persistence-conf.html" target="_blank">here</a> \
+     <a href="https://www.rabbitmq.com/persistence-conf.html" target="_blank">here</a> \
      for more information on the persister. \
       <dl>\
         <dt>QI Read</dt>\
@@ -494,7 +548,34 @@ var HELP = {
     'Rate at which runtime context switching takes place on this node.',
 
     'process-reductions':
-    'Rate at which reductions take place on this process.'
+    'Rate at which reductions take place on this process.',
+
+    'connection-operations':
+    ' <dl>\
+        <dt>Created</dt>\
+        <dd>Rate at which connections are created.</dd>\
+        <dt>Closed</dt>\
+        <dd>Rate at which connections are closed.</dd>\
+      </dl> ',
+
+    'channel-operations':
+    ' <dl>\
+        <dt>Created</dt>\
+        <dd>Rate at which channels are created.</dd>\
+        <dt>Closed</dt>\
+        <dd>Rate at which channels are closed.</dd>\
+      </dl> ',
+
+    'queue-operations':
+    ' <dl>\
+        <dt>Declared</dt>\
+        <dd>Rate at which queues are declared by clients.</dd>\
+        <dt>Created</dt>\
+        <dd>Rate at which queues are created. Declaring a queue that already exists counts for a "Declared" event, but not for a "Created" event. </dd>\
+        <dt>Deleted</dt>\
+        <dd>Rate at which queues are deleted.</dd>\
+     </dl> '
+
 };
 
 ///////////////////////////////////////////////////////////////////////////
@@ -510,7 +591,9 @@ var is_user_policymaker;         // ...user is not a policymaker
 var user_monitor;                // ...user cannot monitor
 var nodes_interesting;           // ...we are not in a cluster
 var vhosts_interesting;          // ...there is only one vhost
+var queue_type;
 var rabbit_versions_interesting; // ...all cluster nodes run the same version
+var disable_stats;               // ...disable all stats, management only mode
 
 // Extensions write to this, the dispatcher maker reads it
 var dispatcher_modules = [];
@@ -548,8 +631,13 @@ function setup_global_vars() {
       'User ' + (user_administrator ?  '<a href="#/users/' + user_name + '">' + user_name + '</a>' : user_name)
     );
 
+    var product = overview.rabbitmq_version;
+    if (overview.product_name && overview.product_version) {
+        product = overview.product_name + ' ' + overview.product_version;
+    }
+
     $('#versions').html(
-      '<abbr title="Available exchange types: ' + exchange_types.join(", ") + '">' + fmt_escape_html(overview.rabbitmq_version) + '</abbr>' +
+      '<abbr title="Available exchange types: ' + exchange_types.join(", ") + '">' + fmt_escape_html(product) + '</abbr>' +
       '<abbr title="' + fmt_escape_html(overview.erlang_full_version) + '">Erlang ' + fmt_escape_html(overview.erlang_version) + '</abbr>'
     );
     nodes_interesting = false;
@@ -569,8 +657,56 @@ function setup_global_vars() {
         }
     }
     vhosts_interesting = JSON.parse(sync_get('/vhosts')).length > 1;
+
+    queue_type = "classic";
     current_vhost = get_pref('vhost');
     exchange_types = overview.exchange_types;
+
+    disable_stats = overview.disable_stats;
+    enable_queue_totals = overview.enable_queue_totals;
+    COLUMNS = disable_stats?DISABLED_STATS_COLUMNS:ALL_COLUMNS;
+    
+    setup_chart_ranges(overview.sample_retention_policies);
+}
+
+function setup_chart_ranges(srp) {
+    var range_types = ['global', 'basic'];
+    var default_ranges = {
+        60:    ['60|5', 'Last minute'],
+        600:   ['600|5', 'Last ten minutes'],
+        3600:  ['3600|60', 'Last hour'],
+        28800: ['28800|600', 'Last eight hours'],
+        86400: ['86400|1800', 'Last day']
+    };
+
+    for (var range in default_ranges) {
+        var data = default_ranges[range];
+        var range = data[0];
+        var desc = data[1];
+        ALL_CHART_RANGES[range] = desc;
+    }
+
+    for (var i = 0; i < range_types.length; ++i) {
+        var range_type = range_types[i];
+        if (srp.hasOwnProperty(range_type)) {
+            var srp_range_types = srp[range_type];
+            var last_minute_added = false;
+            for (var j = 0; j < srp_range_types.length; ++j) {
+                var srp_range = srp_range_types[j];
+                if (default_ranges.hasOwnProperty(srp_range)) {
+                    if (srp_range === 60) {
+                        last_minute_added = true;
+                    }
+                    var v = default_ranges[srp_range];
+                    CHART_RANGES[range_type].push(v);
+                }
+            }
+            if (!last_minute_added) {
+                var last_minute = default_ranges[60];
+                CHART_RANGES[range_type].unshift(last_minute);
+            }
+        }
+    }
 }
 
 function expand_user_tags(tags) {
@@ -641,3 +777,7 @@ var chart_data = {};
 // whenever a UI requests a page that doesn't exist
 // because things were deleted between refreshes
 var last_page_out_of_range_error = 0;
+
+var enable_uaa;
+var uaa_client_id;
+var uaa_location;

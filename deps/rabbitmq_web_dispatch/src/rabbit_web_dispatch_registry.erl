@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_web_dispatch_registry).
@@ -98,16 +89,22 @@ handle_call({add, Name, Listener, Selector, Handler, Link = {_, Desc}}, _From,
 
 handle_call({remove, Name}, _From,
             undefined) ->
-    Listener = listener_by_name(Name),
-    {ok, {Selectors, Fallback}} = lookup_dispatch(Listener),
-    Selectors1 = lists:keydelete(Name, 1, Selectors),
-    set_dispatch(Listener, Selectors1, Fallback),
-    case Selectors1 of
-        [] -> rabbit_web_dispatch_sup:stop_listener(Listener),
-              listener_stopped(Listener);
-        _  -> ok
-    end,
-    {reply, ok, undefined};
+    case listener_by_name(Name) of
+        {error, not_found} ->
+            rabbit_log:warning("HTTP listener registry could not find context ~p",
+                               [Name]),
+            {reply, ok, undefined};
+        {ok, Listener} ->
+            {ok, {Selectors, Fallback}} = lookup_dispatch(Listener),
+            Selectors1 = lists:keydelete(Name, 1, Selectors),
+            set_dispatch(Listener, Selectors1, Fallback),
+            case Selectors1 of
+                [] -> rabbit_web_dispatch_sup:stop_listener(Listener),
+                      listener_stopped(Listener);
+                _  -> ok
+            end,
+            {reply, ok, undefined}
+    end;
 
 handle_call({set_fallback, Listener, FallbackHandler}, _From,
             undefined) ->
@@ -150,10 +147,15 @@ listener_stopped(Listener) ->
     ok.
 
 listener_info(Listener) ->
-    Protocol = case pget(ssl, Listener) of
-        true -> https;
-        _    -> http
-    end,
+    Protocol = case pget(protocol, Listener) of
+                   undefined ->
+                       case pget(ssl, Listener) of
+                           true -> https;
+                           _    -> http
+                       end;
+                   P ->
+                       P
+               end,
     Port = pget(port, Listener),
     [{Protocol, IPAddress, Port}
      || {IPAddress, _Port, _Family}
@@ -184,10 +186,11 @@ list() ->
         {_P, Listener, Selectors, _F} <- ets:tab2list(?ETS),
         {_N, _S, _H, {Path, Desc}} <- Selectors].
 
+-spec listener_by_name(atom()) -> {ok, term()} | {error, not_found}.
 listener_by_name(Name) ->
     case [L || {_P, L, S, _F} <- ets:tab2list(?ETS), contains_name(Name, S)] of
-        [Listener] -> Listener;
-        []         -> exit({not_found, Name})
+        [Listener] -> {ok, Listener};
+        []         -> {error, not_found}
     end.
 
 contains_name(Name, Selectors) ->

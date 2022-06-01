@@ -3,7 +3,7 @@
 REM  The contents of this file are subject to the Mozilla Public License
 REM  Version 1.1 (the "License"); you may not use this file except in
 REM  compliance with the License. You may obtain a copy of the License
-REM  at http://www.mozilla.org/MPL/
+REM  at https://www.mozilla.org/MPL/
 REM
 REM  Software distributed under the License is distributed on an "AS IS"
 REM  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
@@ -13,7 +13,7 @@ REM
 REM  The Original Code is RabbitMQ.
 REM
 REM  The Initial Developer of the Original Code is GoPivotal, Inc.
-REM  Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+REM  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 REM
 
 setlocal
@@ -51,11 +51,15 @@ if not defined ERL_CRASH_DUMP_SECONDS (
 !RABBITMQ_CTL_ERL_ARGS! ^
 -kernel inet_dist_listen_min !RABBITMQ_CTL_DIST_PORT_MIN! ^
 -kernel inet_dist_listen_max !RABBITMQ_CTL_DIST_PORT_MAX! ^
--sasl errlog_type error ^
--mnesia dir \""!RABBITMQ_MNESIA_DIR:\=/!"\" ^
 -run escript start ^
 -escript main rabbitmqctl_escript ^
--extra "%RABBITMQ_HOME%\escript\rabbitmq-plugins" --formatter=plugins !STAR!
+-extra "%RABBITMQ_HOME%\escript\rabbitmq-plugins" !STAR!
+
+if ERRORLEVEL 1 (
+    exit /B %ERRORLEVEL%
+)
+
+EXIT /B 0
 
 endlocal
 endlocal

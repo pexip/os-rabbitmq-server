@@ -1,32 +1,24 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
-%%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2017 Pivotal Software, Inc. All rights reserved.
+%% Copyright (c) 2016-2020 VMware, Inc. or its affiliates. All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_config).
 
 -include("rabbit_peer_discovery.hrl").
 
--export([get/3, config_map/1]).
+-export([get/3, get_integer/3, config_map/1]).
 
 %%
 %% API
 %%
 
 -spec get(Key :: atom(),
-          Mapping :: #{atom() => #peer_discovery_config_entry_meta{}},
+          Mapping :: #{atom() => peer_discovery_config_entry_meta()},
           Config  :: #{atom() => peer_discovery_config_value()}) -> peer_discovery_config_value().
 
 get(Key, Mapping, Config) ->
@@ -36,6 +28,19 @@ get(Key, Mapping, Config) ->
             throw({badkey, Key});
         true  ->
             get_with_entry_meta(Key, maps:get(Key, Mapping), Config)
+    end.
+
+-spec get_integer(Key :: atom(),
+                  Mapping :: #{atom() => peer_discovery_config_entry_meta()},
+                  Config  :: #{atom() => peer_discovery_config_value()}) -> integer().
+
+get_integer(Key, Mapping, Config) ->
+    case maps:is_key(Key, Mapping) of
+        false ->
+            rabbit_log:error("Key ~s is not found in peer discovery config mapping ~p!", [Key, Mapping]),
+            throw({badkey, Key});
+        true  ->
+            get_integer_with_entry_meta(Key, maps:get(Key, Mapping), Config)
     end.
 
 -spec config_map(atom()) -> #{atom() => peer_discovery_config_value()}.
@@ -63,6 +68,15 @@ get_with_entry_meta(Key, #peer_discovery_config_entry_meta{env_variable = EV,
                                                            type    = Type}, Map) ->
     normalize(Type, get_from_env_variable_or_map(Map, EV, Key, Default)).
 
+-spec get_integer_with_entry_meta(Key       :: atom(),
+                                  EntryMeta :: #peer_discovery_config_entry_meta{},
+                                  Map       :: #{atom() => peer_discovery_config_value()}) -> integer().
+
+get_integer_with_entry_meta(Key, #peer_discovery_config_entry_meta{env_variable = EV,
+                                                                  default_value = Default,
+                                                                  type    = Type}, Map) ->
+    normalize(Type, get_integer_from_env_variable_or_map(Map, EV, Key, Default)).
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -78,6 +92,16 @@ get_with_entry_meta(Key, #peer_discovery_config_entry_meta{env_variable = EV,
 get_from_env_variable_or_map(Map, OSKey, AppKey, Default) ->
   case rabbit_peer_discovery_util:getenv(OSKey) of
     false -> maps:get(AppKey, Map, Default);
+    Value -> Value
+  end.
+
+-spec get_integer_from_env_variable_or_map(Map :: map(), OSKey :: string(), AppKey :: atom(),
+                                           Default :: integer())
+                                          -> integer().
+get_integer_from_env_variable_or_map(Map, OSKey, AppKey, Default) ->
+  case rabbit_peer_discovery_util:getenv(OSKey) of
+    false -> maps:get(AppKey, Map, Default);
+    ""    -> Default;
     Value -> Value
   end.
 

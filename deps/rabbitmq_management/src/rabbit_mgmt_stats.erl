@@ -1,17 +1,8 @@
-%%   The contents of this file are subject to the Mozilla Public License
-%%   Version 1.1 (the "License"); you may not use this file except in
-%%   compliance with the License. You may obtain a copy of the License at
-%%   http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Software distributed under the License is distributed on an "AS IS"
-%%   basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%%   License for the specific language governing rights and limitations
-%%   under the License.
-%%
-%%   The Original Code is RabbitMQ Management Plugin.
-%%
-%%   The Initial Developer of the Original Code is GoPivotal, Inc.
-%%   Copyright (c) 2010-2012 GoPivotal, Inc.  All rights reserved.
+%% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_stats).
@@ -107,14 +98,19 @@ format_samples(Samples, ESamples, ETotal) ->
             append_full_sample(TS, Sample, SamplesAcc, TotalsAcc)
         end, {ESamples, ETotal}, Samples).
 
+%% Ts for "totals", Ss for "samples", Vs for "values"
+%%
 %% connection_stats_coarse_conn_stats, channel_stats_fine_stats,
-%% vhost_stats_fine_stats, channel_exchange_stats_fine_stats,
-%% queue_msg_stats, vhost_msg_stats
+%% vhost_stats_fine_stats, queue_msg_stats, vhost_msg_stats
 append_full_sample(TS, {V1, V2, V3}, {S1, S2, S3}, {T1, T2, T3}) ->
     {{append_sample(V1, TS, S1), append_sample(V2, TS, S2), append_sample(V3, TS, S3)},
      {V1 + T1, V2 + T2, V3 + T3}};
-%% channel_queue_stats_deliver_stats, queue_stats_deliver_stats,
-%% vhost_stats_deliver_stats, channel_stats_deliver_stats
+%% channel_exchange_stats_fine_stats
+append_full_sample(TS, {V1, V2, V3, V4}, {S1, S2, S3, S4}, {T1, T2, T3, T4}) ->
+   {{append_sample(V1, TS, S1), append_sample(V2, TS, S2), append_sample(V3, TS, S3),
+     append_sample(V4, TS, S4)},
+    {V1 + T1, V2 + T2, V3 + T3, V4 + T4}};
+%% connection_churn_rates
 append_full_sample(TS, {V1, V2, V3, V4, V5, V6, V7},
            {S1, S2, S3, S4, S5, S6, S7},
            {T1, T2, T3, T4, T5, T6, T7}) ->
@@ -123,10 +119,8 @@ append_full_sample(TS, {V1, V2, V3, V4, V5, V6, V7},
       append_sample(V5, TS, S5), append_sample(V6, TS, S6),
       append_sample(V7, TS, S7)},
      {V1 + T1, V2 + T2, V3 + T3, V4 + T4, V5 + T5, V6 + T6, V7 + T7}};
-%% channel_process_stats, queue_stats_publish, queue_exchange_stats_publish,
-%% exchange_stats_publish_out, exchange_stats_publish_in, queue_process_stats
-append_full_sample(TS, {V1}, {S1}, {T1}) ->
-    {{append_sample(V1, TS, S1)}, {V1 + T1}};
+%% channel_queue_stats_deliver_stats, queue_stats_deliver_stats,
+%% vhost_stats_deliver_stats, channel_stats_deliver_stats
 %% node_coarse_stats
 append_full_sample(TS, {V1, V2, V3, V4, V5, V6, V7, V8},
            {S1, S2, S3, S4, S5, S6, S7, S8},
@@ -136,6 +130,10 @@ append_full_sample(TS, {V1, V2, V3, V4, V5, V6, V7, V8},
       append_sample(V5, TS, S5), append_sample(V6, TS, S6),
       append_sample(V7, TS, S7), append_sample(V8, TS, S8)},
      {V1 + T1, V2 + T2, V3 + T3, V4 + T4, V5 + T5, V6 + T6, V7 + T7, V8 + T8}};
+%% channel_process_stats, queue_stats_publish, queue_exchange_stats_publish,
+%% exchange_stats_publish_out, exchange_stats_publish_in, queue_process_stats
+append_full_sample(TS, {V1}, {S1}, {T1}) ->
+    {{append_sample(V1, TS, S1)}, {V1 + T1}};
 %% node_persister_stats
 append_full_sample(TS,
            {V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14,
@@ -188,7 +186,7 @@ format_rate(Type, {TR, TW}, {RR, RW}) when Type =:= vhost_msg_rates;
      {disk_writes, TW},
      {disk_writes_details, [{rate, RW}]}
     ];
-format_rate(Type, {TP, TC, TRe}, {RP, RC, RRe})
+format_rate(Type, {TP, TC, TRe, TDrop}, {RP, RC, RRe, RDrop})
   when Type =:= channel_stats_fine_stats;
        Type =:= vhost_stats_fine_stats;
        Type =:= channel_exchange_stats_fine_stats ->
@@ -198,10 +196,12 @@ format_rate(Type, {TP, TC, TRe}, {RP, RC, RRe})
      {confirm, TC},
      {confirm_details, [{rate, RC}]},
      {return_unroutable, TRe},
-     {return_unroutable_details, [{rate, RRe}]}
+     {return_unroutable_details, [{rate, RRe}]},
+     {drop_unroutable, TDrop},
+     {drop_unroutable_details, [{rate, RDrop}]}
     ];
-format_rate(Type, {TG, TGN, TD, TDN, TR, TA, TDG},
-        {RG, RGN, RD, RDN, RR, RA, RDG})
+format_rate(Type, {TG, TGN, TD, TDN, TR, TA, TDG, TGE},
+        {RG, RGN, RD, RDN, RR, RA, RDG, RGE})
   when Type =:= channel_queue_stats_deliver_stats;
        Type =:= channel_stats_deliver_stats;
        Type =:= vhost_stats_deliver_stats;
@@ -220,7 +220,9 @@ format_rate(Type, {TG, TGN, TD, TDN, TR, TA, TDG},
      {ack, TA},
      {ack_details, [{rate, RA}]},
      {deliver_get, TDG},
-     {deliver_get_details, [{rate, RDG}]}
+     {deliver_get_details, [{rate, RDG}]},
+     {get_empty, TGE},
+     {get_empty_details, [{rate, RGE}]}
     ];
 format_rate(Type, {TR}, {RR}) when Type =:= channel_process_stats;
                    Type =:= queue_process_stats ->
@@ -334,6 +336,24 @@ format_rate(node_node_coarse_stats, {TS, TR}, {RS, RR}) ->
      {send_bytes_details, [{rate, RS}]},
      {recv_bytes, TR},
      {recv_bytes_details, [{rate, RR}]}
+    ];
+format_rate(connection_churn_rates, {TCCr, TCCo, TChCr, TChCo, TQD, TQCr, TQCo},
+            {RCCr, RCCo, RChCr, RChCo, RQD, RQCr, RQCo}) ->
+    [
+     {connection_created, TCCr},
+     {connection_created_details, [{rate, RCCr}]},
+     {connection_closed, TCCo},
+     {connection_closed_details, [{rate, RCCo}]},
+     {channel_created, TChCr},
+     {channel_created_details, [{rate, RChCr}]},
+     {channel_closed, TChCo},
+     {channel_closed_details, [{rate, RChCo}]},
+     {queue_declared, TQD},
+     {queue_declared_details, [{rate, RQD}]},
+     {queue_created, TQCr},
+     {queue_created_details, [{rate, RQCr}]},
+     {queue_deleted, TQCo},
+     {queue_deleted_details, [{rate, RQCo}]}
     ].
 
 format_rate(connection_stats_coarse_conn_stats, {TR, TS, TRe}, {RR, RS, RRe},
@@ -370,8 +390,8 @@ format_rate(Type, {TR, TW}, {RR, RW}, {SR, SW}, {STR, STW}, Length)
      {disk_writes_details, [{rate, RW},
                 {samples, SW}] ++ average(SW, STW, Length)}
     ];
-format_rate(Type, {TP, TC, TRe}, {RP, RC, RRe},
-        {SP, SC, SRe}, {STP, STC, STRe}, Length)
+format_rate(Type, {TP, TC, TRe, TDrop}, {RP, RC, RRe, RDrop},
+        {SP, SC, SRe, SDrop}, {STP, STC, STRe, STDrop}, Length)
   when Type =:= channel_stats_fine_stats;
        Type =:= vhost_stats_fine_stats;
        Type =:= channel_exchange_stats_fine_stats ->
@@ -384,10 +404,15 @@ format_rate(Type, {TP, TC, TRe}, {RP, RC, RRe},
             {samples, SC}] ++ average(SC, STC, Length)},
      {return_unroutable, TRe},
      {return_unroutable_details, [{rate, RRe},
-                  {samples, SRe}] ++ average(SRe, STRe, Length)}
+                  {samples, SRe}] ++ average(SRe, STRe, Length)},
+      {drop_unroutable, TDrop},
+      {drop_unroutable_details, [{rate, RDrop},
+                   {samples, SDrop}] ++ average(SDrop, STDrop, Length)}
     ];
-format_rate(Type, {TG, TGN, TD, TDN, TR, TA, TDG}, {RG, RGN, RD, RDN, RR, RA, RDG},
-        {SG, SGN, SD, SDN, SR, SA, SDG}, {STG, STGN, STD, STDN, STR, STA, STDG},
+format_rate(Type, {TG, TGN, TD, TDN, TR, TA, TDG, TGE},
+            {RG, RGN, RD, RDN, RR, RA, RDG, RGE},
+            {SG, SGN, SD, SDN, SR, SA, SDG, SGE},
+            {STG, STGN, STD, STDN, STR, STA, STDG, STGE},
         Length)
   when Type =:= channel_queue_stats_deliver_stats;
        Type =:= channel_stats_deliver_stats;
@@ -414,7 +439,10 @@ format_rate(Type, {TG, TGN, TD, TDN, TR, TA, TDG}, {RG, RGN, RD, RDN, RR, RA, RD
             {samples, SA}] ++ average(SA, STA, Length)},
      {deliver_get, TDG},
      {deliver_get_details, [{rate, RDG},
-                {samples, SDG}] ++ average(SDG, STDG, Length)}
+                {samples, SDG}] ++ average(SDG, STDG, Length)},
+     {get_empty, TGE},
+     {get_empty_details, [{rate, RGE},
+                          {samples, SGE}] ++ average(SGE, STGE, Length)}
     ];
 format_rate(Type, {TR}, {RR}, {SR}, {STR}, Length)
   when Type =:= channel_process_stats;
@@ -577,6 +605,33 @@ format_rate(node_node_coarse_stats, {TS, TR}, {RS, RR}, {SS, SR}, {STS, STR}, Le
      {recv_bytes, TR},
      {recv_bytes_details, [{rate, RR},
                {samples, SR}] ++ average(SR, STR, Length)}
+    ];
+format_rate(connection_churn_rates, {TCCr, TCCo, TChCr, TChCo, TQD, TQCr, TQCo},
+            {RCCr, RCCo, RChCr, RChCo, RQD, RQCr, RQCo},
+            {SCCr, SCCo, SChCr, SChCo, SQD, SQCr, SQCo},
+            {STCCr, STCCo, STChCr, STChCo, STQD, STQCr, STQCo}, Length) ->
+    [
+     {connection_created, TCCr},
+     {connection_created_details, [{rate, RCCr},
+                                   {samples, SCCr}] ++ average(SCCr, STCCr, Length)},
+     {connection_closed, TCCo},
+     {connection_closed_details, [{rate, RCCo},
+                                  {samples, SCCo}] ++ average(SCCo, STCCo, Length)},
+     {channel_created, TChCr},
+     {channel_created_details, [{rate, RChCr},
+                                {samples, SChCr}] ++ average(SChCr, STChCr, Length)},
+     {channel_closed, TChCo},
+     {channel_closed_details, [{rate, RChCo},
+                               {samples, SChCo}] ++ average(SChCo, STChCo, Length)},
+     {queue_declared, TQD},
+     {queue_declared_details, [{rate, RQD},
+                               {samples, SQD}] ++ average(SQD, STQD, Length)},
+     {queue_created, TQCr},
+     {queue_created_details, [{rate, RQCr},
+                              {samples, SQCr}] ++ average(SQCr, STQCr, Length)},
+     {queue_deleted, TQCo},
+     {queue_deleted_details, [{rate, RQCo},
+                              {samples, SQCo}] ++ average(SQCo, STQCo, Length)}
     ].
 
 avg_time_details(Avg) ->
@@ -611,12 +666,23 @@ rate_from_last_increment(_Total, []) ->
 rate_from_last_increment(Total, [H | _T]) ->
     rate_from_difference(Total, H).
 
-rate_from_difference({TS0, {A0, A1, A2}}, {TS1, {B0, B1, B2}}) ->
-    Interval = TS0 - TS1,
-    {rate(A0, B0, Interval), rate(A1, B1, Interval), rate(A2, B2, Interval)};
 rate_from_difference({TS0, {A0, A1}}, {TS1, {B0, B1}}) ->
     Interval = TS0 - TS1,
     {rate(A0, B0, Interval), rate(A1, B1, Interval)};
+rate_from_difference({TS0, {A0, A1, A2}}, {TS1, {B0, B1, B2}}) ->
+    Interval = TS0 - TS1,
+    {rate(A0, B0, Interval), rate(A1, B1, Interval), rate(A2, B2, Interval)};
+rate_from_difference({TS0, {A0, A1, A2, A3}}, {TS1, {B0, B1, B2, B3}}) ->
+    Interval = TS0 - TS1,
+    {rate(A0, B0, Interval), rate(A1, B1, Interval), rate(A2, B2, Interval), rate(A3, B3, Interval)};
+rate_from_difference({TS0, {A0, A1, A2, A3, A4}}, {TS1, {B0, B1, B2, B3, B4}}) ->
+    Interval = TS0 - TS1,
+    {rate(A0, B0, Interval), rate(A1, B1, Interval), rate(A2, B2, Interval), rate(A3, B3, Interval),
+     rate(A4, B4, Interval)};
+rate_from_difference({TS0, {A0, A1, A2, A3, A4, A5}}, {TS1, {B0, B1, B2, B3, B4, B5}}) ->
+   Interval = TS0 - TS1,
+   {rate(A0, B0, Interval), rate(A1, B1, Interval), rate(A2, B2, Interval), rate(A3, B3, Interval),
+    rate(A4, B4, Interval), rate(A5, B5, Interval)};
 rate_from_difference({TS0, {A0, A1, A2, A3, A4, A5, A6}},
              {TS1, {B0, B1, B2, B3, B4, B5, B6}}) ->
     Interval = TS0 - TS1,

@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is Pivotal Software, Inc.
-%% Copyright (c) 2012, 2013 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2012-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %% -----------------------------------------------------------------------------
 %% Derived from works which were:
 %% Copyright (c) 2002, 2012 Tim Watson (watson.timothy@gmail.com)
@@ -57,8 +48,8 @@ evaluate( { Op, Exp },                     Headers ) -> do_una_op(Op, evaluate(E
 
 evaluate( {'and', Exp1, Exp2 },            Headers ) -> and3(evaluate(Exp1, Headers), evaluate(Exp2, Headers));
 evaluate( {'or', Exp1, Exp2 },             Headers ) -> or3(evaluate(Exp1, Headers), evaluate(Exp2, Headers));
-evaluate( {'like', LHS, Patt },            Headers ) -> isLike(val_of(LHS, Headers), Patt);
-evaluate( {'not_like', LHS, Patt },        Headers ) -> not3(isLike(val_of(LHS, Headers), Patt));
+evaluate( {'like', LHS, Patt, Esc },       Headers ) -> isLike(val_of(LHS, Headers), {Patt, Esc});
+evaluate( {'not_like', LHS, Patt, Esc },   Headers ) -> not3(isLike(val_of(LHS, Headers), {Patt, Esc}));
 evaluate( { Op, Exp, {range, From, To} },  Headers ) -> evaluate({ Op, Exp, From, To }, Headers);
 evaluate( {'between', Exp, From, To},           Hs ) -> between(evaluate(Exp, Hs), evaluate(From, Hs), evaluate(To, Hs));
 evaluate( {'not_between', Exp, From, To},       Hs ) -> not3(between(evaluate(Exp, Hs), evaluate(From, Hs), evaluate(To, Hs)));

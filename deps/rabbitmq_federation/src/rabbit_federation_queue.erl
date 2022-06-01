@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ Federation.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_federation_queue).
@@ -25,6 +16,7 @@
                                [<<"federation">>]}},
                     {enables, recovery}]}).
 
+-include_lib("rabbit/include/amqqueue.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include("rabbit_federation.hrl").
 
@@ -43,7 +35,8 @@ startup(Q) ->
     end,
     ok.
 
-shutdown(Q = #amqqueue{name = QName}) ->
+shutdown(Q) when ?is_amqqueue(Q) ->
+    QName = amqqueue:get_name(Q),
     case active_for(Q) of
         true  -> rabbit_federation_queue_link_sup_sup:stop_child(Q),
                  rabbit_federation_status:remove_exchange_or_queue(QName);
@@ -51,9 +44,11 @@ shutdown(Q = #amqqueue{name = QName}) ->
     end,
     ok.
 
-policy_changed(Q1 = #amqqueue{name = QName}, Q2) ->
+policy_changed(Q1, Q2) when ?is_amqqueue(Q1) ->
+    QName = amqqueue:get_name(Q1),
     case rabbit_amqqueue:lookup(QName) of
-        {ok, #amqqueue{pid = QPid}} ->
+        {ok, Q0} when ?is_amqqueue(Q0) ->
+            QPid = amqqueue:get_pid(Q0),
             rpc:call(node(QPid), rabbit_federation_queue,
                      policy_changed_local, [Q1, Q2]);
         {error, not_found} ->
@@ -64,7 +59,8 @@ policy_changed_local(Q1, Q2) ->
     shutdown(Q1),
     startup(Q2).
 
-active_for(Q = #amqqueue{arguments = Args}) ->
+active_for(Q) ->
+    Args = amqqueue:get_arguments(Q),
     case rabbit_misc:table_lookup(Args, <<"x-internal-purpose">>) of
         {longstr, _} -> false; %% [0]
         _            -> rabbit_federation_upstream:federate(Q)
@@ -102,7 +98,8 @@ active_for(Q = #amqqueue{arguments = Args}) ->
 %% non-empty then it must have no active consumers - in which case it stays
 %% the same from our POV.
 
-consumer_state_changed(#amqqueue{name = QName}, MaxActivePriority, IsEmpty) ->
+consumer_state_changed(Q, MaxActivePriority, IsEmpty) ->
+    QName = amqqueue:get_name(Q),
     case IsEmpty andalso active_unfederated(MaxActivePriority) of
         true  -> rabbit_federation_queue_link:run(QName);
         false -> rabbit_federation_queue_link:pause(QName)

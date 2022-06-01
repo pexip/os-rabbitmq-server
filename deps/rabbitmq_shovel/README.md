@@ -13,11 +13,11 @@ install it separately.
 
 ## Documentation        
 
-See [RabbitMQ shovel plugin](http://www.rabbitmq.com/shovel.html) on rabbitmq.com.
+See [RabbitMQ shovel plugin](https://www.rabbitmq.com/shovel.html) on rabbitmq.com.
 
 
 ## License and Copyright
 
 Released under [the same license as RabbitMQ](https://www.rabbitmq.com/mpl.html).
 
-2007-2017 (c) Pivotal Software Inc.
+2007-2020 (c) 2007-2020 VMware, Inc. or its affiliates.

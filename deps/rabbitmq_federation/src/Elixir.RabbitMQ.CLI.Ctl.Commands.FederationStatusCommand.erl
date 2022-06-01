@@ -1,25 +1,20 @@
-%%  The contents of this file are subject to the Mozilla Public License
-%%  Version 1.1 (the "License"); you may not use this file except in
-%%  compliance with the License. You may obtain a copy of the License
-%%  at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Software distributed under the License is distributed on an "AS IS"
-%%  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%%  the License for the specific language governing rights and
-%%  limitations under the License.
-%%
-%%  The Original Code is RabbitMQ.
-%%
-%%  The Initial Developer of the Original Code is GoPivotal, Inc.
-%%  Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
+%%  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module('Elixir.RabbitMQ.CLI.Ctl.Commands.FederationStatusCommand').
+
+-include("rabbit_federation.hrl").
 
 -behaviour('Elixir.RabbitMQ.CLI.CommandBehaviour').
 
 -export([
          usage/0,
+         usage_additional/0,
+         usage_doc_guides/0,
          flags/0,
          validate/2,
          merge_defaults/2,
@@ -29,7 +24,9 @@
          aliases/0,
          output/2,
          scopes/0,
-         formatter/0
+         formatter/0,
+         help_section/0,
+         description/0
         ]).
 
 
@@ -37,7 +34,21 @@
 %% Callbacks
 %%----------------------------------------------------------------------------
 usage() ->
-     <<"federation_status [--only-down]">>.
+    <<"federation_status [--only-down]">>.
+
+usage_additional() ->
+    [
+      {<<"--only-down">>, <<"only display links that failed or are not currently connected">>}
+    ].
+
+usage_doc_guides() ->
+    [?FEDERATION_GUIDE_URL].
+
+help_section() ->
+    {plugin, federation}.
+
+description() ->
+    <<"Displays federation link status">>.
 
 flags() ->
     [].
@@ -52,10 +63,10 @@ merge_defaults(A, Opts) ->
     {A, maps:merge(#{only_down => false}, Opts)}.
 
 banner(_, #{node := Node, only_down := true}) ->
-    erlang:iolist_to_binary([<<"Listing federation links, which are down on node ">>,
+    erlang:iolist_to_binary([<<"Listing federation links which are down on node ">>,
                              atom_to_binary(Node, utf8), <<"...">>]);
 banner(_, #{node := Node, only_down := false}) ->
-    erlang:iolist_to_binary([<<"Listing federation links of node ">>,
+    erlang:iolist_to_binary([<<"Listing federation links on node ">>,
                              atom_to_binary(Node, utf8), <<"...">>]).
 
 run(_Args, #{node := Node, only_down := OnlyDown}) ->

@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2017 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_misc).
@@ -29,10 +20,9 @@
 -export([method_record_type/1, polite_pause/0, polite_pause/1]).
 -export([die/1, frame_error/2, amqp_error/4, quit/1,
          protocol_error/3, protocol_error/4, protocol_error/1]).
--export([not_found/1, absent/2]).
 -export([type_class/1, assert_args_equivalence/4, assert_field_equivalence/4]).
 -export([dirty_read/1]).
--export([table_lookup/2, set_table_value/4]).
+-export([table_lookup/2, set_table_value/4, amqp_table/1, to_amqp_table/1]).
 -export([r/3, r/2, r_arg/4, rs/1]).
 -export([enable_cover/0, report_cover/0]).
 -export([enable_cover/1, report_cover/1]).
@@ -46,30 +36,34 @@
 -export([execute_mnesia_tx_with_tail/1]).
 -export([ensure_ok/2]).
 -export([tcp_name/3, format_inet_error/1]).
--export([upmap/2, map_in_order/2]).
+-export([upmap/2, map_in_order/2, utf8_safe/1]).
 -export([table_filter/3]).
 -export([dirty_read_all/1, dirty_foreach_key/2, dirty_dump_log/1]).
 -export([format/2, format_many/1, format_stderr/2]).
 -export([unfold/2, ceil/1, queue_fold/3]).
 -export([sort_field_table/1]).
--export([atom_to_binary/1]).
+-export([atom_to_binary/1, parse_bool/1, parse_int/1]).
 -export([pid_to_string/1, string_to_pid/1,
          pid_change_node/2, node_to_fake_pid/1]).
 -export([version_compare/2, version_compare/3]).
--export([version_minor_equivalent/2]).
+-export([version_minor_equivalent/2, strict_version_minor_equivalent/2]).
 -export([dict_cons/3, orddict_cons/3, maps_cons/3, gb_trees_cons/3]).
 -export([gb_trees_fold/3, gb_trees_foreach/2]).
--export([all_module_attributes/1, build_acyclic_graph/3]).
+-export([all_module_attributes/1,
+         rabbitmq_related_module_attributes/1,
+         module_attributes_from_apps/2,
+         build_acyclic_graph/3]).
 -export([const/1]).
 -export([ntoa/1, ntoab/1]).
 -export([is_process_alive/1]).
 -export([pget/2, pget/3, pupdate/3, pget_or_die/2, pmerge/3, pset/3, plmerge/2]).
 -export([format_message_queue/2]).
--export([append_rpc_all_nodes/4]).
+-export([append_rpc_all_nodes/4, append_rpc_all_nodes/5]).
 -export([os_cmd/1]).
 -export([is_os_process_alive/1]).
 -export([gb_sets_difference/2]).
--export([version/0, otp_release/0, platform_and_version/0, otp_system_version/0, which_applications/0]).
+-export([version/0, otp_release/0, platform_and_version/0, otp_system_version/0,
+         rabbitmq_and_erlang_versions/0, which_applications/0]).
 -export([sequence_error/1]).
 -export([check_expiry/1]).
 -export([base64url/1]).
@@ -78,6 +72,7 @@
 -export([get_parent/0]).
 -export([store_proc_name/1, store_proc_name/2, get_proc_name/0]).
 -export([moving_average/4]).
+-export([escape_html_tags/1, b64decode_or_throw/1]).
 -export([get_env/3]).
 -export([get_channel_operation_timeout/0]).
 -export([random/1]).
@@ -129,9 +124,6 @@
             channel_or_connection_exit().
 -spec protocol_error(rabbit_types:amqp_error()) ->
           channel_or_connection_exit().
--spec not_found(rabbit_types:r(atom())) -> rabbit_types:channel_exit().
--spec absent(rabbit_types:amqqueue(), rabbit_amqqueue:absent_reason()) ->
-          rabbit_types:channel_exit().
 -spec type_class(rabbit_framing:amqp_field_type()) -> atom().
 -spec assert_args_equivalence
         (rabbit_framing:amqp_table(), rabbit_framing:amqp_table(),
@@ -206,8 +198,9 @@
 -spec node_to_fake_pid(atom()) -> pid().
 -spec version_compare(string(), string()) -> 'lt' | 'eq' | 'gt'.
 -spec version_compare
-        (string(), string(), ('lt' | 'lte' | 'eq' | 'gte' | 'gt')) -> boolean().
--spec version_minor_equivalent(string(), string()) -> boolean().
+        (rabbit_semver:version_string(), rabbit_semver:version_string(),
+         ('lt' | 'lte' | 'eq' | 'gte' | 'gt')) -> boolean().
+-spec version_minor_equivalent(rabbit_semver:version_string(), rabbit_semver:version_string()) -> boolean().
 -spec dict_cons(any(), any(), dict:dict()) -> dict:dict().
 -spec orddict_cons(any(), any(), orddict:orddict()) -> orddict:orddict().
 -spec gb_trees_cons(any(), any(), gb_trees:tree()) -> gb_trees:tree().
@@ -233,7 +226,6 @@
 -spec plmerge([term()], [term()]) -> [term()].
 -spec pset(term(), term(), [term()]) -> [term()].
 -spec format_message_queue(any(), priority_queue:q()) -> term().
--spec append_rpc_all_nodes([node()], atom(), atom(), [any()]) -> [any()].
 -spec os_cmd(string()) -> string().
 -spec is_os_process_alive(non_neg_integer()) -> boolean().
 -spec gb_sets_difference(gb_sets:set(), gb_sets:set()) -> gb_sets:set().
@@ -241,6 +233,7 @@
 -spec otp_release() -> string().
 -spec otp_system_version() -> string().
 -spec platform_and_version() -> string().
+-spec rabbitmq_and_erlang_versions() -> {string(), string()}.
 -spec which_applications() -> [{atom(), string(), string()}].
 -spec sequence_error([({'error', any()} | any())]) ->
           {'error', any()} | any().
@@ -303,29 +296,6 @@ protocol_error(Name, ExplanationFormat, Params, Method) ->
 protocol_error(#amqp_error{} = Error) ->
     exit(Error).
 
-not_found(R) -> protocol_error(not_found, "no ~s", [rs(R)]).
-
-absent(#amqqueue{name = QueueName, pid = QPid, durable = true}, nodedown) ->
-    %% The assertion of durability is mainly there because we mention
-    %% durability in the error message. That way we will hopefully
-    %% notice if at some future point our logic changes s.t. we get
-    %% here with non-durable queues.
-    protocol_error(not_found,
-                   "home node '~s' of durable ~s is down or inaccessible",
-                   [node(QPid), rs(QueueName)]);
-
-absent(#amqqueue{name = QueueName}, stopped) ->
-    protocol_error(not_found,
-                   "~s process is stopped by supervisor", [rs(QueueName)]);
-
-absent(#amqqueue{name = QueueName}, crashed) ->
-    protocol_error(not_found,
-                   "~s has crashed and failed to restart", [rs(QueueName)]);
-
-absent(#amqqueue{name = QueueName}, timeout) ->
-    protocol_error(not_found,
-                   "failed to perform operation on ~s due to timeout", [rs(QueueName)]).
-
 type_class(byte)          -> int;
 type_class(short)         -> int;
 type_class(signedint)     -> int;
@@ -357,7 +327,16 @@ assert_args_equivalence1(Orig, New, Name, Key) ->
             assert_field_equivalence(OrigTypeVal, NewTypeVal, Name, Key)
     end.
 
+%% Classic queues do not necessarily have an x-queue-type field associated with them
+%% so we special-case that scenario here
+%%
+%% Fixes rabbitmq/rabbitmq-common#341
+%%
 assert_field_equivalence(_Orig, _Orig, _Name, _Key) ->
+    ok;
+assert_field_equivalence(undefined, {longstr, <<"classic">>}, _Name, <<"x-queue-type">>) ->
+    ok;
+assert_field_equivalence({longstr, <<"classic">>}, undefined, _Name, <<"x-queue-type">>) ->
     ok;
 assert_field_equivalence(Orig, New, Name, Key) ->
     equivalence_fail(Orig, New, Name, Key).
@@ -394,6 +373,10 @@ dirty_read({Table, Key}) ->
         []       -> {error, not_found}
     end.
 
+%%
+%% Attribute Tables
+%%
+
 table_lookup(Table, Key) ->
     case lists:keysearch(Key, 1, Table) of
         {value, {_, TypeBin, ValueBin}} -> {TypeBin, ValueBin};
@@ -403,6 +386,49 @@ table_lookup(Table, Key) ->
 set_table_value(Table, Key, Type, Value) ->
     sort_field_table(
       lists:keystore(Key, 1, Table, {Key, Type, Value})).
+
+to_amqp_table(M) when is_map(M) ->
+    lists:reverse(maps:fold(fun(K, V, Acc) -> [to_amqp_table_row(K, V)|Acc] end,
+                            [], M));
+to_amqp_table(L) when is_list(L) ->
+    L.
+
+to_amqp_table_row(K, V) ->
+    {T, V2} = type_val(V),
+    {K, T, V2}.
+
+to_amqp_array(L) ->
+    [type_val(I) || I <- L].
+
+type_val(M) when is_map(M)     -> {table,   to_amqp_table(M)};
+type_val(L) when is_list(L)    -> {array,   to_amqp_array(L)};
+type_val(X) when is_binary(X)  -> {longstr, X};
+type_val(X) when is_integer(X) -> {long,    X};
+type_val(X) when is_number(X)  -> {double,  X};
+type_val(true)                 -> {bool, true};
+type_val(false)                -> {bool, false};
+type_val(null)                 -> throw({error, null_not_allowed});
+type_val(X)                    -> throw({error, {unhandled_type, X}}).
+
+amqp_table(unknown)   -> unknown;
+amqp_table(undefined) -> amqp_table([]);
+amqp_table([])        -> #{};
+amqp_table(#{})       -> #{};
+amqp_table(Table)     -> maps:from_list([{Name, amqp_value(Type, Value)} ||
+                                            {Name, Type, Value} <- Table]).
+
+amqp_value(array, Vs)                  -> [amqp_value(T, V) || {T, V} <- Vs];
+amqp_value(table, V)                   -> amqp_table(V);
+amqp_value(decimal, {Before, After})   ->
+    erlang:list_to_float(
+      lists:flatten(io_lib:format("~p.~p", [Before, After])));
+amqp_value(_Type, V) when is_binary(V) -> utf8_safe(V);
+amqp_value(_Type, V)                   -> V.
+
+
+%%
+%% Resources
+%%
 
 r(#resource{virtual_host = VHostPath}, Kind, Name) ->
     #resource{virtual_host = VHostPath, kind = Kind, name = Name};
@@ -595,8 +621,33 @@ format_inet_error0(address) -> "cannot connect to host/port";
 format_inet_error0(timeout) -> "timed out";
 format_inet_error0(Error)   -> inet:format_error(Error).
 
+%% base64:decode throws lots of weird errors. Catch and convert to one
+%% that will cause a bad_request.
+b64decode_or_throw(B64) ->
+    try
+        base64:decode(B64)
+    catch error:_ ->
+            throw({error, {not_base64, B64}})
+    end.
+
+utf8_safe(V) ->
+    try
+        _ = xmerl_ucs:from_utf8(V),
+        V
+    catch exit:{ucs, _} ->
+            Enc = split_lines(base64:encode(V)),
+            <<"Not UTF-8, base64 is: ", Enc/binary>>
+    end.
+
+%% MIME enforces a limit on line length of base 64-encoded data to 76 characters.
+split_lines(<<Text:76/binary, Rest/binary>>) ->
+    <<Text/binary, $\n, (split_lines(Rest))/binary>>;
+split_lines(Text) ->
+    Text.
+
+
 %% This is a modified version of Luke Gorrie's pmap -
-%% http://lukego.livejournal.com/6753.html - that doesn't care about
+%% https://lukego.livejournal.com/6753.html - that doesn't care about
 %% the order in which results are received.
 %%
 %% WARNING: This is is deliberately lightweight rather than robust -- if F
@@ -687,15 +738,35 @@ ceil(N) ->
         false -> 1 + T
     end.
 
+parse_bool(<<"true">>)  -> true;
+parse_bool(<<"false">>) -> false;
+parse_bool(true)        -> true;
+parse_bool(false)       -> false;
+parse_bool(undefined)   -> undefined;
+parse_bool(V)           -> throw({error, {not_boolean, V}}).
+
+parse_int(I) when is_integer(I) -> I;
+parse_int(F) when is_number(F)  -> trunc(F);
+parse_int(S)                    -> try
+                                       list_to_integer(binary_to_list(S))
+                                   catch error:badarg ->
+                                           throw({error, {not_integer, S}})
+                                   end.
+
+
 queue_fold(Fun, Init, Q) ->
     case queue:out(Q) of
         {empty, _Q}      -> Init;
         {{value, V}, Q1} -> queue_fold(Fun, Fun(V, Init), Q1)
     end.
 
-%% Sorts a list of AMQP table fields as per the AMQP spec
+%% Sorts a list of AMQP 0-9-1 table fields as per the AMQP 0-9-1 spec
 sort_field_table([]) ->
     [];
+sort_field_table(M) when is_map(M) andalso map_size(M) =:= 0 ->
+    [];
+sort_field_table(Arguments) when is_map(Arguments) ->
+    sort_field_table(maps:to_list(Arguments));
 sort_field_table(Arguments) ->
     lists:keysort(1, Arguments).
 
@@ -736,15 +807,23 @@ decompose_pid(Pid) when is_pid(Pid) ->
     %% see http://erlang.org/doc/apps/erts/erl_ext_dist.html (8.10 and
     %% 8.7)
     Node = node(Pid),
-    BinPid = term_to_binary(Pid),
-    ByteSize = byte_size(BinPid),
-    NodeByteSize = (ByteSize - 11),
-    <<131, 103, _NodePrefix:NodeByteSize/binary, Id:32, Ser:32, Cre:8>> = BinPid,
-    {Node, Cre, Id, Ser}.
+    BinPid0 = term_to_binary(Pid),
+    case BinPid0 of
+        %% NEW_PID_EXT
+        <<131, 88, BinPid/bits>> ->
+            NodeByteSize = byte_size(BinPid0) - 14,
+            <<_NodePrefix:NodeByteSize/binary, Id:32, Ser:32, Cre:32>> = BinPid,
+            {Node, Cre, Id, Ser};
+        %% PID_EXT
+        <<131, 103, BinPid/bits>> ->
+            NodeByteSize = byte_size(BinPid0) - 11,
+            <<_NodePrefix:NodeByteSize/binary, Id:32, Ser:32, Cre:8>> = BinPid,
+            {Node, Cre, Id, Ser}
+    end.
 
 compose_pid(Node, Cre, Id, Ser) ->
     <<131,NodeEnc/binary>> = term_to_binary(Node),
-    binary_to_term(<<131,103,NodeEnc/binary,Id:32,Ser:32,Cre:8>>).
+    binary_to_term(<<131,88,NodeEnc/binary,Id:32,Ser:32,Cre:32>>).
 
 version_compare(A, B, eq)  -> rabbit_semver:eql(A, B);
 version_compare(A, B, lt)  -> rabbit_semver:lt(A, B);
@@ -761,6 +840,12 @@ version_compare(A, B) ->
                  end
     end.
 
+%% For versions starting from 3.7.x:
+%% Versions are considered compatible (except for special cases; see
+%% below). The feature flags will determine if they are actually
+%% compatible.
+%%
+%% For versions up-to 3.7.x:
 %% a.b.c and a.b.d match, but a.b.c and a.d.e don't. If
 %% versions do not match that pattern, just compare them.
 %%
@@ -768,6 +853,36 @@ version_compare(A, B) ->
 %% e.g. 3.6.6 is not compatible with 3.6.5
 %% This special case can be removed once 3.6.x reaches EOL
 version_minor_equivalent(A, B) ->
+    {{MajA, MinA, PatchA, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(A)),
+    {{MajB, MinB, PatchB, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(B)),
+
+    case {MajA, MinA, MajB, MinB} of
+        {3, 6, 3, 6} ->
+            if
+                PatchA >= 6 -> PatchB >= 6;
+                PatchA < 6  -> PatchB < 6;
+                true -> false
+            end;
+        _
+          when (MajA < 3 orelse (MajA =:= 3 andalso MinA =< 6))
+               orelse
+               (MajB < 3 orelse (MajB =:= 3 andalso MinB =< 6)) ->
+            MajA =:= MajB andalso MinA =:= MinB;
+        _ ->
+            %% Starting with RabbitMQ 3.7.x, we consider this
+            %% minor release series and all subsequent series to
+            %% be possibly compatible, based on just the version.
+            %% The real compatibility check is deferred to the
+            %% rabbit_feature_flags module in rabbitmq-server.
+            true
+    end.
+
+%% This is the same as above except that e.g. 3.7.x and 3.8.x are
+%% considered incompatible (as if there were no feature flags). This is
+%% useful to check plugin compatibility (`broker_versions_requirement`
+%% field in plugins).
+
+strict_version_minor_equivalent(A, B) ->
     {{MajA, MinA, PatchA, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(A)),
     {{MajB, MinB, PatchB, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(B)),
 
@@ -817,11 +932,30 @@ module_attributes(Module) ->
     end.
 
 all_module_attributes(Name) ->
+    Apps = [App || {App, _, _} <- application:loaded_applications()],
+    module_attributes_from_apps(Name, Apps).
+
+rabbitmq_related_module_attributes(Name) ->
+    Apps = rabbitmq_related_apps(),
+    module_attributes_from_apps(Name, Apps).
+
+rabbitmq_related_apps() ->
+    [App
+     || {App, _, _} <- application:loaded_applications(),
+        %% Only select RabbitMQ-related applications.
+        App =:= rabbit_common orelse
+        App =:= rabbitmq_prelaunch orelse
+        App =:= rabbit orelse
+        lists:member(
+          rabbit,
+          element(2, application:get_key(App, applications)))].
+
+module_attributes_from_apps(Name, Apps) ->
     Targets =
         lists:usort(
           lists:append(
             [[{App, Module} || Module <- Modules] ||
-                {App, _, _}   <- application:loaded_applications(),
+                App           <- Apps,
                 {ok, Modules} <- [application:get_key(App, modules)]])),
     lists:foldl(
       fun ({App, Module}, Acc) ->
@@ -985,18 +1119,41 @@ format_message_queue_entry(V) when is_tuple(V) ->
 format_message_queue_entry(_V) ->
     '_'.
 
+%% Same as rpc:multicall/4 but concatenates all results.
+%% M, F, A is expected to return a list. If it does not,
+%% its return value will be wrapped in a list.
+-spec append_rpc_all_nodes([node()], atom(), atom(), [any()]) -> [any()].
 append_rpc_all_nodes(Nodes, M, F, A) ->
-    {ResL, _} = rpc:multicall(Nodes, M, F, A),
+    do_append_rpc_all_nodes(Nodes, M, F, A, ?RPC_INFINITE_TIMEOUT).
+
+-spec append_rpc_all_nodes([node()], atom(), atom(), [any()], timeout()) -> [any()].
+append_rpc_all_nodes(Nodes, M, F, A, Timeout) ->
+    do_append_rpc_all_nodes(Nodes, M, F, A, Timeout).
+
+do_append_rpc_all_nodes(Nodes, M, F, A, ?RPC_INFINITE_TIMEOUT) ->
+    {ResL, _} = rpc:multicall(Nodes, M, F, A, ?RPC_INFINITE_TIMEOUT),
+    process_rpc_multicall_result(ResL);
+do_append_rpc_all_nodes(Nodes, M, F, A, Timeout) ->
+    {ResL, _} = try
+                    rpc:multicall(Nodes, M, F, A, Timeout)
+                catch
+                    error:internal_error -> {[], Nodes}
+                end,
+    process_rpc_multicall_result(ResL).
+
+process_rpc_multicall_result(ResL) ->
     lists:append([case Res of
-                      {badrpc, _} -> [];
-                      _           -> Res
+                      {badrpc, _}         -> [];
+                      Xs when is_list(Xs) -> Xs;
+                      %% wrap it in a list
+                      Other               -> [Other]
                   end || Res <- ResL]).
 
 os_cmd(Command) ->
     case os:type() of
         {win32, _} ->
             %% Clink workaround; see
-            %% http://code.google.com/p/clink/issues/detail?id=141
+            %% https://code.google.com/p/clink/issues/detail?id=141
             os:cmd(" " ++ Command);
         _ ->
             %% Don't just return "/bin/sh: <cmd>: not found" if not found
@@ -1012,12 +1169,29 @@ is_os_process_alive(Pid) ->
                             run_ps(Pid) =:= 0
                     end},
              {win32, fun () ->
-                             Cmd = "tasklist /nh /fi \"pid eq " ++
-                                 rabbit_data_coercion:to_list(Pid) ++ "\" ",
-                             Res = os_cmd(Cmd ++ "2>&1"),
-                             case re:run(Res, "erl\\.exe", [{capture, none}]) of
-                                 match -> true;
-                                 _     -> false
+                             PidS = rabbit_data_coercion:to_list(Pid),
+                             case os:find_executable("tasklist.exe") of
+                                 false ->
+                                     Cmd =
+                                     format(
+                                       "PowerShell -Command "
+                                       "\"(Get-Process -Id ~s).ProcessName\"",
+                                       [PidS]),
+                                     Res =
+                                     os_cmd(Cmd ++ " 2>&1") -- [$\r, $\n],
+                                     case Res of
+                                         "erl"  -> true;
+                                         "werl" -> true;
+                                         _      -> false
+                                     end;
+                                 _ ->
+                                     Cmd =
+                                     "tasklist /nh /fi "
+                                     "\"pid eq " ++ PidS ++ "\"",
+                                     Res = os_cmd(Cmd ++ " 2>&1"),
+                                     match =:= re:run(Res,
+                                                      "erl\\.exe",
+                                                      [{capture, none}])
                              end
                      end}]).
 
@@ -1048,7 +1222,7 @@ version() ->
     {ok, VSN} = application:get_key(rabbit, vsn),
     VSN.
 
-%% See http://www.erlang.org/doc/system_principles/versions.html
+%% See https://www.erlang.org/doc/system_principles/versions.html
 otp_release() ->
     File = filename:join([code:root_dir(), "releases",
                           erlang:system_info(otp_release), "OTP_VERSION"]),
@@ -1067,6 +1241,9 @@ platform_and_version() ->
 
 otp_system_version() ->
     string:strip(erlang:system_info(system_version), both, $\n).
+
+rabbitmq_and_erlang_versions() ->
+  {version(), otp_release()}.
 
 %% application:which_applications(infinity) is dangerous, since it can
 %% cause deadlocks on shutdown. So we have to use a timeout variant,
@@ -1185,13 +1362,34 @@ moving_average(Time,  HalfLife,  Next, Current) ->
 random(N) ->
     rand:uniform(N).
 
+-spec escape_html_tags(string()) -> binary().
+
+escape_html_tags(S) ->
+    escape_html_tags(rabbit_data_coercion:to_list(S), []).
+
+
+-spec escape_html_tags(string(), string()) -> binary().
+
+escape_html_tags([], Acc) ->
+    rabbit_data_coercion:to_binary(lists:reverse(Acc));
+escape_html_tags("<" ++ Rest, Acc) ->
+    escape_html_tags(Rest, lists:reverse("&lt;", Acc));
+escape_html_tags(">" ++ Rest, Acc) ->
+    escape_html_tags(Rest, lists:reverse("&gt;", Acc));
+escape_html_tags("&" ++ Rest, Acc) ->
+    escape_html_tags(Rest, lists:reverse("&amp;", Acc));
+escape_html_tags([C | Rest], Acc) ->
+    escape_html_tags(Rest, [C | Acc]).
+
+
 %% Moved from rabbit/src/rabbit_cli.erl
 %% If the server we are talking to has non-standard net_ticktime, and
 %% our connection lasts a while, we could get disconnected because of
 %% a timeout unless we set our ticktime to be the same. So let's do
 %% that.
+%% TODO: do not use an infinite timeout!
 rpc_call(Node, Mod, Fun, Args) ->
-    rpc_call(Node, Mod, Fun, Args, ?RPC_TIMEOUT).
+    rpc_call(Node, Mod, Fun, Args, ?RPC_INFINITE_TIMEOUT).
 
 rpc_call(Node, Mod, Fun, Args, Timeout) ->
     case rpc:call(Node, net_kernel, get_net_ticktime, [], Timeout) of
@@ -1206,14 +1404,13 @@ rpc_call(Node, Mod, Fun, Args, Timeout) ->
             rpc:call(Node, Mod, Fun, Args, Timeout)
     end.
 
-guess_number_of_cpu_cores() ->
-    case erlang:system_info(logical_processors_available) of
-        unknown -> % Happens on Mac OS X.
-            erlang:system_info(schedulers);
-        N -> N
-    end.
+get_gc_info(Pid) ->
+    rabbit_runtime:get_gc_info(Pid).
 
-%% Discussion of choosen values is at
+guess_number_of_cpu_cores() ->
+    rabbit_runtime:guess_number_of_cpu_cores().
+
+%% Discussion of chosen values is at
 %% https://github.com/rabbitmq/rabbitmq-server/issues/151
 guess_default_thread_pool_size() ->
     PoolSize = 16 * guess_number_of_cpu_cores(),
@@ -1222,18 +1419,6 @@ guess_default_thread_pool_size() ->
 report_default_thread_pool_size() ->
     io:format("~b", [guess_default_thread_pool_size()]),
     erlang:halt(0).
-
-get_gc_info(Pid) ->
-    {garbage_collection, GC} = erlang:process_info(Pid, garbage_collection),
-    case proplists:get_value(max_heap_size, GC) of
-        I when is_integer(I) ->
-            GC;
-        undefined ->
-            GC;
-        Map ->
-            lists:keyreplace(max_heap_size, 1, GC,
-                             {max_heap_size, maps:get(size, Map)})
-    end.
 
 %% -------------------------------------------------------------------------
 %% Begin copypasta from gen_server2.erl
@@ -1248,7 +1433,7 @@ get_parent() ->
 name_to_pid(Name) ->
     case whereis(Name) of
         undefined -> case whereis_name(Name) of
-                         undefined -> exit(could_not_find_registerd_name);
+                         undefined -> exit(could_not_find_registered_name);
                          Pid       -> Pid
                      end;
         Pid       -> Pid

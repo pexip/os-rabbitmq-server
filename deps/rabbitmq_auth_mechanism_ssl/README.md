@@ -18,28 +18,22 @@ present a client certificate.
 ## Usage
 
 This mechanism must also be enabled in RabbitMQ's configuration file,
-see [Authentication Mechanisms](http://www.rabbitmq.com/authentication.html) and
-[Configuration](http://www.rabbitmq.com/configure.html) guides for
+see [Authentication Mechanisms](https://www.rabbitmq.com/authentication.html) and
+[Configuration](https://www.rabbitmq.com/configure.html) guides for
 more details.
 
 A couple of examples:
 
-``` erlang
-[
-  {rabbit, [
-    {auth_mechanisms, ['PLAIN', 'AMQPLAIN', 'EXTERNAL']}
-  ]}
-].
+``` ini
+auth_mechanisms.1 = PLAIN
+auth_mechanisms.1 = AMQPLAIN
+auth_mechanisms.1 = EXTERNAL
 ```
 
 to allow this mechanism in addition to the defaults, or:
 
-``` erlang
-[
-  {rabbit, [
-    {auth_mechanisms, ['EXTERNAL']}
-  ]}
-].
+``` ini
+auth_mechanisms.1 = EXTERNAL
 ```
 
 to allow only this mechanism and prohibit connections that use
@@ -65,7 +59,7 @@ openssl x509 -in path/to/cert.pem -nameopt RFC2253 -subject -noout
 
 or from an existing amqps connection with commands like:
 
-```
+``` bash
 rabbitmqctl list_connections peer_cert_subject
 ```
 
@@ -73,23 +67,20 @@ rabbitmqctl list_connections peer_cert_subject
 
 To use the Common Name instead, set `rabbit.ssl_cert_login_from` to `common_name`:
 
-```
-[
-  {rabbit, [
-    {auth_mechanisms, ['PLAIN', 'AMQPLAIN', 'EXTERNAL']},
-    {ssl_cert_login_from, common_name}
-  ]}
-].
+``` ini
+auth_mechanisms.1 = EXTERNAL
+
+ssl_cert_login_from = common_name
 ```
 
 Note that the authenticated user will then be looked up in the
-[configured authentication / authorisation backend(s)](http://www.rabbitmq.com/access-control.html). This will be
+[configured authentication / authorisation backend(s)](https://www.rabbitmq.com/access-control.html). This will be
 the internal node database by default but could include other
 backends if so configured.
 
 
 ## Copyright & License
 
-(c) Pivotal Software Inc., 2007 — 2017.
+(c) 2007-2020 VMware, Inc. or its affiliates.
 
 Released under the same license as RabbitMQ.

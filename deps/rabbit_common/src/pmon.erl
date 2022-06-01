@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2011-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2011-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(pmon).
@@ -34,62 +25,62 @@
 
 -compile({no_auto_import, [monitor/2]}).
 
--record(state, {dict, module}).
+-record(state, {monitors = #{} :: #{item() => reference()},
+                module = erlang :: module()}).
 
 %%----------------------------------------------------------------------------
 
 -export_type([?MODULE/0]).
 
--opaque(?MODULE() :: #state{dict   :: dict:dict(),
-                            module :: atom()}).
+-opaque(?MODULE() :: #state{}).
 
--type(item()         :: pid() | {atom(), node()}).
+-type(item() :: pid() | {atom(), node()}).
+
 
 -spec new() -> ?MODULE().
--spec new('erlang' | 'delegate') -> ?MODULE().
--spec monitor(item(), ?MODULE()) -> ?MODULE().
--spec monitor_all([item()], ?MODULE()) -> ?MODULE().
--spec demonitor(item(), ?MODULE()) -> ?MODULE().
--spec is_monitored(item(), ?MODULE()) -> boolean().
--spec erase(item(), ?MODULE()) -> ?MODULE().
--spec monitored(?MODULE()) -> [item()].
--spec is_empty(?MODULE()) -> boolean().
-
 new() -> new(erlang).
 
-new(Module) -> #state{dict   = dict:new(),
-                      module = Module}.
+-spec new('erlang' | 'delegate') -> ?MODULE().
+new(Module) -> #state{module = Module}.
 
-monitor(Item, S = #state{dict = M, module = Module}) ->
-    case dict:is_key(Item, M) of
+-spec monitor(item(), ?MODULE()) -> ?MODULE().
+monitor(Item, S = #state{monitors = M, module = Module}) ->
+    case maps:is_key(Item, M) of
         true  -> S;
         false -> case node_alive_shortcut(Item) of
                      true  -> Ref = Module:monitor(process, Item),
-                              S#state{dict = dict:store(Item, Ref, M)};
+                              S#state{monitors = maps:put(Item, Ref, M)};
                      false -> self() ! {'DOWN', fake_ref, process, Item,
                                         nodedown},
                               S
                  end
     end.
 
+-spec monitor_all([item()], ?MODULE()) -> ?MODULE().
 monitor_all([],     S) -> S;                %% optimisation
 monitor_all([Item], S) -> monitor(Item, S); %% optimisation
 monitor_all(Items,  S) -> lists:foldl(fun monitor/2, S, Items).
 
-demonitor(Item, S = #state{dict = M, module = Module}) ->
-    case dict:find(Item, M) of
-        {ok, MRef} -> Module:demonitor(MRef),
-                      S#state{dict = dict:erase(Item, M)};
+-spec demonitor(item(), ?MODULE()) -> ?MODULE().
+demonitor(Item, S = #state{monitors = M0, module = Module}) ->
+    case maps:take(Item, M0) of
+        {MRef, M} -> Module:demonitor(MRef),
+                     S#state{monitors = M};
         error      -> S
     end.
 
-is_monitored(Item, #state{dict = M}) -> dict:is_key(Item, M).
+-spec is_monitored(item(), ?MODULE()) -> boolean().
+is_monitored(Item, #state{monitors = M}) -> maps:is_key(Item, M).
 
-erase(Item, S = #state{dict = M}) -> S#state{dict = dict:erase(Item, M)}.
+-spec erase(item(), ?MODULE()) -> ?MODULE().
+erase(Item, S = #state{monitors = M}) ->
+    S#state{monitors = maps:remove(Item, M)}.
 
-monitored(#state{dict = M}) -> dict:fetch_keys(M).
+-spec monitored(?MODULE()) -> [item()].
+monitored(#state{monitors = M}) -> maps:keys(M).
 
-is_empty(#state{dict = M}) -> dict:size(M) == 0.
+-spec is_empty(?MODULE()) -> boolean().
+is_empty(#state{monitors = M}) -> maps:size(M) == 0.
 
 %%----------------------------------------------------------------------------
 

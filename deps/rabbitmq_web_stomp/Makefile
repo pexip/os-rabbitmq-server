@@ -1,14 +1,15 @@
 PROJECT = rabbitmq_web_stomp
-PROJECT_DESCRIPTION = Rabbit WEB-STOMP - WebSockets to Stomp adapter
-PROJECT_MOD = rabbit_ws_app
+PROJECT_DESCRIPTION = RabbitMQ STOMP-over-WebSockets support
+PROJECT_MOD = rabbit_web_stomp_app
 
 define PROJECT_ENV
 [
-	    {tcp_config, []},
-	    {num_tcp_acceptors, 10},
+	    {tcp_config, [{port, 15674}]},
 	    {ssl_config, []},
-	    {num_ssl_acceptors, 1},
+	    {num_tcp_acceptors, 10},
+	    {num_ssl_acceptors, 10},
 	    {cowboy_opts, []},
+	    {proxy_protocol, false},
 	    {ws_frame, text},
 	    {use_http_auth, false}
 	  ]
@@ -20,6 +21,10 @@ endef
 
 DEPS = cowboy rabbit_common rabbit rabbitmq_stomp
 TEST_DEPS = rabbitmq_ct_helpers rabbitmq_ct_client_helpers
+
+# FIXME: Add Ranch as a BUILD_DEPS to be sure the correct version is picked.
+# See rabbitmq-components.mk.
+BUILD_DEPS += ranch
 
 DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
 DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk

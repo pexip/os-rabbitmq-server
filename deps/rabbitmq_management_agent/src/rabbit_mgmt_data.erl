@@ -1,17 +1,8 @@
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License at
-%% http://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
-%% License for the specific language governing rights and limitations
-%% under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2016 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2016-2020 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_data).
@@ -119,14 +110,15 @@ node_data(Ranges, Id) ->
                         pick_range(coarse_node_stats, Ranges), Id),
        raw_message_data(node_persister_stats,
                         pick_range(coarse_node_stats, Ranges), Id),
-       {node_stats, lookup_element(node_stats, Id)}]).
+       {node_stats, lookup_element(node_stats, Id)}] ++
+      node_connection_churn_rates_data(Ranges, Id)).
 
 overview_data(_Pid, User, Ranges, VHosts) ->
     Raw = [raw_all_message_data(vhost_msg_stats, pick_range(queue_msg_counts, Ranges), VHosts),
            raw_all_message_data(vhost_stats_fine_stats, pick_range(fine_stats, Ranges), VHosts),
            raw_all_message_data(vhost_msg_rates, pick_range(queue_msg_rates, Ranges), VHosts),
-           raw_all_message_data(vhost_stats_deliver_stats, pick_range(deliver_get, Ranges), VHosts)],
-
+           raw_all_message_data(vhost_stats_deliver_stats, pick_range(deliver_get, Ranges), VHosts),
+           raw_message_data(connection_churn_rates, pick_range(queue_msg_rates, Ranges), node())],
     maps:from_list(Raw ++
                    [{connections_count, count_created_stats(connection_created_stats, User)},
                     {channels_count, count_created_stats(channel_created_stats, User)},
@@ -172,6 +164,10 @@ node_raw_detail_stats_data(Ranges, Id) ->
      [raw_message_data2(node_node_coarse_stats,
                         pick_range(coarse_node_node_stats, Ranges), Key)
       || Key <- get_table_keys(node_node_coarse_stats, first(Id))].
+
+node_connection_churn_rates_data(Ranges, Id) ->
+    [raw_message_data(connection_churn_rates,
+                      pick_range(churn_rates, Ranges), Id)].
 
 exchange_raw_detail_stats_data(Ranges, Id) ->
      [raw_message_data2(channel_exchange_stats_fine_stats,
@@ -340,7 +336,8 @@ lookup_smaller_sample(Table, Id) ->
         [] ->
             not_found;
         [{_, Slide}] ->
-            exometer_slide:optimize(Slide)
+            Slide1 = exometer_slide:optimize(Slide),
+            maybe_convert_for_compatibility(Table, Slide1)
     end.
 
 -spec lookup_samples(atom(), any(), #range{}) -> maybe_slide().
@@ -349,7 +346,8 @@ lookup_samples(Table, Id, Range) ->
         [] ->
             not_found;
         [{_, Slide}] ->
-            exometer_slide:optimize(Slide)
+            Slide1 = exometer_slide:optimize(Slide),
+            maybe_convert_for_compatibility(Table, Slide1)
     end.
 
 lookup_all(Table, Ids, SecondKey) ->
@@ -365,8 +363,38 @@ lookup_all(Table, Ids, SecondKey) ->
         [] ->
             not_found;
         _ ->
-            exometer_slide:sum(Slides, empty(Table, 0))
+            Slide = exometer_slide:sum(Slides, empty(Table, 0)),
+            maybe_convert_for_compatibility(Table, Slide)
     end.
+
+maybe_convert_for_compatibility(Table, Slide)
+  when Table =:= channel_stats_fine_stats orelse
+       Table =:= channel_exchange_stats_fine_stats orelse
+       Table =:= vhost_stats_fine_stats ->
+     ConversionNeeded = rabbit_feature_flags:is_disabled(
+                          drop_unroutable_metric),
+     case ConversionNeeded of
+         false ->
+             Slide;
+         true ->
+             %% drop_drop because the metric is named "drop_unroutable"
+             rabbit_mgmt_data_compat:drop_drop_unroutable_metric(Slide)
+     end;
+maybe_convert_for_compatibility(Table, Slide)
+  when Table =:= channel_queue_stats_deliver_stats orelse
+       Table =:= channel_stats_deliver_stats orelse
+       Table =:= queue_stats_deliver_stats orelse
+       Table =:= vhost_stats_deliver_stats ->
+    ConversionNeeded = rabbit_feature_flags:is_disabled(
+                         empty_basic_get_metric),
+    case ConversionNeeded of
+        false ->
+            Slide;
+        true ->
+            rabbit_mgmt_data_compat:drop_get_empty_queue_metric(Slide)
+    end;
+maybe_convert_for_compatibility(_, Slide) ->
+    Slide.
 
 get_table_keys(Table, Id0) ->
     ets:select(Table, match_spec_keys(Id0)).
@@ -437,7 +465,8 @@ pick_range(K, {_RangeL, _RangeM, RangeD, _RangeN}) when K == coarse_conn_stats;
     RangeD;
 pick_range(K, {_RangeL, _RangeM, _RangeD, RangeN})
   when K == coarse_node_stats;
-       K == coarse_node_node_stats ->
+       K == coarse_node_node_stats;
+       K == churn_rates ->
     RangeN.
 
 first(Id)  ->
@@ -447,17 +476,18 @@ second(Id) ->
     {'_', Id}.
 
 empty(Type, V) when Type =:= connection_stats_coarse_conn_stats;
-            Type =:= channel_stats_fine_stats;
-            Type =:= channel_exchange_stats_fine_stats;
-            Type =:= vhost_stats_fine_stats;
             Type =:= queue_msg_stats;
             Type =:= vhost_msg_stats ->
     {V, V, V};
+empty(Type, V) when Type =:= channel_stats_fine_stats;
+            Type =:= channel_exchange_stats_fine_stats;
+            Type =:= vhost_stats_fine_stats ->
+    {V, V, V, V};
 empty(Type, V) when Type =:= channel_queue_stats_deliver_stats;
             Type =:= queue_stats_deliver_stats;
             Type =:= vhost_stats_deliver_stats;
             Type =:= channel_stats_deliver_stats ->
-    {V, V, V, V, V, V, V};
+    {V, V, V, V, V, V, V, V};
 empty(Type, V) when Type =:= channel_process_stats;
             Type =:= queue_process_stats;
             Type =:= queue_stats_publish;
@@ -473,7 +503,9 @@ empty(Type, V) when Type =:= node_node_coarse_stats;
             Type =:= vhost_stats_coarse_conn_stats;
             Type =:= queue_msg_rates;
             Type =:= vhost_msg_rates ->
-    {V, V}.
+    {V, V};
+empty(connection_churn_rates, V) ->
+    {V, V, V, V, V, V, V}.
 
 retention_policy(connection_stats_coarse_conn_stats) ->
     basic;
@@ -518,6 +550,8 @@ retention_policy(node_coarse_stats) ->
 retention_policy(node_persister_stats) ->
     global;
 retention_policy(node_node_coarse_stats) ->
+    global;
+retention_policy(connection_churn_rates) ->
     global.
 
 format_resource(unknown) -> unknown;
