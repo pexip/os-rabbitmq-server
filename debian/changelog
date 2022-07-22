@@ -1,3 +1,9 @@
+rabbitmq-server (3.8.9-3pexip3) pexip-bullseye; urgency=medium
+
+  * Re-drop runtime dependency on locales-all.
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Fri, 22 Jul 2022 10:43:23 +0100
+
 rabbitmq-server (3.8.9-3pexip2) pexip-bullseye; urgency=medium
 
   * Main bullseye build
