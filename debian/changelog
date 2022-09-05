@@ -1,3 +1,9 @@
+rabbitmq-server (3.8.9-3pexip4) pexip-bullseye; urgency=medium
+
+  * Bullseye rebuild for ARM64 inclusion
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Mon, 05 Sep 2022 10:35:50 +0100
+
 rabbitmq-server (3.8.9-3pexip3) pexip-bullseye; urgency=medium
 
   * Re-drop runtime dependency on locales-all.
