@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_rebalance_queues).
@@ -45,7 +45,7 @@ accept_content(Req, {_Mode, #context{user = #user{username = Username}}}=State) 
     try
         rabbit_log:info("User '~s' has initiated a queue rebalance", [Username]),
         spawn(fun() ->
-            rabbit_amqqueue:rebalance(all, ".*", ".*")
+            rabbit_amqqueue:rebalance(all, <<".*">>, <<".*">>)
         end),
         {true, Req, State}
     catch

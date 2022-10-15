@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2018-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(amqqueue). %% Could become amqqueue_v2 in the future.
@@ -38,7 +38,9 @@
          % operator_policy
          get_operator_policy/1,
          set_operator_policy/2,
+         % options
          get_options/1,
+         set_options/2,
          % pid
          get_pid/1,
          set_pid/2,
@@ -255,7 +257,8 @@ new(#resource{kind = queue} = Name,
               Owner,
               Args,
               VHost,
-              Options)
+              Options,
+              Type)
     end.
 
 -spec new_with_version
@@ -481,6 +484,13 @@ set_name(Queue, Name) ->
 get_options(#amqqueue{options = Options}) -> Options;
 get_options(Queue)                        -> amqqueue_v1:get_options(Queue).
 
+-spec set_options(amqqueue(), map()) -> amqqueue().
+
+set_options(#amqqueue{} = Queue, Options) ->
+    Queue#amqqueue{options = Options};
+set_options(Queue, Options) ->
+    amqqueue_v1:set_options(Queue, Options).
+
 % pid
 
 -spec get_pid
@@ -548,8 +558,10 @@ set_recoverable_slaves(Queue, Slaves) ->
 % type_state (new in v2)
 
 -spec get_type_state(amqqueue()) -> map().
-get_type_state(#amqqueue{type_state = TState}) -> TState;
-get_type_state(_)                               -> [].
+get_type_state(#amqqueue{type_state = TState}) ->
+    TState;
+get_type_state(_) ->
+    #{}.
 
 -spec set_type_state(amqqueue(), map()) -> amqqueue().
 set_type_state(#amqqueue{} = Queue, TState) ->

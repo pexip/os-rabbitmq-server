@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_dispatcher).
@@ -114,6 +114,7 @@ dispatcher() ->
      {"/vhost-limits/:vhost",                                  rabbit_mgmt_wm_limits, []},
      {"/connections",                                          rabbit_mgmt_wm_connections, []},
      {"/connections/:connection",                              rabbit_mgmt_wm_connection, []},
+     {"/connections/username/:username",                       rabbit_mgmt_wm_connection_user_name, []},
      {"/connections/:connection/channels",                     rabbit_mgmt_wm_connection_channels, []},
      {"/channels",                                             rabbit_mgmt_wm_channels, []},
      {"/channels/:channel",                                    rabbit_mgmt_wm_channel, []},
@@ -151,6 +152,9 @@ dispatcher() ->
      {"/users/:user",                                          rabbit_mgmt_wm_user, []},
      {"/users/:user/permissions",                              rabbit_mgmt_wm_permissions_user, []},
      {"/users/:user/topic-permissions",                        rabbit_mgmt_wm_topic_permissions_user, []},
+     {"/user-limits/:user/:name",                              rabbit_mgmt_wm_user_limit, []},
+     {"/user-limits",                                          rabbit_mgmt_wm_user_limits, []},
+     {"/user-limits/:user",                                    rabbit_mgmt_wm_user_limits, []},
      {"/feature-flags",                                        rabbit_mgmt_wm_feature_flags, []},
      {"/feature-flags/:name/enable",                           rabbit_mgmt_wm_feature_flag_enable, []},
      {"/whoami",                                               rabbit_mgmt_wm_whoami, []},
@@ -160,11 +164,23 @@ dispatcher() ->
      {"/topic-permissions/:vhost/:user",                       rabbit_mgmt_wm_topic_permission, []},
      {"/topic-permissions/:vhost/:user/:exchange",             rabbit_mgmt_wm_topic_permission, []},
      {"/aliveness-test/:vhost",                                rabbit_mgmt_wm_aliveness_test, []},
+     %% now deprecated
      {"/healthchecks/node",                                    rabbit_mgmt_wm_healthchecks, []},
      {"/healthchecks/node/:node",                              rabbit_mgmt_wm_healthchecks, []},
+     %% modern generation of fine-grained health checks
+     {"/health/checks/alarms",                                 rabbit_mgmt_wm_health_check_alarms, []},
+     {"/health/checks/local-alarms",                           rabbit_mgmt_wm_health_check_local_alarms, []},
+     {"/health/checks/certificate-expiration/:within/:unit",   rabbit_mgmt_wm_health_check_certificate_expiration, []},
+     {"/health/checks/port-listener/:port",                    rabbit_mgmt_wm_health_check_port_listener, []},
+     {"/health/checks/protocol-listener/:protocol",            rabbit_mgmt_wm_health_check_protocol_listener, []},
+     {"/health/checks/virtual-hosts",                          rabbit_mgmt_wm_health_check_virtual_hosts, []},
+     {"/health/checks/node-is-mirror-sync-critical",           rabbit_mgmt_wm_health_check_node_is_mirror_sync_critical, []},
+     {"/health/checks/node-is-quorum-critical",                rabbit_mgmt_wm_health_check_node_is_quorum_critical, []},
      {"/reset",                                                rabbit_mgmt_wm_reset, []},
      {"/reset/:node",                                          rabbit_mgmt_wm_reset, []},
      {"/rebalance/queues",                                     rabbit_mgmt_wm_rebalance_queues, [{queues, all}]},
      {"/auth",                                                 rabbit_mgmt_wm_auth, []},
+     {"/auth/attempts/:node",                                  rabbit_mgmt_wm_auth_attempts, [all]},
+     {"/auth/attempts/:node/source",                           rabbit_mgmt_wm_auth_attempts, [by_source]},
      {"/login",                                                rabbit_mgmt_wm_login, []}
     ].

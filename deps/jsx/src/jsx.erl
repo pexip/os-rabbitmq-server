@@ -29,7 +29,6 @@
 -export([consult/1, consult/2]).
 -export([encoder/3, decoder/3, parser/3]).
 -export([resume/3]).
--export([maps_support/0]).
 
 -export_type([json_term/0, json_text/0, token/0]).
 -export_type([encoder/0, decoder/0, parser/0, internal_state/0]).
@@ -42,44 +41,33 @@
 -export([init/1, handle_event/2]).
 -endif.
 
-
--ifndef(maps_support).
 -type json_term() :: [{binary() | atom(), json_term()}] | [{},...]
     | [json_term()] | []
-    | true | false | null
-    | integer() | float()
-    | binary() | atom()
-    | calendar:datetime().
--endif.
-
--ifdef(maps_support).
--type json_term() :: [{binary() | atom(), json_term()}] | [{},...]
-    | [json_term()] | []
+    | {with_tail, json_term(), binary()}
     | #{ binary() | atom() => json_term() }
     | true | false | null
     | integer() | float()
     | binary() | atom()
     | calendar:datetime().
--endif.
 
 -type json_text() :: binary().
 
 -type config() :: jsx_config:config().
 
--spec encode(Source::json_term()) -> json_text().
+-spec encode(Source::json_term()) -> json_text() | {incomplete, encoder()}.
 
 encode(Source) -> encode(Source, []).
 
--spec encode(Source::json_term(), Config::jsx_to_json:config()) -> json_text() | {incomplete, encoder()}.
+-spec encode(Source::json_term(), Config::jsx_config:options()) -> json_text() | {incomplete, encoder()}.
 
 encode(Source, Config) -> jsx_to_json:to_json(Source, Config).
 
 
--spec decode(Source::json_text()) -> json_term().
+-spec decode(Source::json_text()) -> json_term() | {incomplete, decoder()}.
 
 decode(Source) -> decode(Source, []).
 
--spec decode(Source::json_text(), Config::jsx_to_term:config()) -> json_term() | {incomplete, decoder()}.
+-spec decode(Source::json_text(), Config::jsx_config:options()) -> json_term() | {incomplete, decoder()}.
 
 decode(Source, Config) -> jsx_to_term:to_term(Source, Config).
 
@@ -88,7 +76,7 @@ decode(Source, Config) -> jsx_to_term:to_term(Source, Config).
 
 format(Source) -> format(Source, []).
 
--spec format(Source::json_text(), Config::jsx_to_json:config()) -> json_text() | {incomplete, decoder()}.
+-spec format(Source::json_text(), Config::jsx_config:options()) -> json_text().
 
 format(Source, Config) -> jsx_to_json:format(Source, Config).
 
@@ -103,43 +91,44 @@ minify(Source) -> format(Source, []).
 prettify(Source) -> format(Source, [space, {indent, 2}]).
 
 
--spec is_json(Source::any()) -> boolean().
+-spec is_json(Source::binary()) -> boolean() | {incomplete, decoder()}.
 
 is_json(Source) -> is_json(Source, []).
 
--spec is_json(Source::any(), Config::jsx_verify:config()) -> boolean() | {incomplete, decoder()}.
+-spec is_json(Source::binary(), Config::jsx_config:options()) -> boolean() | {incomplete, decoder()}.
 
 is_json(Source, Config) -> jsx_verify:is_json(Source, Config).
 
 
--spec is_term(Source::any()) -> boolean().
+-spec is_term(Source::json_term() | end_stream | end_json) -> boolean() | {incomplete, encoder()}.
 
 is_term(Source) -> is_term(Source, []).
 
--spec is_term(Source::any(), Config::jsx_verify:config()) -> boolean() | {incomplete, encoder()}.
+-spec is_term(Source::json_term() | end_stream | end_json,
+              Config::jsx_config:options()) -> boolean() | {incomplete, encoder()}.
 
 is_term(Source, Config) -> jsx_verify:is_term(Source, Config).
 
 
--spec consult(File::file:name_all()) -> list(json_term()).
+-spec consult(File::file:name_all()) -> list(jsx_consult:json_value()).
 
 consult(File) -> consult(File, []).
 
--spec consult(File::file:name_all(), Config::jsx_to_term:config()) -> list(json_term()).
+-spec consult(File::file:name_all(), Config::jsx_consult:config()) -> list(jsx_consult:json_value()).
 
 consult(File, Config) -> jsx_consult:consult(File, Config).
 
 
 -type decoder() :: fun((json_text() | end_stream | end_json) -> any()).
 
--spec decoder(Handler::module(), State::any(), Config::list()) -> decoder().
+-spec decoder(Handler::module(), State::any(), Config::jsx_config:options()) -> decoder().
 
 decoder(Handler, State, Config) -> jsx_decoder:decoder(Handler, State, Config).
 
 
 -type encoder() :: fun((json_term() | end_stream | end_json) -> any()).
 
--spec encoder(Handler::module(), State::any(), Config::list()) -> encoder().
+-spec encoder(Handler::module(), State::any(), Config::jsx_config:options()) -> encoder().
 
 encoder(Handler, State, Config) -> jsx_encoder:encoder(Handler, State, Config).
 
@@ -168,29 +157,19 @@ encoder(Handler, State, Config) -> jsx_encoder:encoder(Handler, State, Config).
 
 -type parser() :: fun((token() | end_stream) -> any()).
 
--spec parser(Handler::module(), State::any(), Config::list()) -> parser().
+-spec parser(Handler::module(), State::any(), Config::jsx_config:options()) -> parser().
 
 parser(Handler, State, Config) -> jsx_parser:parser(Handler, State, Config).
 
 -opaque internal_state() :: tuple().
 
--spec resume(Term::json_text() | token(), InternalState::internal_state(), Config::list()) -> any().
+-spec resume(Term::json_text() | token(), InternalState::internal_state(),
+             Config::jsx_config:options()) -> jsx:decoder() | {incomplete, jsx:decoder()}.
 
 resume(Term, {decoder, State, Handler, Acc, Stack}, Config) ->
     jsx_decoder:resume(Term, State, Handler, Acc, Stack, jsx_config:parse_config(Config));
 resume(Term, {parser, State, Handler, Stack}, Config) ->
     jsx_parser:resume(Term, State, Handler, Stack, jsx_config:parse_config(Config)).
-
-
--spec maps_support() -> boolean().
-
--ifndef(maps_support).
-maps_support() -> false.
--endif.
--ifdef(maps_support).
-maps_support() -> true.
--endif.
-
 
 -ifdef(TEST).
 

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_definitions).
@@ -12,7 +12,7 @@
 -export([accept_multipart/2]).
 -export([variances/2]).
 
--export([apply_defs/4, apply_defs/5]).
+-export([apply_defs/3, apply_defs/5]).
 
 -import(rabbit_misc, [pget/2]).
 
@@ -112,10 +112,9 @@ vhost_definitions(ReqData, VHost, Context) ->
              {bindings,    Bs}]),
       case rabbit_mgmt_util:qs_val(<<"download">>, ReqData) of
           undefined -> ReqData;
-          Filename  -> rabbit_mgmt_util:set_resp_header(
-                         "Content-Disposition",
-                         "attachment; filename=" ++
-                             binary_to_list(Filename), ReqData)
+          Filename  ->
+              HeaderVal = "attachment; filename=" ++ binary_to_list(Filename),
+              rabbit_mgmt_util:set_resp_header(<<"Content-Disposition">>, HeaderVal, ReqData)
       end,
       Context).
 
@@ -200,14 +199,22 @@ accept(Body, ReqData, Context = #context{user = #user{username = Username}}) ->
 disable_idle_timeout(#{pid := Pid, streamid := StreamID}) ->
     Pid ! {{Pid, StreamID}, {set_options, #{idle_timeout => infinity}}}.
 
+-spec apply_defs(Map :: #{atom() => any()}, ActingUser :: rabbit_types:username()) -> 'ok' | {error, term()}.
+
 apply_defs(Body, ActingUser) ->
     rabbit_definitions:apply_defs(Body, ActingUser).
+
+-spec apply_defs(Map :: #{atom() => any()}, ActingUser :: rabbit_types:username(),
+                VHost :: vhost:name()) -> 'ok'  | {error, term()}.
 
 apply_defs(Body, ActingUser, VHost) ->
     rabbit_definitions:apply_defs(Body, ActingUser, VHost).
 
-apply_defs(Body, ActingUser, SuccessFun, ErrorFun) ->
-    rabbit_definitions:apply_defs(Body, ActingUser, SuccessFun, ErrorFun).
+-spec apply_defs(Map :: #{atom() => any()},
+                ActingUser :: rabbit_types:username(),
+                SuccessFun :: fun(() -> 'ok'),
+                ErrorFun :: fun((any()) -> 'ok'),
+                VHost :: vhost:name()) -> 'ok' | {error, term()}.
 
 apply_defs(Body, ActingUser, SuccessFun, ErrorFun, VHost) ->
     rabbit_definitions:apply_defs(Body, ActingUser, SuccessFun, ErrorFun, VHost).
@@ -265,7 +272,7 @@ export_name(_Name)                -> true.
 %%--------------------------------------------------------------------
 
 rw_state() ->
-    [{users,              [name, password_hash, hashing_algorithm, tags]},
+    [{users,              [name, password_hash, hashing_algorithm, tags, limits]},
      {vhosts,             [name]},
      {permissions,        [user, vhost, configure, write, read]},
      {topic_permissions,  [user, vhost, exchange, write, read]},

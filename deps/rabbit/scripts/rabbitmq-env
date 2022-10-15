@@ -1,17 +1,8 @@
 #!/bin/sh -e
-##  The contents of this file are subject to the Mozilla Public License
-##  Version 1.1 (the "License"); you may not use this file except in
-##  compliance with the License. You may obtain a copy of the License
-##  at https://www.mozilla.org/MPL/
+##  This Source Code Form is subject to the terms of the Mozilla Public
+##  License, v. 2.0. If a copy of the MPL was not distributed with this
+##  file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-##  Software distributed under the License is distributed on an "AS IS"
-##  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-##  the License for the specific language governing rights and
-##  limitations under the License.
-##
-##  The Original Code is RabbitMQ.
-##
-##  The Initial Developer of the Original Code is GoPivotal, Inc.
 ##  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 ##
 
@@ -103,10 +94,21 @@ ESCRIPT_DIR="${RABBITMQ_HOME}/escript"
 saved_RABBITMQ_PID_FILE="$RABBITMQ_PID_FILE"
 
 ## Get configuration variables from the configure environment file
-[ "x" = "x$RABBITMQ_CONF_ENV_FILE" ] && RABBITMQ_CONF_ENV_FILE=${CONF_ENV_FILE}
-if [ -f "${RABBITMQ_CONF_ENV_FILE}" ]; then
+[ "x" = "x$RABBITMQ_CONF_ENV_FILE" ] && RABBITMQ_CONF_ENV_FILE="$CONF_ENV_FILE"
+if [ -f "$RABBITMQ_CONF_ENV_FILE" ]; then
     CONF_ENV_FILE_PHASE=rabbitmq-env
-    . ${RABBITMQ_CONF_ENV_FILE} || true
+    . "$RABBITMQ_CONF_ENV_FILE" || true
+fi
+
+# Bump ETS table limit to 50000
+if [ -z "$ERL_MAX_ETS_TABLES" ]; then
+    export ERL_MAX_ETS_TABLES=50000
+fi
+
+# Default is defined here:
+# https://github.com/erlang/otp/blob/master/erts/emulator/beam/erl_port.h
+if [ -z "$ERL_MAX_PORTS" ]; then
+    export ERL_MAX_PORTS=65536
 fi
 
 [ -n "$ERL_EPMD_PORT" ] && export ERL_EPMD_PORT
@@ -128,8 +130,12 @@ DEFAULT_MAX_NUMBER_OF_ATOMS=5000000
 [ -n "$MAX_NUMBER_OF_ATOMS" ] || MAX_NUMBER_OF_ATOMS="$DEFAULT_MAX_NUMBER_OF_ATOMS"
 [ -n "$RABBITMQ_MAX_NUMBER_OF_ATOMS" ] || RABBITMQ_MAX_NUMBER_OF_ATOMS="$MAX_NUMBER_OF_ATOMS"
 
+DEFAULT_SCHEDULER_BUSY_WAIT_THRESHOLD=none
+[ -n "$SCHEDULER_BUSY_WAIT_THRESHOLD" ] || SCHEDULER_BUSY_WAIT_THRESHOLD="$DEFAULT_SCHEDULER_BUSY_WAIT_THRESHOLD"
+[ -n "$RABBITMQ_SCHEDULER_BUSY_WAIT_THRESHOLD" ] || RABBITMQ_SCHEDULER_BUSY_WAIT_THRESHOLD="$SCHEDULER_BUSY_WAIT_THRESHOLD"
+
 ## Common server defaults
-SERVER_ERL_ARGS=" +P $RABBITMQ_MAX_NUMBER_OF_PROCESSES +t $RABBITMQ_MAX_NUMBER_OF_ATOMS +stbt $RABBITMQ_SCHEDULER_BIND_TYPE +zdbbl $RABBITMQ_DISTRIBUTION_BUFFER_SIZE "
+SERVER_ERL_ARGS=" +P $RABBITMQ_MAX_NUMBER_OF_PROCESSES +t $RABBITMQ_MAX_NUMBER_OF_ATOMS +stbt $RABBITMQ_SCHEDULER_BIND_TYPE +zdbbl $RABBITMQ_DISTRIBUTION_BUFFER_SIZE +sbwt $RABBITMQ_SCHEDULER_BUSY_WAIT_THRESHOLD +sbwtdcpu $RABBITMQ_SCHEDULER_BUSY_WAIT_THRESHOLD +sbwtdio $RABBITMQ_SCHEDULER_BUSY_WAIT_THRESHOLD "
 
 ##--- Set environment vars RABBITMQ_<var_name> to defaults if not set
 
@@ -139,7 +145,6 @@ SERVER_ERL_ARGS=" +P $RABBITMQ_MAX_NUMBER_OF_PROCESSES +t $RABBITMQ_MAX_NUMBER_O
 [ "x" = "x$RABBITMQ_CTL_DIST_PORT_MIN" ] && RABBITMQ_CTL_DIST_PORT_MIN='35672'
 [ "x" = "x$RABBITMQ_CTL_DIST_PORT_MAX" ] && RABBITMQ_CTL_DIST_PORT_MAX="$(($RABBITMQ_CTL_DIST_PORT_MIN + 10))"
 
-[ "x" = "x$RABBITMQ_IO_THREAD_POOL_SIZE" ] && RABBITMQ_IO_THREAD_POOL_SIZE=${IO_THREAD_POOL_SIZE}
 [ "x" = "x$RABBITMQ_SERVER_ERL_ARGS" ] && RABBITMQ_SERVER_ERL_ARGS=${SERVER_ERL_ARGS}
 [ "x" = "x$RABBITMQ_SERVER_START_ARGS" ] && RABBITMQ_SERVER_START_ARGS=${SERVER_START_ARGS}
 [ "x" = "x$RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS" ] && RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=${SERVER_ADDITIONAL_ERL_ARGS}

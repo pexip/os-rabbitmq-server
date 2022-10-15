@@ -2,14 +2,10 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_channel).
-
-%% Transitional step until we can require Erlang/OTP 21 and
-%% use the now recommended try/catch syntax for obtaining the stack trace.
--compile(nowarn_deprecated_function).
 
 %% rabbit_channel processes represent an AMQP 0-9-1 channels.
 %%
@@ -120,6 +116,19 @@
           writer_gc_threshold
          }).
 
+-record(pending_ack, {
+                      %% delivery identifier used by clients
+                      %% to acknowledge and reject deliveries
+                      delivery_tag,
+                      %% consumer tag
+                      tag,
+                      delivered_at,
+                      %% queue name
+                      queue,
+                      %% message ID used by queue and message store implementations
+                      msg_id
+                    }).
+
 -record(ch, {cfg :: #conf{},
              %% limiter state, see rabbit_limiter
              limiter,
@@ -129,8 +138,6 @@
              next_tag,
              %% messages pending consumer acknowledgement
              unacked_message_q,
-             %% a map of queue ref to queue name
-             queue_names,
              %% queue processes are monitored to update
              %% queue names
              queue_monitors,
@@ -138,11 +145,8 @@
              %% consumer details: #amqqueue record, acknowledgement mode,
              %% consumer exclusivity, etc
              consumer_mapping,
-             %% a map of queue pids to consumer tag lists
+             %% a map of queue names to consumer tag lists
              queue_consumers,
-             %% a set of pids of queues that have unacknowledged
-             %% deliveries
-             delivering_queues,
              %% timer used to emit statistics
              stats_timer,
              %% are publisher confirms enabled for this channel?
@@ -164,7 +168,8 @@
              delivery_flow,
              interceptor_state,
              queue_states,
-             tick_timer
+             tick_timer,
+             publishing_mode = false :: boolean()
             }).
 
 -define(QUEUE, lqueue).
@@ -188,6 +193,7 @@
          global_prefetch_count,
          state,
          garbage_collection]).
+
 
 -define(CREATION_EVENT_KEYS,
         [pid,
@@ -216,9 +222,6 @@
             %% Keys in the process dictionary are used to clean up the core metrics
             put({Type, Key}, none)
         end).
-
--define(IS_CLASSIC(QPid), is_pid(QPid)).
--define(IS_QUORUM(QPid), is_tuple(QPid)).
 
 %%----------------------------------------------------------------------------
 
@@ -299,12 +302,21 @@ deliver(Pid, ConsumerTag, AckRequired, Msg) ->
 
 -spec deliver_reply(binary(), rabbit_types:delivery()) -> 'ok'.
 
-deliver_reply(<<"amq.rabbitmq.reply-to.", Rest/binary>>, Delivery) ->
-    case decode_fast_reply_to(Rest) of
+deliver_reply(<<"amq.rabbitmq.reply-to.", EncodedBin/binary>>, Delivery) ->
+    case rabbit_direct_reply_to:decode_reply_to_v2(EncodedBin, rabbit_nodes:all_running_with_hashes()) of
         {ok, Pid, Key} ->
-            delegate:invoke_no_result(
-              Pid, {?MODULE, deliver_reply_local, [Key, Delivery]});
-        error ->
+            delegate:invoke_no_result(Pid, {?MODULE, deliver_reply_local, [Key, Delivery]});
+        {error, _} ->
+            deliver_reply_v1(EncodedBin, Delivery)
+    end.
+
+-spec deliver_reply_v1(binary(), rabbit_types:delivery()) -> 'ok'.
+deliver_reply_v1(EncodedBin, Delivery) ->
+    %% the the original encoding function
+    case rabbit_direct_reply_to:decode_reply_to_v1(EncodedBin) of
+        {ok, V1Pid, V1Key} ->
+            delegate:invoke_no_result(V1Pid, {?MODULE, deliver_reply_local, [V1Key, Delivery]});
+        {error, _} ->
             ok
     end.
 
@@ -321,24 +333,29 @@ deliver_reply_local(Pid, Key, Delivery) ->
 
 declare_fast_reply_to(<<"amq.rabbitmq.reply-to">>) ->
     exists;
-declare_fast_reply_to(<<"amq.rabbitmq.reply-to.", Rest/binary>>) ->
-    case decode_fast_reply_to(Rest) of
+declare_fast_reply_to(<<"amq.rabbitmq.reply-to.", EncodedBin/binary>>) ->
+    case rabbit_direct_reply_to:decode_reply_to_v2(EncodedBin, rabbit_nodes:all_running_with_hashes()) of
+        {error, _} ->
+            declare_fast_reply_to_v1(EncodedBin);
         {ok, Pid, Key} ->
             Msg = {declare_fast_reply_to, Key},
             rabbit_misc:with_exit_handler(
               rabbit_misc:const(not_found),
-              fun() -> gen_server2:call(Pid, Msg, infinity) end);
-        error ->
-            not_found
+              fun() -> gen_server2:call(Pid, Msg, infinity) end)
     end;
 declare_fast_reply_to(_) ->
     not_found.
 
-decode_fast_reply_to(Rest) ->
-    case string:tokens(binary_to_list(Rest), ".") of
-        [PidEnc, Key] -> Pid = binary_to_term(base64:decode(PidEnc)),
-                         {ok, Pid, Key};
-        _             -> error
+declare_fast_reply_to_v1(EncodedBin) ->
+    %% the the original encoding function
+    case rabbit_direct_reply_to:decode_reply_to_v1(EncodedBin) of
+        {ok, V1Pid, V1Key} ->
+            Msg = {declare_fast_reply_to, V1Key},
+            rabbit_misc:with_exit_handler(
+              rabbit_misc:const(not_found),
+              fun() -> gen_server2:call(V1Pid, Msg, infinity) end);
+        {error, _} ->
+            not_found
     end.
 
 -spec send_credit_reply(pid(), non_neg_integer()) -> 'ok'.
@@ -354,9 +371,8 @@ send_drained(Pid, CTagCredit) ->
 -spec list() -> [pid()].
 
 list() ->
-    Running = rabbit_nodes:all_running(),
-    rabbit_misc:append_rpc_all_nodes(Running,
-                                     rabbit_channel, list_local, [], ?RPC_TIMEOUT).
+    Nodes = rabbit_nodes:all_running(),
+    rabbit_misc:append_rpc_all_nodes(Nodes, rabbit_channel, list_local, [], ?RPC_TIMEOUT).
 
 -spec list_local() -> [pid()].
 
@@ -528,20 +544,18 @@ init([Channel, ReaderPid, WriterPid, ConnPid, ConnName, Protocol, User, VHost,
                 tx                      = none,
                 next_tag                = 1,
                 unacked_message_q       = ?QUEUE:new(),
-                queue_names             = #{},
                 queue_monitors          = pmon:new(),
                 consumer_mapping        = #{},
                 queue_consumers         = #{},
-                delivering_queues       = sets:new(),
                 confirm_enabled         = false,
                 publish_seqno           = 1,
-                unconfirmed             = unconfirmed_messages:new(),
+                unconfirmed             = rabbit_confirms:init(),
                 rejected                = [],
                 confirmed               = [],
                 reply_consumer          = none,
                 delivery_flow           = Flow,
                 interceptor_state       = undefined,
-                queue_states            = #{}
+                queue_states            = rabbit_queue_type:init()
                },
     State1 = State#ch{
                interceptor_state = rabbit_channel_interceptor:init(State)},
@@ -567,6 +581,8 @@ prioritise_cast(Msg, _Len, _State) ->
     case Msg of
         {confirm,            _MsgSeqNos, _QPid} -> 5;
         {reject_publish,     _MsgSeqNos, _QPid} -> 5;
+        {queue_event, _, {confirm,            _MsgSeqNos, _QPid}} -> 5;
+        {queue_event, _, {reject_publish,     _MsgSeqNos, _QPid}} -> 5;
         _                                       -> 0
     end.
 
@@ -612,7 +628,8 @@ handle_call({declare_fast_reply_to, Key}, _From,
 
 handle_call(list_queue_states, _From, State = #ch{queue_states = QueueStates}) ->
     %% For testing of cleanup only
-    {reply, maps:keys(QueueStates), State};
+    %% HACK
+    {reply, maps:keys(element(2, QueueStates)), State};
 
 handle_call(_Request, _From, State) ->
     noreply(State).
@@ -667,6 +684,7 @@ handle_cast({deliver, _CTag, _AckReq, _Msg},
             State = #ch{cfg = #conf{state = closing}}) ->
     noreply(State);
 handle_cast({deliver, ConsumerTag, AckRequired, Msg}, State) ->
+    % TODO: handle as action
     noreply(handle_deliver(ConsumerTag, AckRequired, Msg, State));
 
 handle_cast({deliver_reply, _K, _Del},
@@ -725,113 +743,53 @@ handle_cast({mandatory_received, _MsgSeqNo}, State) ->
     %% NB: don't call noreply/1 since we don't want to send confirms.
     noreply_coalesce(State);
 
-handle_cast({reject_publish, MsgSeqNo, _QPid}, State = #ch{unconfirmed = UC}) ->
-    %% It does not matter which queue rejected the message,
-    %% if any queue did, it should not be confirmed.
-    {MaybeRejected, UC1} = unconfirmed_messages:reject_msg(MsgSeqNo, UC),
-    %% NB: don't call noreply/1 since we don't want to send confirms.
-    case MaybeRejected of
-        not_confirmed ->
-            noreply_coalesce(State#ch{unconfirmed = UC1});
-        {rejected, MX} ->
-            noreply_coalesce(record_rejects([MX], State#ch{unconfirmed = UC1}))
-    end;
-
-handle_cast({confirm, MsgSeqNos, QPid}, State) ->
-    noreply_coalesce(confirm(MsgSeqNos, QPid, State));
-
-handle_cast({queue_event, _, {{_, _} = From, {applied, _} = Evt}}, State) ->
-    %% Forward compatibility with queue types, it might be needed during
-    %% upgrades in mixed-version clusters
-    handle_info({ra_event, From, Evt}, State);
-
-handle_cast({queue_event, _, {{_, _} = From, {rejected, _} = Evt}}, State) ->
-    %% Forward compatibility with queue types, it might be needed during
-    %% upgrades in mixed-version clusters
-    handle_info({ra_event, From, Evt}, State);
-
-handle_cast({queue_event, _, {{_, _} = From, {machine, _} = Evt}}, State) ->
-    %% Forward compatibility with queue types, it might be needed during
-    %% upgrades in mixed-version clusters
-    handle_info({ra_event, From, Evt}, State);
-
-handle_cast({queue_event, _, Evt}, State) ->
-    %% Forward compatibility with queue types, it might be needed during
-    %% upgrades in mixed-version clusters
-    handle_cast(Evt, State).
-
-handle_info({ra_event, {Name, _} = From, _} = Evt,
-            #ch{queue_states = QueueStates,
-                queue_names = QNames,
-                consumer_mapping = ConsumerMapping} = State0) ->
-    case QueueStates of
-        #{Name := QState0} ->
-            QName = rabbit_quorum_queue:queue_name(QState0),
-            case rabbit_quorum_queue:handle_event(Evt, QState0) of
-                {{delivery, CTag, Msgs}, QState1} ->
-                    AckRequired = case maps:find(CTag, ConsumerMapping) of
-                                      error ->
-                                          true;
-                                      {ok, {_, {NoAck, _, _, _}}} ->
-                                          not NoAck
-                                  end,
-                    QState2 = case AckRequired of
-                                  false ->
-                                      {MsgIds, _} = lists:unzip(Msgs),
-                                      {ok, FS} = rabbit_quorum_queue:ack(CTag, MsgIds, QState1),
-                                      FS;
-                                  true ->
-                                      QState1
-                              end,
-                    State = lists:foldl(
-                              fun({MsgId, {MsgHeader, Msg}}, Acc) ->
-                                      IsDelivered = case MsgHeader of
-                                                        #{delivery_count := _} ->
-                                                            true;
-                                                        _ ->
-                                                            false
-                                                    end,
-                                      Msg1 = add_delivery_count_header(MsgHeader, Msg),
-                                      handle_deliver(CTag, AckRequired,
-                                                     {QName, From, MsgId, IsDelivered, Msg1},
-                                                     Acc)
-                              end, State0#ch{queue_states = maps:put(Name, QState2, QueueStates)}, Msgs),
-                    noreply(State);
-                {internal, MsgSeqNos, Actions, QState1} ->
-                    State = State0#ch{queue_states = maps:put(Name, QState1, QueueStates)},
-                    %% execute actions
-                    WriterPid = State#ch.cfg#conf.writer_pid,
-                    lists:foreach(fun ({send_credit_reply, Avail}) ->
-                                          ok = rabbit_writer:send_command(
-                                                 WriterPid,
-                                                 #'basic.credit_ok'{available =
-                                                                    Avail});
-                                      ({send_drained, {CTag, Credit}}) ->
-                                          ok = rabbit_writer:send_command(
-                                                 WriterPid,
-                                                 #'basic.credit_drained'{consumer_tag   = CTag,
-                                                                         credit_drained = Credit})
-                                  end, Actions),
-                    noreply_coalesce(confirm(MsgSeqNos, Name, State));
-                eol ->
-                    State1 = handle_consuming_queue_down_or_eol(Name, State0),
-                    State2 = handle_delivering_queue_down(Name, State1),
-                    {ConfirmMXs, RejectMXs, UC1} =
-                        unconfirmed_messages:forget_ref(Name, State2#ch.unconfirmed),
-                    %% Deleted queue is a special case.
-                    %% Do not nack the "rejected" messages.
-                    State3 = record_confirms(ConfirmMXs ++ RejectMXs,
-                                             State2#ch{unconfirmed = UC1}),
-                    erase_queue_stats(QName),
-                    noreply_coalesce(
-                      State3#ch{queue_states = maps:remove(Name, QueueStates),
-                                queue_names = maps:remove(Name, QNames)})
-            end;
+handle_cast({reject_publish, _MsgSeqNo, QPid} = Evt, State) ->
+    %% For backwards compatibility
+    QRef = rabbit_queue_type:find_name_from_pid(QPid, State#ch.queue_states),
+    case QRef of
+        undefined ->
+            %% ignore if no queue could be found for the given pid
+            noreply(State);
         _ ->
-            %% the assumption here is that the queue state has been cleaned up and
-            %% this is a residual Ra notification
-            noreply_coalesce(State0)
+            handle_cast({queue_event, QRef, Evt}, State)
     end;
+
+handle_cast({confirm, _MsgSeqNo, QPid} = Evt, State) ->
+    %% For backwards compatibility
+    QRef = rabbit_queue_type:find_name_from_pid(QPid, State#ch.queue_states),
+    case QRef of
+        undefined ->
+            %% ignore if no queue could be found for the given pid
+            noreply(State);
+        _ ->
+            handle_cast({queue_event, QRef, Evt}, State)
+    end;
+handle_cast({queue_event, QRef, Evt},
+            #ch{queue_states = QueueStates0} = State0) ->
+    case rabbit_queue_type:handle_event(QRef, Evt, QueueStates0) of
+        {ok, QState1, Actions} ->
+            State1 = State0#ch{queue_states = QState1},
+            State = handle_queue_actions(Actions, State1),
+            noreply_coalesce(State);
+        eol ->
+            State1 = handle_consuming_queue_down_or_eol(QRef, State0),
+            {ConfirmMXs, UC1} =
+                rabbit_confirms:remove_queue(QRef, State1#ch.unconfirmed),
+            %% Deleted queue is a special case.
+            %% Do not nack the "rejected" messages.
+            State2 = record_confirms(ConfirmMXs,
+                                     State1#ch{unconfirmed = UC1}),
+            erase_queue_stats(QRef),
+            noreply_coalesce(
+              State2#ch{queue_states = rabbit_queue_type:remove(QRef, QueueStates0)});
+        {protocol_error, Type, Reason, ReasonArgs} ->
+            rabbit_misc:protocol_error(Type, Reason, ReasonArgs)
+    end.
+
+handle_info({ra_event, {Name, _} = From, Evt}, State) ->
+    %% For backwards compatibility
+    QRef = find_queue_name_from_quorum_name(Name, State#ch.queue_states),
+    handle_cast({queue_event, QRef, {From, Evt}}, State);
 
 handle_info({bump_credit, Msg}, State) ->
     %% A rabbit_amqqueue_process is granting credit to our channel. If
@@ -853,23 +811,29 @@ handle_info(emit_stats, State) ->
     %% stats timer.
     {noreply, send_confirms_and_nacks(State1), hibernate};
 
-handle_info({'DOWN', _MRef, process, QPid, Reason}, State) ->
-    State1 = handle_publishing_queue_down(QPid, Reason, State),
-    State3 = handle_consuming_queue_down_or_eol(QPid, State1),
-    State4 = handle_delivering_queue_down(QPid, State3),
-    %% A rabbit_amqqueue_process has died. If our channel was being
-    %% blocked by this process, and no other process is blocking our
-    %% channel, then this channel will be unblocked. This means that
-    %% any credit that was deferred will be sent to the rabbit_reader
-    %% processs that might be blocked by this particular channel.
+handle_info({'DOWN', _MRef, process, QPid, Reason},
+            #ch{queue_states = QStates0,
+                queue_monitors = _QMons} = State0) ->
     credit_flow:peer_down(QPid),
-    #ch{queue_names = QNames, queue_monitors = QMons} = State4,
-    case maps:find(QPid, QNames) of
-        {ok, QName} -> erase_queue_stats(QName);
-        error       -> ok
-    end,
-    noreply(State4#ch{queue_names    = maps:remove(QPid, QNames),
-                      queue_monitors = pmon:erase(QPid, QMons)});
+    case rabbit_queue_type:handle_down(QPid, Reason, QStates0) of
+        {ok, QState1, Actions} ->
+            State1 = State0#ch{queue_states = QState1},
+            State = handle_queue_actions(Actions, State1),
+            noreply_coalesce(State);
+        {eol, QState1, QRef} ->
+            State1 = handle_consuming_queue_down_or_eol(QRef, State0#ch{
+                queue_states = QState1
+            }),
+            {ConfirmMXs, UC1} =
+                rabbit_confirms:remove_queue(QRef, State1#ch.unconfirmed),
+            %% Deleted queue is a special case.
+            %% Do not nack the "rejected" messages.
+            State2 = record_confirms(ConfirmMXs,
+                                     State1#ch{unconfirmed = UC1}),
+            erase_queue_stats(QRef),
+            noreply_coalesce(
+              State2#ch{queue_states = rabbit_queue_type:remove(QRef, State2#ch.queue_states)})
+    end;
 
 handle_info({'EXIT', _Pid, Reason}, State) ->
     {stop, Reason, State};
@@ -886,12 +850,7 @@ handle_info(tick, State0 = #ch{queue_states = QueueStates0}) ->
       true  -> ok = clear_permission_cache();
       _     -> ok
     end,
-    QueueStates1 =
-        maps:filter(fun(_, QS) ->
-                            QName = rabbit_quorum_queue:queue_name(QS),
-                            [] /= rabbit_amqqueue:lookup([QName])
-                    end, QueueStates0),
-    case evaluate_consumer_timeout(State0#ch{queue_states = QueueStates1}) of
+    case evaluate_consumer_timeout(State0#ch{queue_states = QueueStates0}) of
         {noreply, State} ->
             noreply(init_tick_timer(reset_tick_timer(State)));
         Return ->
@@ -917,12 +876,15 @@ handle_post_hibernate(State0) ->
     {noreply, State}.
 
 terminate(_Reason,
-          State = #ch{cfg = #conf{user = #user{username = Username}}}) ->
+          State = #ch{cfg = #conf{user = #user{username = Username}},
+                      queue_states = QueueCtxs}) ->
+    _ = rabbit_queue_type:close(QueueCtxs),
     {_Res, _State1} = notify_queues(State),
     pg_local:leave(rabbit_channels, self()),
     rabbit_event:if_enabled(State, #ch.stats_timer,
                             fun() -> emit_stats(State) end),
     [delete_stats(Tag) || {Tag, _} <- get()],
+    maybe_decrease_global_publishers(State),
     rabbit_core_metrics:channel_closed(self()),
     rabbit_event:notify(channel_closed, [{pid, self()},
                                          {user_who_performed_action, Username}]).
@@ -993,7 +955,7 @@ handle_exception(Reason, State = #ch{cfg = #conf{protocol = Protocol,
         {Channel, CloseMethod} ->
             rabbit_log_channel:error(
                 "Channel error on connection ~p (~s, vhost: '~s',"
-                " user: '~s'), channel ~p:~n~s~n",
+                " user: '~s'), channel ~p:~n~s",
                 [ConnPid, ConnName, VHost, User#user.username,
                  Channel, format_soft_error(Reason)]),
             ok = rabbit_writer:send_command(WriterPid, CloseMethod),
@@ -1330,6 +1292,8 @@ handle_method(#'basic.publish'{exchange    = ExchangeNameBin,
                                    confirm_enabled  = ConfirmEnabled,
                                    delivery_flow    = Flow
                                    }) ->
+    State0 = maybe_increase_global_publishers(State),
+    rabbit_global_counters:messages_received(amqp091, 1),
     check_msg_size(Content, MaxMessageSize, GCThreshold),
     ExchangeName = rabbit_misc:r(VHostPath, exchange, ExchangeNameBin),
     check_write_permitted(ExchangeName, User, AuthzContext),
@@ -1345,12 +1309,13 @@ handle_method(#'basic.publish'{exchange    = ExchangeNameBin,
     check_expiration_header(Props),
     DoConfirm = Tx =/= none orelse ConfirmEnabled,
     {MsgSeqNo, State1} =
-        case DoConfirm orelse Mandatory of
-            false -> {undefined, State};
-            true  -> SeqNo = State#ch.publish_seqno,
-                     {SeqNo, State#ch{publish_seqno = SeqNo + 1}}
+        case DoConfirm of
+            false -> {undefined, State0};
+            true  -> rabbit_global_counters:messages_received_confirm(amqp091, 1),
+                     SeqNo = State0#ch.publish_seqno,
+                     {SeqNo, State0#ch{publish_seqno = SeqNo + 1}}
         end,
-    case rabbit_basic:message(ExchangeName, RoutingKey, DecodedContent) of
+    case rabbit_basic:message_no_id(ExchangeName, RoutingKey, DecodedContent) of
         {ok, Message} ->
             Delivery = rabbit_basic:delivery(
                          Mandatory, DoConfirm, Message, MsgSeqNo),
@@ -1359,9 +1324,11 @@ handle_method(#'basic.publish'{exchange    = ExchangeNameBin,
                                 Username, TraceState),
             DQ = {Delivery#delivery{flow = Flow}, QNames},
             {noreply, case Tx of
-                          none         -> deliver_to_queues(DQ, State1);
-                          {Msgs, Acks} -> Msgs1 = ?QUEUE:in(DQ, Msgs),
-                                          State1#ch{tx = {Msgs1, Acks}}
+                          none ->
+                              deliver_to_queues(DQ, State1);
+                          {Msgs, Acks} ->
+                              Msgs1 = ?QUEUE:in(DQ, Msgs),
+                              State1#ch{tx = {Msgs1, Acks}}
                       end};
         {error, Reason} ->
             precondition_failed("invalid message: ~p", [Reason])
@@ -1378,7 +1345,8 @@ handle_method(#'basic.ack'{delivery_tag = DeliveryTag,
     {Acked, Remaining} = collect_acks(UAMQ, DeliveryTag, Multiple),
     State1 = State#ch{unacked_message_q = Remaining},
     {noreply, case Tx of
-                  none         -> ack(Acked, State1);
+                  none         -> {State2, Actions} = settle_acks(Acked, State1),
+                                  handle_queue_actions(Actions, State2);
                   {Msgs, Acks} -> Acks1 = ack_cons(ack, Acked, Acks),
                                   State1#ch{tx = {Msgs, Acks1}}
               end};
@@ -1398,21 +1366,33 @@ handle_method(#'basic.get'{queue = QueueNameBin, no_ack = NoAck},
     case rabbit_amqqueue:with_exclusive_access_or_die(
            QueueName, ConnPid,
            %% Use the delivery tag as consumer tag for quorum queues
-           fun (Q) -> rabbit_amqqueue:basic_get(
-                        Q, self(), NoAck, rabbit_limiter:pid(Limiter),
-                        DeliveryTag, QueueStates0)
+           fun (Q) ->
+                   rabbit_queue_type:dequeue(
+                     Q, NoAck, rabbit_limiter:pid(Limiter),
+                     DeliveryTag, QueueStates0)
            end) of
-        {ok, MessageCount, Msg} ->
-            handle_basic_get(WriterPid, DeliveryTag, NoAck, MessageCount, Msg, State);
         {ok, MessageCount, Msg, QueueStates} ->
+            {ok, QueueType} = rabbit_queue_type:module(QueueName, QueueStates),
             handle_basic_get(WriterPid, DeliveryTag, NoAck, MessageCount, Msg,
-                             State#ch{queue_states = QueueStates});
+                             QueueType, State#ch{queue_states = QueueStates});
         {empty, QueueStates} ->
+            {ok, QueueType} = rabbit_queue_type:module(QueueName, QueueStates),
+            rabbit_global_counters:messages_get_empty(amqp091, QueueType, 1),
             ?INCR_STATS(queue_stats, QueueName, 1, get_empty, State),
             {reply, #'basic.get_empty'{}, State#ch{queue_states = QueueStates}};
-        empty ->
-            ?INCR_STATS(queue_stats, QueueName, 1, get_empty, State),
-            {reply, #'basic.get_empty'{}, State}
+        {error, {unsupported, single_active_consumer}} ->
+            rabbit_misc:protocol_error(
+              resource_locked,
+              "cannot obtain access to locked ~s. basic.get operations "
+              "are not supported by quorum queues with single active consumer",
+              [rabbit_misc:rs(QueueName)]);
+        {error, Reason} ->
+            %% TODO add queue type to error message
+            rabbit_misc:protocol_error(internal_error,
+                                       "Cannot get a message from queue '~s': ~p",
+                                       [rabbit_misc:rs(QueueName), Reason]);
+        {protocol_error, Type, Reason, ReasonArgs} ->
+            rabbit_misc:protocol_error(Type, Reason, ReasonArgs)
     end;
 
 handle_method(#'basic.consume'{queue        = <<"amq.rabbitmq.reply-to">>,
@@ -1430,12 +1410,9 @@ handle_method(#'basic.consume'{queue        = <<"amq.rabbitmq.reply-to">>,
                                           rabbit_guid:gen_secure(), "amq.ctag");
                                Other -> Other
                            end,
-                    %% Precalculate both suffix and key; base64 encoding is
-                    %% expensive
-                    Key = base64:encode(rabbit_guid:gen_secure()),
-                    PidEnc = base64:encode(term_to_binary(self())),
-                    Suffix = <<PidEnc/binary, ".", Key/binary>>,
-                    Consumer = {CTag, Suffix, binary_to_list(Key)},
+                    %% Precalculate both suffix and key
+                    {Key, Suffix} = rabbit_direct_reply_to:compute_key_and_suffix_v2(self()),
+                    Consumer = {CTag, Suffix, Key},
                     State1 = State#ch{reply_consumer = Consumer},
                     case NoWait of
                         true  -> {noreply, State1};
@@ -1500,6 +1477,14 @@ handle_method(#'basic.consume'{queue        = QueueNameBin,
                 {error, global_qos_not_supported_for_queue_type} ->
                     rabbit_misc:protocol_error(
                       not_implemented, "~s does not support global qos",
+                      [rabbit_misc:rs(QueueName)]);
+                {error, timeout} ->
+                    rabbit_misc:protocol_error(
+                      internal_error, "~s timeout occurred during consume operation",
+                      [rabbit_misc:rs(QueueName)]);
+                {error, no_local_stream_replica_available} ->
+                    rabbit_misc:protocol_error(
+                      resource_error, "~s does not have a running local replica",
                       [rabbit_misc:rs(QueueName)])
             end;
         {ok, _} ->
@@ -1519,16 +1504,16 @@ handle_method(#'basic.cancel'{consumer_tag = ConsumerTag, nowait = NoWait},
             %% Spec requires we ignore this situation.
             return_ok(State, NoWait, OkMsg);
         {ok, {Q, _CParams}} when ?is_amqqueue(Q) ->
-            QPid = amqqueue:get_pid(Q),
+            QName = amqqueue:get_name(Q),
+
             ConsumerMapping1 = maps:remove(ConsumerTag, ConsumerMapping),
-            QRef = qpid_to_ref(QPid),
             QCons1 =
-                case maps:find(QRef, QCons) of
+                case maps:find(QName, QCons) of
                     error       -> QCons;
                     {ok, CTags} -> CTags1 = gb_sets:delete(ConsumerTag, CTags),
                                    case gb_sets:is_empty(CTags1) of
-                                       true  -> maps:remove(QRef, QCons);
-                                       false -> maps:put(QRef, CTags1, QCons)
+                                       true  -> maps:remove(QName, QCons);
+                                       false -> maps:put(QName, CTags1, QCons)
                                    end
                 end,
             NewState = State#ch{consumer_mapping = ConsumerMapping1,
@@ -1541,11 +1526,12 @@ handle_method(#'basic.cancel'{consumer_tag = ConsumerTag, nowait = NoWait},
             case rabbit_misc:with_exit_handler(
                    fun () -> {error, not_found} end,
                    fun () ->
-                           rabbit_amqqueue:basic_cancel(
-                             Q, self(), ConsumerTag, ok_msg(NoWait, OkMsg),
+                           rabbit_queue_type:cancel(
+                             Q, ConsumerTag, ok_msg(NoWait, OkMsg),
                              Username, QueueStates0)
                    end) of
                 {ok, QueueStates} ->
+                    rabbit_global_counters:consumer_deleted(amqp091),
                     {noreply, NewState#ch{queue_states = QueueStates}};
                 {error, not_found} ->
                     %% Spec requires we ignore this situation.
@@ -1563,6 +1549,11 @@ handle_method(#'basic.qos'{global         = false,
                              limiter = Limiter}) ->
     %% Ensures that if default was set, it's overridden
     Limiter1 = rabbit_limiter:unlimit_prefetch(Limiter),
+    case rabbit_limiter:is_active(Limiter) of
+        true  -> rabbit_amqqueue:deactivate_limit_all(
+                   classic_consumer_queue_pids(State#ch.consumer_mapping), self());
+        false -> ok
+    end,
     {reply, #'basic.qos_ok'{}, State#ch{cfg = Cfg#conf{consumer_prefetch = PrefetchCount},
                                         limiter = Limiter1}};
 
@@ -1570,6 +1561,11 @@ handle_method(#'basic.qos'{global         = true,
                            prefetch_count = 0},
               _, State = #ch{limiter = Limiter}) ->
     Limiter1 = rabbit_limiter:unlimit_prefetch(Limiter),
+    case rabbit_limiter:is_active(Limiter) of
+        true  -> rabbit_amqqueue:deactivate_limit_all(
+                   classic_consumer_queue_pids(State#ch.consumer_mapping), self());
+        false -> ok
+    end,
     {reply, #'basic.qos_ok'{}, State#ch{limiter = Limiter1}};
 
 handle_method(#'basic.qos'{global         = true,
@@ -1582,31 +1578,33 @@ handle_method(#'basic.qos'{global         = true,
     case ((not rabbit_limiter:is_active(Limiter)) andalso
           rabbit_limiter:is_active(Limiter1)) of
         true  -> rabbit_amqqueue:activate_limit_all(
-                   consumer_queue_refs(State#ch.consumer_mapping), self());
+                   classic_consumer_queue_pids(State#ch.consumer_mapping), self());
         false -> ok
     end,
     {reply, #'basic.qos_ok'{}, State#ch{limiter = Limiter1}};
 
 handle_method(#'basic.recover_async'{requeue = true},
-              _, State = #ch{unacked_message_q = UAMQ, limiter = Limiter,
+              _, State = #ch{unacked_message_q = UAMQ,
+                             limiter = Limiter,
                              queue_states = QueueStates0}) ->
     OkFun = fun () -> ok end,
     UAMQL = ?QUEUE:to_list(UAMQ),
-    QueueStates =
+    {QueueStates, Actions} =
         foreach_per_queue(
-          fun ({QPid, CTag}, MsgIds, Acc0) ->
+          fun ({QPid, CTag}, MsgIds, {Acc0, Actions0}) ->
                   rabbit_misc:with_exit_handler(
                     OkFun,
                     fun () ->
-                            rabbit_amqqueue:requeue(QPid, {CTag, MsgIds},
-                                                    self(), Acc0)
+                            {ok, Acc, Act} = rabbit_amqqueue:requeue(QPid, {CTag, MsgIds}, Acc0),
+                            {Acc, Act ++ Actions0}
                     end)
-          end, lists:reverse(UAMQL), QueueStates0),
+          end, lists:reverse(UAMQL), {QueueStates0, []}),
     ok = notify_limiter(Limiter, UAMQL),
+    State1 = handle_queue_actions(Actions, State#ch{unacked_message_q = ?QUEUE:new(),
+                                                    queue_states = QueueStates}),
     %% No answer required - basic.recover is the newer, synchronous
     %% variant of this method
-    {noreply, State#ch{unacked_message_q = ?QUEUE:new(),
-                       queue_states = QueueStates}};
+    {noreply, State1};
 
 handle_method(#'basic.recover_async'{requeue = false}, _, _State) ->
     rabbit_misc:protocol_error(not_implemented, "requeue=false", []);
@@ -1721,16 +1719,20 @@ handle_method(#'tx.select'{}, _, State) ->
 handle_method(#'tx.commit'{}, _, #ch{tx = none}) ->
     precondition_failed("channel is not transactional");
 
-handle_method(#'tx.commit'{}, _, State = #ch{tx      = {Msgs, Acks},
+handle_method(#'tx.commit'{}, _, State = #ch{tx      = {Deliveries, Acks},
                                              limiter = Limiter}) ->
-    State1 = queue_fold(fun deliver_to_queues/2, State, Msgs),
+    State1 = ?QUEUE:fold(fun deliver_to_queues/2, State, Deliveries),
     Rev = fun (X) -> lists:reverse(lists:sort(X)) end,
-    State2 = lists:foldl(fun ({ack,     A}, Acc) ->
-                                 ack(Rev(A), Acc);
-                             ({Requeue, A}, Acc) ->
-                                 internal_reject(Requeue, Rev(A), Limiter, Acc)
-                         end, State1, lists:reverse(Acks)),
-    {noreply, maybe_complete_tx(State2#ch{tx = committing})};
+    {State2, Actions2} =
+        lists:foldl(fun ({ack,     A}, {Acc, Actions}) ->
+                            {Acc0, Actions0} = settle_acks(Rev(A), Acc),
+                            {Acc0, Actions ++ Actions0};
+                        ({Requeue, A}, {Acc, Actions}) ->
+                            {Acc0, Actions0} = internal_reject(Requeue, Rev(A), Limiter, Acc),
+                            {Acc0, Actions ++ Actions0}
+                    end, {State1, []}, lists:reverse(Acks)),
+    State3 = handle_queue_actions(Actions2, State2),
+    {noreply, maybe_complete_tx(State3#ch{tx = committing})};
 
 handle_method(#'tx.rollback'{}, _, #ch{tx = none}) ->
     precondition_failed("channel is not transactional");
@@ -1762,9 +1764,8 @@ handle_method(#'basic.credit'{consumer_tag = CTag,
                              queue_states = QStates0}) ->
     case maps:find(CTag, Consumers) of
         {ok, {Q, _CParams}} ->
-            {ok, QStates} = rabbit_amqqueue:credit(
-                              Q, self(), CTag, Credit, Drain, QStates0),
-            {noreply, State#ch{queue_states = QStates}};
+            {ok, QStates, Actions} = rabbit_queue_type:credit(Q, CTag, Credit, Drain, QStates0),
+            {noreply, handle_queue_actions(Actions, State#ch{queue_states = QStates})};
         error -> precondition_failed(
                    "unknown consumer tag '~s'", [CTag])
     end;
@@ -1795,43 +1796,34 @@ basic_consume(QueueName, NoAck, ConsumerPrefetch, ActualConsumerTag,
                       ConsumerPrefetch, ActualConsumerTag,
                       ExclusiveConsume, Args,
                       ok_msg(NoWait, #'basic.consume_ok'{
-                               consumer_tag = ActualConsumerTag}),
+                                        consumer_tag = ActualConsumerTag}),
                       Username, QueueStates0),
                     Q}
            end) of
-        {{ok, QueueStates}, Q} when ?is_amqqueue(Q) ->
-            QPid = amqqueue:get_pid(Q),
-            QName = amqqueue:get_name(Q),
+        {{ok, QueueStates, Actions}, Q} when ?is_amqqueue(Q) ->
+            rabbit_global_counters:consumer_created(amqp091),
             CM1 = maps:put(
                     ActualConsumerTag,
                     {Q, {NoAck, ConsumerPrefetch, ExclusiveConsume, Args}},
                     ConsumerMapping),
-            State1 = track_delivering_queue(
-                       NoAck, QPid, QName,
-                       State#ch{consumer_mapping = CM1,
-                                queue_states = QueueStates}),
+
+            State1 = State#ch{consumer_mapping = CM1,
+                              queue_states = QueueStates},
+            State2 = handle_queue_actions(Actions, State1),
             {ok, case NoWait of
-                     true  -> consumer_monitor(ActualConsumerTag, State1);
-                     false -> State1
-                 end};
-        {ok, Q} when ?is_amqqueue(Q) ->
-            QPid = amqqueue:get_pid(Q),
-            QName = amqqueue:get_name(Q),
-            CM1 = maps:put(
-                    ActualConsumerTag,
-                    {Q, {NoAck, ConsumerPrefetch, ExclusiveConsume, Args}},
-                    ConsumerMapping),
-            State1 = track_delivering_queue(
-                       NoAck, QPid, QName,
-                       State#ch{consumer_mapping = CM1}),
-            {ok, case NoWait of
-                     true  -> consumer_monitor(ActualConsumerTag, State1);
-                     false -> State1
+                     true  -> consumer_monitor(ActualConsumerTag, State2);
+                     false -> State2
                  end};
         {{error, exclusive_consume_unavailable} = E, _Q} ->
             E;
         {{error, global_qos_not_supported_for_queue_type} = E, _Q} ->
-            E
+            E;
+        {{error, no_local_stream_replica_available} = E, _Q} ->
+            E;
+        {{error, timeout} = E, _Q} ->
+            E;
+        {{protocol_error, Type, Reason, ReasonArgs}, _Q} ->
+            rabbit_misc:protocol_error(Type, Reason, ReasonArgs)
     end.
 
 maybe_stat(false, Q) -> rabbit_amqqueue:stat(Q);
@@ -1839,84 +1831,38 @@ maybe_stat(true, _Q) -> {ok, 0, 0}.
 
 consumer_monitor(ConsumerTag,
                  State = #ch{consumer_mapping = ConsumerMapping,
-                             queue_monitors   = QMons,
                              queue_consumers  = QCons}) ->
     {Q, _} = maps:get(ConsumerTag, ConsumerMapping),
-    QPid = amqqueue:get_pid(Q),
-    QRef = qpid_to_ref(QPid),
+    QRef = amqqueue:get_name(Q),
     CTags1 = case maps:find(QRef, QCons) of
                  {ok, CTags} -> gb_sets:insert(ConsumerTag, CTags);
                  error -> gb_sets:singleton(ConsumerTag)
              end,
     QCons1 = maps:put(QRef, CTags1, QCons),
-    State#ch{queue_monitors  = maybe_monitor(QRef, QMons),
-             queue_consumers = QCons1}.
+    State#ch{queue_consumers = QCons1}.
 
-track_delivering_queue(NoAck, QPid, QName,
-                       State = #ch{queue_names = QNames,
-                                   queue_monitors = QMons,
-                                   delivering_queues = DQ}) ->
-    QRef = qpid_to_ref(QPid),
-    State#ch{queue_names = maps:put(QRef, QName, QNames),
-             queue_monitors = maybe_monitor(QRef, QMons),
-             delivering_queues = case NoAck of
-                                     true  -> DQ;
-                                     false -> sets:add_element(QRef, DQ)
-                                 end}.
-
-handle_publishing_queue_down(QPid, Reason,
-                             State = #ch{unconfirmed = UC,
-                                         queue_names = QNames})
-  when ?IS_CLASSIC(QPid) ->
-    case maps:get(QPid, QNames, none) of
-        %% The queue is unknown, the confirm must have been processed already
-        none   -> State;
-        _QName ->
-            case {rabbit_misc:is_abnormal_exit(Reason), Reason} of
-                {true, _} ->
-                    {RejectMXs, UC1} =
-                        unconfirmed_messages:reject_all_for_queue(QPid, UC),
-                    record_rejects(RejectMXs, State#ch{unconfirmed = UC1});
-                {false, normal} ->
-                    {ConfirmMXs, RejectMXs, UC1} =
-                        unconfirmed_messages:forget_ref(QPid, UC),
-                    %% Deleted queue is a special case.
-                    %% Do not nack the "rejected" messages.
-                    record_confirms(ConfirmMXs ++ RejectMXs,
-                                    State#ch{unconfirmed = UC1});
-                {false, _} ->
-                    {ConfirmMXs, RejectMXs, UC1} =
-                        unconfirmed_messages:forget_ref(QPid, UC),
-                    State1 = record_confirms(ConfirmMXs,
-                                             State#ch{unconfirmed = UC1}),
-                    record_rejects(RejectMXs, State1)
-            end
-    end;
-handle_publishing_queue_down(QPid, _Reason, _State) when ?IS_QUORUM(QPid) ->
-    error(quorum_queues_should_never_be_monitored).
-
-handle_consuming_queue_down_or_eol(QRef,
-                                   State = #ch{queue_consumers = QCons,
-                                               queue_names = QNames}) ->
-    ConsumerTags = case maps:find(QRef, QCons) of
+handle_consuming_queue_down_or_eol(QName,
+                                   State = #ch{queue_consumers = QCons}) ->
+    ConsumerTags = case maps:find(QName, QCons) of
                        error       -> gb_sets:new();
                        {ok, CTags} -> CTags
                    end,
     gb_sets:fold(
       fun (CTag, StateN = #ch{consumer_mapping = CMap}) ->
-              QName = maps:get(QRef, QNames),
               case queue_down_consumer_action(CTag, CMap) of
                   remove ->
                       cancel_consumer(CTag, QName, StateN);
                   {recover, {NoAck, ConsumerPrefetch, Exclusive, Args}} ->
-                      case catch basic_consume( %% [0]
+                      case catch basic_consume(
                                    QName, NoAck, ConsumerPrefetch, CTag,
                                    Exclusive, Args, true, StateN) of
-                          {ok, StateN1} -> StateN1;
-                          _             -> cancel_consumer(CTag, QName, StateN)
+                          {ok, StateN1} ->
+                              StateN1;
+                          _Err ->
+                              cancel_consumer(CTag, QName, StateN)
                       end
               end
-      end, State#ch{queue_consumers = maps:remove(QRef, QCons)}, ConsumerTags).
+      end, State#ch{queue_consumers = maps:remove(QName, QCons)}, ConsumerTags).
 
 %% [0] There is a slight danger here that if a queue is deleted and
 %% then recreated again the reconsume will succeed even though it was
@@ -1932,6 +1878,7 @@ cancel_consumer(CTag, QName,
                                                   nowait       = true}, State);
         _            -> ok
     end,
+    rabbit_global_counters:consumer_deleted(amqp091),
     rabbit_event:notify(consumer_deleted, [{consumer_tag, CTag},
                                            {channel,      self()},
                                            {queue,        QName}]),
@@ -1943,9 +1890,6 @@ queue_down_consumer_action(CTag, CMap) ->
         {bool, true} -> remove;
         _            -> {recover, ConsumeSpec}
     end.
-
-handle_delivering_queue_down(QRef, State = #ch{delivering_queues = DQ}) ->
-    State#ch{delivering_queues = sets:del_element(QRef, DQ)}.
 
 binding_action(Fun, SourceNameBin0, DestinationType, DestinationNameBin0,
                RoutingKey, Arguments, VHostPath, ConnPid, AuthzContext,
@@ -2013,24 +1957,36 @@ reject(DeliveryTag, Requeue, Multiple,
     {Acked, Remaining} = collect_acks(UAMQ, DeliveryTag, Multiple),
     State1 = State#ch{unacked_message_q = Remaining},
     {noreply, case Tx of
-                  none         -> internal_reject(Requeue, Acked, State1#ch.limiter, State1);
-                  {Msgs, Acks} -> Acks1 = ack_cons(Requeue, Acked, Acks),
-                                  State1#ch{tx = {Msgs, Acks1}}
+                  none ->
+                      {State2, Actions} = internal_reject(Requeue, Acked, State1#ch.limiter, State1),
+                      handle_queue_actions(Actions, State2);
+                  {Msgs, Acks} ->
+                      Acks1 = ack_cons(Requeue, Acked, Acks),
+                      State1#ch{tx = {Msgs, Acks1}}
               end}.
 
 %% NB: Acked is in youngest-first order
 internal_reject(Requeue, Acked, Limiter,
                 State = #ch{queue_states = QueueStates0}) ->
-    QueueStates = foreach_per_queue(
-                    fun({QPid, CTag}, MsgIds, Acc0) ->
-                            rabbit_amqqueue:reject(QPid, Requeue, {CTag, MsgIds},
-                                                   self(), Acc0)
-                    end, Acked, QueueStates0),
+    {QueueStates, Actions} =
+        foreach_per_queue(
+          fun({QRef, CTag}, MsgIds, {Acc0, Actions0}) ->
+                  Op = case Requeue of
+                           false -> discard;
+                           true -> requeue
+                       end,
+                  case rabbit_queue_type:settle(QRef, Op, CTag, MsgIds, Acc0) of
+                      {ok, Acc, Actions} ->
+                          {Acc, Actions0 ++ Actions};
+                      {protocol_error, ErrorType, Reason, ReasonArgs} ->
+                          rabbit_misc:protocol_error(ErrorType, Reason, ReasonArgs)
+                  end
+          end, Acked, {QueueStates0, []}),
     ok = notify_limiter(Limiter, Acked),
-    State#ch{queue_states = QueueStates}.
+    {State#ch{queue_states = QueueStates}, Actions}.
 
-record_sent(Type, Tag, AckRequired,
-            Msg = {QName, QPid, MsgId, Redelivered, _Message},
+record_sent(Type, QueueType, Tag, AckRequired,
+            Msg = {QName, _QPid, MsgId, Redelivered, _Message},
             State = #ch{cfg = #conf{channel = ChannelNum,
                                     trace_state = TraceState,
                                     user = #user{username = Username},
@@ -2039,73 +1995,104 @@ record_sent(Type, Tag, AckRequired,
                         unacked_message_q = UAMQ,
                         next_tag          = DeliveryTag
                        }) ->
-    ?INCR_STATS(queue_stats, QName, 1, case {Type, AckRequired} of
-                                           {get, true}      -> get;
-                                           {get, false}     -> get_no_ack;
-                                           {deliver, true}  -> deliver;
-                                           {deliver, false} -> deliver_no_ack
-                                       end, State),
+    rabbit_global_counters:messages_delivered(amqp091, QueueType, 1),
+    ?INCR_STATS(queue_stats, QName, 1,
+                case {Type, AckRequired} of
+                    {get, true} ->
+                        rabbit_global_counters:messages_delivered_get_manual_ack(amqp091, QueueType, 1),
+                        get;
+                    {get, false} ->
+                        rabbit_global_counters:messages_delivered_get_auto_ack(amqp091, QueueType, 1),
+                        get_no_ack;
+                    {deliver, true} ->
+                        rabbit_global_counters:messages_delivered_consume_manual_ack(amqp091, QueueType, 1),
+                        deliver;
+                    {deliver, false} ->
+                        rabbit_global_counters:messages_delivered_consume_auto_ack(amqp091, QueueType, 1),
+                        deliver_no_ack
+                end, State),
     case Redelivered of
-        true  -> ?INCR_STATS(queue_stats, QName, 1, redeliver, State);
-        false -> ok
+        true ->
+            rabbit_global_counters:messages_redelivered(amqp091, QueueType, 1),
+            ?INCR_STATS(queue_stats, QName, 1, redeliver, State);
+        false ->
+            ok
     end,
     DeliveredAt = os:system_time(millisecond),
     rabbit_trace:tap_out(Msg, ConnName, ChannelNum, Username, TraceState),
     UAMQ1 = case AckRequired of
-                true  -> ?QUEUE:in({DeliveryTag, Tag, DeliveredAt,
-                                    {QPid, MsgId}}, UAMQ);
-                false -> UAMQ
+                true ->
+                    ?QUEUE:in(#pending_ack{delivery_tag = DeliveryTag,
+                                           tag = Tag,
+                                           delivered_at = DeliveredAt,
+                                           queue = QName,
+                                           msg_id = MsgId}, UAMQ);
+                false ->
+                    UAMQ
             end,
     State#ch{unacked_message_q = UAMQ1, next_tag = DeliveryTag + 1}.
 
-%% NB: returns acks in youngest-first order
-collect_acks(Q, 0, true) ->
-    {lists:reverse(?QUEUE:to_list(Q)), ?QUEUE:new()};
-collect_acks(Q, DeliveryTag, Multiple) ->
-    collect_acks([], [], Q, DeliveryTag, Multiple).
+%% Records a client-sent acknowledgement. Handles both single delivery acks
+%% and multi-acks.
+%%
+%% Returns a triple of acknowledged pending acks, remaining pending acks,
+%% and outdated pending acks (if any).
+%% Sorts each group in the youngest-first order (ascending by delivery tag).
+collect_acks(UAMQ, 0, true) ->
+    {lists:reverse(?QUEUE:to_list(UAMQ)), ?QUEUE:new()};
+collect_acks(UAMQ, DeliveryTag, Multiple) ->
+    collect_acks([], [], UAMQ, DeliveryTag, Multiple).
 
-collect_acks(ToAcc, PrefixAcc, Q, DeliveryTag, Multiple) ->
-    case ?QUEUE:out(Q) of
-        {{value, UnackedMsg = {CurrentDeliveryTag, _ConsumerTag, _Time, _Msg}},
-         QTail} ->
-            if CurrentDeliveryTag == DeliveryTag ->
-                    {[UnackedMsg | ToAcc],
-                     case PrefixAcc of
-                         [] -> QTail;
-                         _  -> ?QUEUE:join(
-                                 ?QUEUE:from_list(lists:reverse(PrefixAcc)),
-                                 QTail)
-                     end};
+collect_acks(AcknowledgedAcc, RemainingAcc, UAMQ, DeliveryTag, Multiple) ->
+    case ?QUEUE:out(UAMQ) of
+        {{value, UnackedMsg = #pending_ack{delivery_tag = CurrentDT}},
+         UAMQTail} ->
+            if CurrentDT == DeliveryTag ->
+                   {[UnackedMsg | AcknowledgedAcc],
+                    case RemainingAcc of
+                        [] -> UAMQTail;
+                        _  -> ?QUEUE:join(
+                                 ?QUEUE:from_list(lists:reverse(RemainingAcc)),
+                                 UAMQTail)
+                    end};
                Multiple ->
-                    collect_acks([UnackedMsg | ToAcc], PrefixAcc,
-                                 QTail, DeliveryTag, Multiple);
+                    collect_acks([UnackedMsg | AcknowledgedAcc], RemainingAcc,
+                                 UAMQTail, DeliveryTag, Multiple);
                true ->
-                    collect_acks(ToAcc, [UnackedMsg | PrefixAcc],
-                                 QTail, DeliveryTag, Multiple)
+                    collect_acks(AcknowledgedAcc, [UnackedMsg | RemainingAcc],
+                                 UAMQTail, DeliveryTag, Multiple)
             end;
         {empty, _} ->
             precondition_failed("unknown delivery tag ~w", [DeliveryTag])
     end.
 
-%% NB: Acked is in youngest-first order
-ack(Acked, State = #ch{queue_names = QNames,
-                       queue_states = QueueStates0}) ->
-    QueueStates =
+%% Settles (acknowledges) messages at the queue replica process level.
+%% This happens in the youngest-first order (ascending by delivery tag).
+settle_acks(Acks, State = #ch{queue_states = QueueStates0}) ->
+    {QueueStates, Actions} =
         foreach_per_queue(
-          fun ({QPid, CTag}, MsgIds, Acc0) ->
-                  Acc = rabbit_amqqueue:ack(QPid, {CTag, MsgIds}, self(), Acc0),
-                  incr_queue_stats(QPid, QNames, MsgIds, State),
-                  Acc
-          end, Acked, QueueStates0),
-    ok = notify_limiter(State#ch.limiter, Acked),
-    State#ch{queue_states = QueueStates}.
+          fun ({QRef, CTag}, MsgIds, {Acc0, ActionsAcc0}) ->
+                  case rabbit_queue_type:settle(QRef, complete, CTag,
+                                                MsgIds, Acc0) of
+                      {ok, Acc, ActionsAcc} ->
+                          incr_queue_stats(QRef, MsgIds, State),
+                          {Acc, ActionsAcc0 ++ ActionsAcc};
+                      {protocol_error, ErrorType, Reason, ReasonArgs} ->
+                          rabbit_misc:protocol_error(ErrorType, Reason, ReasonArgs)
+                  end
+          end, Acks, {QueueStates0, []}),
+    ok = notify_limiter(State#ch.limiter, Acks),
+    {State#ch{queue_states = QueueStates}, Actions}.
 
-incr_queue_stats(QPid, QNames, MsgIds, State) ->
-    case maps:find(qpid_to_ref(QPid), QNames) of
-        {ok, QName} -> Count = length(MsgIds),
-                       ?INCR_STATS(queue_stats, QName, Count, ack, State);
-        error       -> ok
-    end.
+incr_queue_stats(QName, MsgIds, State = #ch{queue_states = QueueStates}) ->
+    Count = length(MsgIds),
+    case rabbit_queue_type:module(QName, QueueStates) of
+        {ok, QueueType} ->
+            rabbit_global_counters:messages_acknowledged(amqp091, QueueType, Count);
+        _ ->
+            noop
+    end,
+    ?INCR_STATS(queue_stats, QName, Count, ack, State).
 
 %% {Msgs, Acks}
 %%
@@ -2124,31 +2111,32 @@ new_tx() -> {?QUEUE:new(), []}.
 notify_queues(State = #ch{cfg = #conf{state = closing}}) ->
     {ok, State};
 notify_queues(State = #ch{consumer_mapping  = Consumers,
-                          cfg = Cfg,
-                          delivering_queues = DQ }) ->
-    QRefs0 = sets:to_list(
-               sets:union(sets:from_list(consumer_queue_refs(Consumers)), DQ)),
-    %% filter to only include pids to avoid trying to notify quorum queues
-    QPids = [P || P <- QRefs0, ?IS_CLASSIC(P)],
+                          cfg = Cfg}) ->
+    QPids = classic_consumer_queue_pids(Consumers),
     Timeout = get_operation_timeout(),
     {rabbit_amqqueue:notify_down_all(QPids, self(), Timeout),
      State#ch{cfg = Cfg#conf{state = closing}}}.
 
 foreach_per_queue(_F, [], Acc) ->
     Acc;
-foreach_per_queue(F, [{_DTag, CTag, _Time, {QPid, MsgId}}], Acc) ->
+foreach_per_queue(F, [#pending_ack{tag = CTag,
+                                   queue = QName,
+                                   msg_id = MsgId}], Acc) ->
     %% quorum queue, needs the consumer tag
-    F({QPid, CTag}, [MsgId], Acc);
+    F({QName, CTag}, [MsgId], Acc);
 foreach_per_queue(F, UAL, Acc) ->
-    T = lists:foldl(fun ({_DTag, CTag, _Time, {QPid, MsgId}}, T) ->
-                            rabbit_misc:gb_trees_cons({QPid, CTag}, MsgId, T)
+    T = lists:foldl(fun (#pending_ack{tag = CTag,
+                                      queue = QName,
+                                      msg_id = MsgId}, T) ->
+                            rabbit_misc:gb_trees_cons({QName, CTag}, MsgId, T)
                     end, gb_trees:empty(), UAL),
     rabbit_misc:gb_trees_fold(fun (Key, Val, Acc0) -> F(Key, Val, Acc0) end, Acc, T).
 
-consumer_queue_refs(Consumers) ->
-    lists:usort([qpid_to_ref(amqqueue:get_pid(Q))
-                 || {_Key, {Q, _CParams}} <- maps:to_list(Consumers),
-                    amqqueue:is_amqqueue(Q)]).
+%% hack to patch up missing queue type behaviour for classic queue
+classic_consumer_queue_pids(Consumers) ->
+    lists:usort([amqqueue:get_pid(Q)
+                 || {Q, _CParams} <- maps:values(Consumers),
+                    amqqueue:get_type(Q) == rabbit_classic_queue]).
 
 %% tell the limiter about the number of acks that have been received
 %% for messages delivered to subscribed consumers, but not acks for
@@ -2160,13 +2148,13 @@ notify_limiter(Limiter, Acked) ->
     %% common case.
      case rabbit_limiter:is_active(Limiter) of
         false -> ok;
-        true  -> case lists:foldl(fun ({_, CTag, _, _}, Acc) when is_integer(CTag) ->
+        true  -> case lists:foldl(fun (#pending_ack{tag = CTag}, Acc) when is_integer(CTag) ->
                                           %% Quorum queues use integer CTags
                                           %% classic queues use binaries
                                           %% Quorum queues do not interact
                                           %% with limiters
                                           Acc;
-                                      ({_,    _, _, _}, Acc) -> Acc + 1
+                                      (_, Acc) -> Acc + 1
                                   end, 0, Acked) of
                      0     -> ok;
                      Count -> rabbit_limiter:ack(Limiter, Count)
@@ -2176,105 +2164,113 @@ notify_limiter(Limiter, Acked) ->
 deliver_to_queues({#delivery{message   = #basic_message{exchange_name = XName},
                              confirm   = false,
                              mandatory = false},
-                   _RoutedToQs = []}, State) -> %% optimisation
+                   _RoutedToQueueNames = []}, State) -> %% optimisation when there are no queues
     ?INCR_STATS(exchange_stats, XName, 1, publish, State),
+    rabbit_global_counters:messages_unroutable_dropped(amqp091, 1),
     ?INCR_STATS(exchange_stats, XName, 1, drop_unroutable, State),
     State;
-deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{
-                                                       exchange_name = XName},
+deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{exchange_name = XName},
                                         mandatory  = Mandatory,
                                         confirm    = Confirm,
                                         msg_seq_no = MsgSeqNo},
-                   DelQNames}, State = #ch{queue_names    = QNames,
-                                           queue_monitors = QMons,
-                                           queue_states = QueueStates0}) ->
-    Qs = rabbit_amqqueue:lookup(DelQNames),
-    {DeliveredQPids, DeliveredQQPids, QueueStates} =
-        rabbit_amqqueue:deliver(Qs, Delivery, QueueStates0),
-    AllDeliveredQRefs = DeliveredQPids ++ [N || {N, _} <- DeliveredQQPids],
-    %% The maybe_monitor_all/2 monitors all queues to which we
-    %% delivered. But we want to monitor even queues we didn't deliver
-    %% to, since we need their 'DOWN' messages to clean
-    %% queue_names. So we also need to monitor each QPid from
-    %% queues. But that only gets the masters (which is fine for
-    %% cleaning queue_names), so we need the union of both.
-    %%
-    %% ...and we need to add even non-delivered queues to queue_names
-    %% since alternative algorithms to update queue_names less
-    %% frequently would in fact be more expensive in the common case.
-    {QNames1, QMons1} =
-        lists:foldl(fun (Q, {QNames0, QMons0}) when ?is_amqqueue(Q) ->
-            QPid = amqqueue:get_pid(Q),
-            QRef = qpid_to_ref(QPid),
-            QName = amqqueue:get_name(Q),
-            case ?IS_CLASSIC(QRef) of
-                true ->
-                    SPids = amqqueue:get_slave_pids(Q),
-                    NewQNames =
-                        maps:from_list([{Ref, QName} || Ref <- [QRef | SPids]]),
-                    {maps:merge(NewQNames, QNames0),
-                     maybe_monitor_all([QPid | SPids], QMons0)};
-                false ->
-                    {maps:put(QRef, QName, QNames0), QMons0}
-            end
-        end,
-        {QNames, QMons}, Qs),
-    State1 = State#ch{queue_names    = QNames1,
-                      queue_monitors = QMons1},
-    %% NB: the order here is important since basic.returns must be
-    %% sent before confirms.
-    ok = process_routing_mandatory(Mandatory, AllDeliveredQRefs,
-                                   Message, State1),
-    AllDeliveredQNames = [ QName || QRef        <- AllDeliveredQRefs,
-                                    {ok, QName} <- [maps:find(QRef, QNames1)]],
-    State2 = process_routing_confirm(Confirm,
-                                     AllDeliveredQRefs,
-                                     AllDeliveredQNames,
-                                     MsgSeqNo,
-                                     XName, State1),
-    case rabbit_event:stats_level(State, #ch.stats_timer) of
-        fine ->
-            ?INCR_STATS(exchange_stats, XName, 1, publish),
-            [?INCR_STATS(queue_exchange_stats,
-                         {amqqueue:get_name(Q), XName}, 1, publish) ||
-                Q        <- Qs];
-        _ ->
-            ok
-    end,
-    State2#ch{queue_states = QueueStates}.
+                   RoutedToQueueNames = [QName]}, State0 = #ch{queue_states = QueueStates0}) -> %% optimisation when there is one queue
+    Qs0 = rabbit_amqqueue:lookup(RoutedToQueueNames),
+    Qs = rabbit_amqqueue:prepend_extra_bcc(Qs0),
+    QueueNames = lists:map(fun amqqueue:get_name/1, Qs),
+    case rabbit_queue_type:deliver(Qs, Delivery, QueueStates0) of
+        {ok, QueueStates, Actions}  ->
+            rabbit_global_counters:messages_routed(amqp091, erlang:min(1, length(Qs))),
+            %% NB: the order here is important since basic.returns must be
+            %% sent before confirms.
+            ok = process_routing_mandatory(Mandatory, Qs, Message, State0),
+            State1 = process_routing_confirm(Confirm, QueueNames, MsgSeqNo, XName, State0),
+            %% Actions must be processed after registering confirms as actions may
+            %% contain rejections of publishes
+            State = handle_queue_actions(Actions, State1#ch{queue_states = QueueStates}),
+            case rabbit_event:stats_level(State, #ch.stats_timer) of
+                fine ->
+                    ?INCR_STATS(exchange_stats, XName, 1, publish),
+                    ?INCR_STATS(queue_exchange_stats, {QName, XName}, 1, publish);
+                _ ->
+                    ok
+            end,
+            State;
+        {error, {stream_not_found, Resource}} ->
+            rabbit_misc:protocol_error(
+              resource_error,
+              "Stream not found for ~s",
+              [rabbit_misc:rs(Resource)]);
+        {error, {coordinator_unavailable, Resource}} ->
+            rabbit_misc:protocol_error(
+              resource_error,
+              "Stream coordinator unavailable for ~s",
+              [rabbit_misc:rs(Resource)])
+    end;
+deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{exchange_name = XName},
+                                        mandatory  = Mandatory,
+                                        confirm    = Confirm,
+                                        msg_seq_no = MsgSeqNo},
+                   RoutedToQueueNames}, State0 = #ch{queue_states = QueueStates0}) ->
+    Qs0 = rabbit_amqqueue:lookup(RoutedToQueueNames),
+    Qs = rabbit_amqqueue:prepend_extra_bcc(Qs0),
+    QueueNames = lists:map(fun amqqueue:get_name/1, Qs),
+    case rabbit_queue_type:deliver(Qs, Delivery, QueueStates0) of
+        {ok, QueueStates, Actions}  ->
+            rabbit_global_counters:messages_routed(amqp091, length(Qs)),
+            %% NB: the order here is important since basic.returns must be
+            %% sent before confirms.
+            ok = process_routing_mandatory(Mandatory, Qs, Message, State0),
+            State1 = process_routing_confirm(Confirm, QueueNames,
+                                             MsgSeqNo, XName, State0),
+            %% Actions must be processed after registering confirms as actions may
+            %% contain rejections of publishes
+            State = handle_queue_actions(Actions, State1#ch{queue_states = QueueStates}),
+            case rabbit_event:stats_level(State, #ch.stats_timer) of
+                fine ->
+                    ?INCR_STATS(exchange_stats, XName, 1, publish),
+                    [?INCR_STATS(queue_exchange_stats, {QName, XName}, 1, publish)
+                     || QName <- QueueNames];
+                _ ->
+                    ok
+            end,
+            State;
+        {error, {coordinator_unavailable, Resource}} ->
+            rabbit_misc:protocol_error(
+              resource_error,
+              "Stream coordinator unavailable for ~s",
+              [rabbit_misc:rs(Resource)])
+    end.
 
 process_routing_mandatory(_Mandatory = true,
                           _RoutedToQs = [],
                           Msg, State) ->
+    rabbit_global_counters:messages_unroutable_returned(amqp091, 1),
     ok = basic_return(Msg, State, no_route),
     ok;
 process_routing_mandatory(_Mandatory = false,
                           _RoutedToQs = [],
                           #basic_message{exchange_name = ExchangeName}, State) ->
+    rabbit_global_counters:messages_unroutable_dropped(amqp091, 1),
     ?INCR_STATS(exchange_stats, ExchangeName, 1, drop_unroutable, State),
     ok;
 process_routing_mandatory(_, _, _, _) ->
     ok.
 
-process_routing_confirm(false, _, _, _, _, State) ->
+process_routing_confirm(false, _, _, _, State) ->
     State;
-process_routing_confirm(true, [], _, MsgSeqNo, XName, State) ->
+process_routing_confirm(true, [], MsgSeqNo, XName, State) ->
     record_confirms([{MsgSeqNo, XName}], State);
-process_routing_confirm(true, QRefs, QNames, MsgSeqNo, XName, State) ->
+process_routing_confirm(true, QRefs, MsgSeqNo, XName, State) ->
     State#ch{unconfirmed =
-        unconfirmed_messages:insert(MsgSeqNo, QNames, QRefs, XName,
-                                    State#ch.unconfirmed)}.
+        rabbit_confirms:insert(MsgSeqNo, QRefs, XName, State#ch.unconfirmed)}.
 
-confirm(MsgSeqNos, QRef, State = #ch{queue_names = QNames, unconfirmed = UC}) ->
+confirm(MsgSeqNos, QRef, State = #ch{unconfirmed = UC}) ->
     %% NOTE: if queue name does not exist here it's likely that the ref also
     %% does not exist in unconfirmed messages.
     %% Neither does the 'ignore' atom, so it's a reasonable fallback.
-    QName = maps:get(QRef, QNames, ignore),
-    {ConfirmMXs, RejectMXs, UC1} =
-        unconfirmed_messages:confirm_multiple_msg_ref(MsgSeqNos, QName, QRef, UC),
+    {ConfirmMXs, UC1} = rabbit_confirms:confirm(MsgSeqNos, QRef, UC),
     %% NB: don't call noreply/1 since we don't want to send confirms.
-    State1 = record_confirms(ConfirmMXs, State#ch{unconfirmed = UC1}),
-    record_rejects(RejectMXs, State1).
+    record_confirms(ConfirmMXs, State#ch{unconfirmed = UC1}).
 
 send_confirms_and_nacks(State = #ch{tx = none, confirmed = [], rejected = []}) ->
     State;
@@ -2282,6 +2278,7 @@ send_confirms_and_nacks(State = #ch{tx = none, confirmed = C, rejected = R}) ->
     case rabbit_node_monitor:pause_partition_guard() of
         ok      ->
             Confirms = lists:append(C),
+            rabbit_global_counters:messages_confirmed(amqp091, length(Confirms)),
             Rejects = lists:append(R),
             ConfirmMsgSeqNos =
                 lists:foldl(
@@ -2334,9 +2331,9 @@ send_confirms(Cs, Rs, State) ->
 
 coalesce_and_send(MsgSeqNos, NegativeMsgSeqNos, MkMsgFun, State = #ch{unconfirmed = UC}) ->
     SMsgSeqNos = lists:usort(MsgSeqNos),
-    UnconfirmedCutoff = case unconfirmed_messages:is_empty(UC) of
+    UnconfirmedCutoff = case rabbit_confirms:is_empty(UC) of
                  true  -> lists:last(SMsgSeqNos) + 1;
-                 false -> unconfirmed_messages:smallest(UC)
+                 false -> rabbit_confirms:smallest(UC)
              end,
     Cutoff = lists:min([UnconfirmedCutoff | NegativeMsgSeqNos]),
     {Ms, Ss} = lists:splitwith(fun(X) -> X < Cutoff end, SMsgSeqNos),
@@ -2355,7 +2352,7 @@ ack_len(Acks) -> lists:sum([length(L) || {ack, L} <- Acks]).
 maybe_complete_tx(State = #ch{tx = {_, _}}) ->
     State;
 maybe_complete_tx(State = #ch{unconfirmed = UC}) ->
-    case unconfirmed_messages:is_empty(UC) of
+    case rabbit_confirms:is_empty(UC) of
         false -> State;
         true  -> complete_tx(State#ch{confirmed = []})
     end.
@@ -2394,7 +2391,7 @@ i(transactional,  #ch{tx               = Tx})      -> Tx =/= none;
 i(confirm,        #ch{confirm_enabled  = CE})      -> CE;
 i(name,           State)                           -> name(State);
 i(consumer_count,          #ch{consumer_mapping = CM})    -> maps:size(CM);
-i(messages_unconfirmed,    #ch{unconfirmed = UC})         -> unconfirmed_messages:size(UC);
+i(messages_unconfirmed,    #ch{unconfirmed = UC})         -> rabbit_confirms:size(UC);
 i(messages_unacknowledged, #ch{unacked_message_q = UAMQ}) -> ?QUEUE:len(UAMQ);
 i(messages_uncommitted,    #ch{tx = {Msgs, _Acks}})       -> ?QUEUE:len(Msgs);
 i(messages_uncommitted,    #ch{})                         -> 0;
@@ -2418,9 +2415,15 @@ i(Item, _) ->
     throw({bad_argument, Item}).
 
 pending_raft_commands(QStates) ->
-    maps:fold(fun (_, V, Acc) ->
-                      Acc + rabbit_fifo_client:pending_size(V)
-              end, 0, QStates).
+    Fun = fun(_, V, Acc) ->
+                  case rabbit_queue_type:state_info(V) of
+                      #{pending_raft_commands := P} ->
+                          Acc + P;
+                      _ ->
+                          Acc
+                  end
+          end,
+    rabbit_queue_type:fold_state(Fun, 0, QStates).
 
 name(#ch{cfg = #conf{conn_name = ConnName, channel = Channel}}) ->
     list_to_binary(rabbit_misc:format("~s (~p)", [ConnName, Channel])).
@@ -2516,18 +2519,31 @@ handle_method(#'queue.declare'{queue       = QueueNameBin,
                                exclusive   = ExclusiveDeclare,
                                auto_delete = AutoDelete,
                                nowait      = NoWait,
-                               arguments   = Args} = Declare,
+                               arguments   = Args0} = Declare,
               ConnPid, AuthzContext, CollectorPid, VHostPath,
               #user{username = Username} = User) ->
     Owner = case ExclusiveDeclare of
                 true  -> ConnPid;
                 false -> none
             end,
+    Args = rabbit_amqqueue:augment_declare_args(VHostPath,
+                                                DurableDeclare,
+                                                ExclusiveDeclare,
+                                                AutoDelete,
+                                                Args0),
     StrippedQueueNameBin = strip_cr_lf(QueueNameBin),
     Durable = DurableDeclare andalso not ExclusiveDeclare,
     ActualNameBin = case StrippedQueueNameBin of
-                        <<>>  -> rabbit_guid:binary(rabbit_guid:gen_secure(),
-                                                    "amq.gen");
+                        <<>> ->
+                            case rabbit_amqqueue:is_server_named_allowed(Args) of
+                                true ->
+                                    rabbit_guid:binary(rabbit_guid:gen_secure(), "amq.gen");
+                                false ->
+                                    rabbit_misc:protocol_error(
+                                      precondition_failed,
+                                      "Cannot declare a server-named queue for type ~p",
+                                      [rabbit_amqqueue:get_queue_type(Args)])
+                            end;
                         Other -> check_name('queue', Other)
                     end,
     QueueName = rabbit_misc:r(VHostPath, queue, ActualNameBin),
@@ -2584,7 +2600,9 @@ handle_method(#'queue.declare'{queue       = QueueNameBin,
                     %% Presumably our own days are numbered since the
                     %% connection has died. Pretend the queue exists though,
                     %% just so nothing fails.
-                    {ok, QueueName, 0, 0}
+                    {ok, QueueName, 0, 0};
+                {protocol_error, ErrorType, Reason, ReasonArgs} ->
+                    rabbit_misc:protocol_error(ErrorType, Reason, ReasonArgs)
             end;
         {error, {absent, Q, Reason}} ->
             rabbit_amqqueue:absent(Q, Reason)
@@ -2616,22 +2634,30 @@ handle_method(#'queue.delete'{queue     = QueueNameBin,
            QueueName,
            fun (Q) ->
                    rabbit_amqqueue:check_exclusive_access(Q, ConnPid),
-                   rabbit_amqqueue:delete(Q, IfUnused, IfEmpty, Username)
+                   rabbit_queue_type:delete(Q, IfUnused, IfEmpty, Username)
            end,
-           fun (not_found)            -> {ok, 0};
-               %% TODO delete crashed should clean up fifo states?
-               ({absent, Q, crashed}) -> rabbit_amqqueue:delete_crashed(Q, Username),
-                                         {ok, 0};
-               ({absent, Q, stopped}) -> rabbit_amqqueue:delete_crashed(Q, Username),
-                                         {ok, 0};
-               ({absent, Q, Reason})  -> rabbit_amqqueue:absent(Q, Reason)
+           fun (not_found) ->
+                   {ok, 0};
+               ({absent, Q, crashed}) ->
+                   _ = rabbit_classic_queue:delete_crashed(Q, Username),
+                   {ok, 0};
+               ({absent, Q, stopped}) ->
+                   _ = rabbit_classic_queue:delete_crashed(Q, Username),
+                   {ok, 0};
+               ({absent, Q, Reason}) ->
+                   rabbit_amqqueue:absent(Q, Reason)
            end) of
         {error, in_use} ->
             precondition_failed("~s in use", [rabbit_misc:rs(QueueName)]);
         {error, not_empty} ->
             precondition_failed("~s not empty", [rabbit_misc:rs(QueueName)]);
+        {error, {exit, _, _}} ->
+            %% rabbit_amqqueue:delete()/delegate:invoke might return {error, {exit, _, _}}
+            {ok, 0};
         {ok, Count} ->
-            {ok, Count}
+            {ok, Count};
+        {protocol_error, Type, Reason, ReasonArgs} ->
+            rabbit_misc:protocol_error(Type, Reason, ReasonArgs)
     end;
 handle_method(#'exchange.delete'{exchange  = ExchangeNameBin,
                                  if_unused = IfUnused},
@@ -2656,7 +2682,17 @@ handle_method(#'queue.purge'{queue = QueueNameBin},
     check_read_permitted(QueueName, User, AuthzContext),
     rabbit_amqqueue:with_exclusive_access_or_die(
       QueueName, ConnPid,
-      fun (Q) -> rabbit_amqqueue:purge(Q) end);
+      fun (Q) ->
+              case rabbit_queue_type:purge(Q) of
+                  {ok, _} = Res ->
+                      Res;
+                  {error, not_supported} ->
+                      rabbit_misc:protocol_error(
+                        not_implemented,
+                        "queue.purge not supported by stream queues ~s",
+                        [rabbit_misc:rs(amqqueue:get_name(Q))])
+              end
+      end);
 handle_method(#'exchange.declare'{exchange    = ExchangeNameBin,
                                   type        = TypeNameBin,
                                   passive     = false,
@@ -2702,37 +2738,48 @@ handle_method(#'exchange.declare'{exchange    = ExchangeNameBin,
     check_not_default_exchange(ExchangeName),
     _ = rabbit_exchange:lookup_or_die(ExchangeName).
 
-handle_deliver(ConsumerTag, AckRequired,
-               Msg = {_QName, QPid, _MsgId, Redelivered,
+handle_deliver(CTag, Ack, Msgs, State) when is_list(Msgs) ->
+    lists:foldl(fun(Msg, S) ->
+                        handle_deliver0(CTag, Ack, Msg, S)
+                end, State, Msgs);
+handle_deliver(CTag, Ack, Msg, State) ->
+    %% backwards compatibility clause
+    handle_deliver0(CTag, Ack, Msg, State).
+
+handle_deliver0(ConsumerTag, AckRequired,
+                Msg = {QName, QPid, _MsgId, Redelivered,
                       #basic_message{exchange_name = ExchangeName,
                                      routing_keys  = [RoutingKey | _CcRoutes],
                                      content       = Content}},
                State = #ch{cfg = #conf{writer_pid = WriterPid,
                                        writer_gc_threshold = GCThreshold},
-                           next_tag   = DeliveryTag}) ->
+                           next_tag   = DeliveryTag,
+                           queue_states = Qs}) ->
     Deliver = #'basic.deliver'{consumer_tag = ConsumerTag,
                                delivery_tag = DeliveryTag,
                                redelivered  = Redelivered,
                                exchange     = ExchangeName#resource.name,
                                routing_key  = RoutingKey},
-    case ?IS_CLASSIC(QPid) of
-        true ->
+    {ok, QueueType} = rabbit_queue_type:module(QName, Qs),
+    case QueueType of
+        rabbit_classic_queue ->
             ok = rabbit_writer:send_command_and_notify(
                    WriterPid, QPid, self(), Deliver, Content);
-        false ->
+        _ ->
             ok = rabbit_writer:send_command(WriterPid, Deliver, Content)
     end,
     case GCThreshold of
         undefined -> ok;
         _         -> rabbit_basic:maybe_gc_large_msg(Content, GCThreshold)
     end,
-    record_sent(deliver, ConsumerTag, AckRequired, Msg, State).
+    record_sent(deliver, QueueType, ConsumerTag, AckRequired, Msg, State).
 
 handle_basic_get(WriterPid, DeliveryTag, NoAck, MessageCount,
-                 Msg = {QName, QPid, _MsgId, Redelivered,
+                 Msg = {_QName, _QPid, _MsgId, Redelivered,
                         #basic_message{exchange_name = ExchangeName,
                                        routing_keys  = [RoutingKey | _CcRoutes],
-                                       content       = Content}}, State) ->
+                                       content       = Content}},
+                 QueueType, State) ->
     ok = rabbit_writer:send_command(
            WriterPid,
            #'basic.get_ok'{delivery_tag  = DeliveryTag,
@@ -2741,8 +2788,7 @@ handle_basic_get(WriterPid, DeliveryTag, NoAck, MessageCount,
                            routing_key   = RoutingKey,
                            message_count = MessageCount},
            Content),
-    State1 = track_delivering_queue(NoAck, QPid, QName, State),
-    {noreply, record_sent(get, DeliveryTag, not(NoAck), Msg, State1)}.
+    {noreply, record_sent(get, QueueType, DeliveryTag, not(NoAck), Msg, State)}.
 
 init_tick_timer(State = #ch{tick_timer = undefined}) ->
     {ok, Interval} = application:get_env(rabbit, channel_tick_interval),
@@ -2768,26 +2814,6 @@ maybe_cancel_tick_timer(#ch{tick_timer = TRef,
             State
     end.
 
-%% only classic queues need monitoring so rather than special casing
-%% everywhere monitors are set up we wrap it here for this module
-maybe_monitor(QPid, QMons) when ?IS_CLASSIC(QPid) ->
-    pmon:monitor(QPid, QMons);
-maybe_monitor(_, QMons) ->
-    QMons.
-
-maybe_monitor_all([Item], S) -> maybe_monitor(Item, S); %% optimisation
-maybe_monitor_all(Items,  S) -> lists:foldl(fun maybe_monitor/2, S, Items).
-
-add_delivery_count_header(#{delivery_count := Count}, Msg) ->
-    rabbit_basic:add_header(<<"x-delivery-count">>, long, Count, Msg);
-add_delivery_count_header(_, Msg) ->
-    Msg.
-
-qpid_to_ref(Pid) when is_pid(Pid) -> Pid;
-qpid_to_ref({Name, _}) -> Name;
-%% assume it already is a ref
-qpid_to_ref(Ref) -> Ref.
-
 now_millis() ->
     erlang:monotonic_time(millisecond).
 
@@ -2798,28 +2824,86 @@ get_operation_timeout_and_deadline() ->
     Deadline =  now_millis() + Timeout,
     {Timeout, Deadline}.
 
-queue_fold(Fun, Init, Q) ->
-    case ?QUEUE:out(Q) of
-        {empty, _Q}      -> Init;
-        {{value, V}, Q1} -> queue_fold(Fun, Fun(V, Init), Q1)
-    end.
-
 evaluate_consumer_timeout(State0 = #ch{cfg = #conf{channel = Channel,
                                                    consumer_timeout = Timeout},
                                        unacked_message_q = UAMQ}) ->
     Now = os:system_time(millisecond),
-    case ?QUEUE:peek(UAMQ) of
-        {value, {_DTag, ConsumerTag, Time, {_QPid, _Msg}}}
+    case ?QUEUE:get(UAMQ, empty) of
+        #pending_ack{delivery_tag = ConsumerTag,
+                     delivered_at = Time}
           when is_integer(Timeout)
                andalso Time < Now - Timeout ->
             rabbit_log_channel:warning("Consumer ~s on channel ~w has timed out "
-                                       "waiting on consumer acknowledgement. Timeout used: ~p ms",
+                                       "waiting for delivery acknowledgement. Timeout used: ~p ms. "
+                                       "This timeout value can be configured, see consumers doc guide to learn more",
                                        [rabbit_data_coercion:to_binary(ConsumerTag),
-                                       Channel, Timeout]),
+                                        Channel, Timeout]),
             Ex = rabbit_misc:amqp_error(precondition_failed,
-                                        "consumer ack timed out on channel ~w",
-                                        [Channel], none),
+                                        "delivery acknowledgement on channel ~w timed out. "
+                                        "Timeout value used: ~p ms. "
+                                        "This timeout value can be configured, see consumers doc guide to learn more",
+                                        [Channel, Timeout], none),
             handle_exception(Ex, State0);
         _ ->
             {noreply, State0}
     end.
+
+handle_queue_actions(Actions, #ch{} = State0) ->
+    WriterPid = State0#ch.cfg#conf.writer_pid,
+    lists:foldl(
+      fun ({send_credit_reply, Avail}, S0) ->
+              ok = rabbit_writer:send_command(WriterPid,
+                                              #'basic.credit_ok'{available = Avail}),
+              S0;
+          ({send_drained, {CTag, Credit}}, S0) ->
+              ok = rabbit_writer:send_command(
+                     WriterPid,
+                     #'basic.credit_drained'{consumer_tag   = CTag,
+                                             credit_drained = Credit}),
+              S0;
+          ({settled, QRef, MsgSeqNos}, S0) ->
+              confirm(MsgSeqNos, QRef, S0);
+          ({rejected, _QRef, MsgSeqNos}, S0) ->
+              {U, Rej} =
+                  lists:foldr(
+                    fun(SeqNo, {U1, Acc}) ->
+                            case rabbit_confirms:reject(SeqNo, U1) of
+                                {ok, MX, U2} ->
+                                    {U2, [MX | Acc]};
+                                {error, not_found} ->
+                                    {U1, Acc}
+                            end
+                    end, {S0#ch.unconfirmed, []}, MsgSeqNos),
+              S = S0#ch{unconfirmed = U},
+              record_rejects(Rej, S);
+          ({deliver, CTag, AckRequired, Msgs}, S0) ->
+              handle_deliver(CTag, AckRequired, Msgs, S0);
+          ({queue_down, QRef}, S0) ->
+              handle_consuming_queue_down_or_eol(QRef, S0)
+
+      end, State0, Actions).
+
+find_queue_name_from_quorum_name(Name, QStates) ->
+    Fun = fun(K, _V, undefined) ->
+                  {ok, Q} = rabbit_amqqueue:lookup(K),
+                  case amqqueue:get_pid(Q) of
+                      {Name, _} ->
+                          amqqueue:get_name(Q);
+                      _ ->
+                          undefined
+                  end;
+             (_, _, Acc) ->
+                  Acc
+          end,
+    rabbit_queue_type:fold_state(Fun, undefined, QStates).
+
+maybe_increase_global_publishers(#ch{publishing_mode = true} = State0) ->
+    State0;
+maybe_increase_global_publishers(State0) ->
+    rabbit_global_counters:publisher_created(amqp091),
+    State0#ch{publishing_mode = true}.
+
+maybe_decrease_global_publishers(#ch{publishing_mode = true}) ->
+    ok;
+maybe_decrease_global_publishers(#ch{publishing_mode = false}) ->
+    rabbit_global_counters:publisher_deleted(amqp091).

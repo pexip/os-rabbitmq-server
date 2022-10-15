@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_policies).
@@ -13,7 +13,7 @@
 -behaviour(rabbit_policy_validator).
 -behaviour(rabbit_policy_merge_strategy).
 
--include("rabbit.hrl").
+-include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([register/0, validate_policy/1, merge_policy_value/3]).
 
@@ -30,6 +30,7 @@ register() ->
         {Class, Name} <- [{policy_validator, <<"alternate-exchange">>},
                           {policy_validator, <<"dead-letter-exchange">>},
                           {policy_validator, <<"dead-letter-routing-key">>},
+                          {policy_validator, <<"dead-letter-strategy">>},
                           {policy_validator, <<"message-ttl">>},
                           {policy_validator, <<"expires">>},
                           {policy_validator, <<"max-length">>},
@@ -37,8 +38,13 @@ register() ->
                           {policy_validator, <<"max-in-memory-length">>},
                           {policy_validator, <<"max-in-memory-bytes">>},
                           {policy_validator, <<"queue-mode">>},
+                          {policy_validator, <<"queue-version">>},
                           {policy_validator, <<"overflow">>},
                           {policy_validator, <<"delivery-limit">>},
+                          {policy_validator, <<"max-age">>},
+                          {policy_validator, <<"stream-max-segment-size-bytes">>},
+                          {policy_validator, <<"queue-leader-locator">>},
+                          {policy_validator, <<"initial-cluster-size">>},
                           {operator_policy_validator, <<"expires">>},
                           {operator_policy_validator, <<"message-ttl">>},
                           {operator_policy_validator, <<"max-length">>},
@@ -79,6 +85,13 @@ validate_policy0(<<"dead-letter-routing-key">>, Value)
     ok;
 validate_policy0(<<"dead-letter-routing-key">>, Value) ->
     {error, "~p is not a valid dead letter routing key", [Value]};
+
+validate_policy0(<<"dead-letter-strategy">>, <<"at-most-once">>) ->
+    ok;
+validate_policy0(<<"dead-letter-strategy">>, <<"at-least-once">>) ->
+    ok;
+validate_policy0(<<"dead-letter-strategy">>, Value) ->
+    {error, "~p is not a valid dead letter strategy", [Value]};
 
 validate_policy0(<<"message-ttl">>, Value)
   when is_integer(Value), Value >= 0 ->
@@ -122,6 +135,14 @@ validate_policy0(<<"queue-mode">>, <<"lazy">>) ->
     ok;
 validate_policy0(<<"queue-mode">>, Value) ->
     {error, "~p is not a valid queue-mode value", [Value]};
+
+validate_policy0(<<"queue-version">>, 1) ->
+    ok;
+validate_policy0(<<"queue-version">>, 2) ->
+    ok;
+validate_policy0(<<"queue-version">>, Value) ->
+    {error, "~p is not a valid queue-version value", [Value]};
+
 validate_policy0(<<"overflow">>, <<"drop-head">>) ->
     ok;
 validate_policy0(<<"overflow">>, <<"reject-publish">>) ->
@@ -135,7 +156,39 @@ validate_policy0(<<"delivery-limit">>, Value)
   when is_integer(Value), Value >= 0 ->
     ok;
 validate_policy0(<<"delivery-limit">>, Value) ->
-    {error, "~p is not a valid delivery limit", [Value]}.
+    {error, "~p is not a valid delivery limit", [Value]};
+
+validate_policy0(<<"max-age">>, Value) ->
+    case rabbit_amqqueue:check_max_age(Value) of
+        {error, _} ->
+            {error, "~p is not a valid max age", [Value]};
+        _ ->
+            ok
+    end;
+
+validate_policy0(<<"queue-leader-locator">>, <<"client-local">>) ->
+    ok;
+validate_policy0(<<"queue-leader-locator">>, <<"balanced">>) ->
+    ok;
+%% 'random' and 'least-leaders' are deprecated and get mapped to 'balanced'
+validate_policy0(<<"queue-leader-locator">>, <<"random">>) ->
+    ok;
+validate_policy0(<<"queue-leader-locator">>, <<"least-leaders">>) ->
+    ok;
+validate_policy0(<<"queue-leader-locator">>, Value) ->
+    {error, "~p is not a valid queue leader locator value", [Value]};
+
+validate_policy0(<<"initial-cluster-size">>, Value)
+  when is_integer(Value), Value >= 0 ->
+    ok;
+validate_policy0(<<"initial-cluster-size">>, Value) ->
+    {error, "~p is not a valid cluster size", [Value]};
+
+validate_policy0(<<"stream-max-segment-size-bytes">>, Value)
+  when is_integer(Value), Value >= 0, Value =< ?MAX_STREAM_MAX_SEGMENT_SIZE ->
+    ok;
+validate_policy0(<<"stream-max-segment-size-bytes">>, Value) ->
+    {error, "~p is not a valid segment size", [Value]}.
 
 merge_policy_value(<<"message-ttl">>, Val, OpVal)      -> min(Val, OpVal);
 merge_policy_value(<<"max-length">>, Val, OpVal)       -> min(Val, OpVal);
@@ -143,4 +196,6 @@ merge_policy_value(<<"max-length-bytes">>, Val, OpVal) -> min(Val, OpVal);
 merge_policy_value(<<"max-in-memory-length">>, Val, OpVal) -> min(Val, OpVal);
 merge_policy_value(<<"max-in-memory-bytes">>, Val, OpVal) -> min(Val, OpVal);
 merge_policy_value(<<"expires">>, Val, OpVal)          -> min(Val, OpVal);
-merge_policy_value(<<"delivery-limit">>, Val, OpVal)   -> min(Val, OpVal).
+merge_policy_value(<<"delivery-limit">>, Val, OpVal)   -> min(Val, OpVal);
+%% use operator policy value for booleans
+merge_policy_value(_Key, Val, OpVal) when is_boolean(Val) andalso is_boolean(OpVal) -> OpVal.

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_misc).
@@ -12,6 +12,8 @@
 -include("rabbit.hrl").
 -include("rabbit_framing.hrl").
 -include("rabbit_misc.hrl").
+
+-include_lib("kernel/include/file.hrl").
 
 -ifdef(TEST).
 -export([decompose_pid/1, compose_pid/4]).
@@ -27,7 +29,6 @@
 -export([enable_cover/0, report_cover/0]).
 -export([enable_cover/1, report_cover/1]).
 -export([start_cover/1]).
--export([confirm_to_sender/2]).
 -export([throw_on_error/2, with_exit_handler/2, is_abnormal_exit/1,
          filter_exit_map/2]).
 -export([with_user/2]).
@@ -42,9 +43,10 @@
 -export([format/2, format_many/1, format_stderr/2]).
 -export([unfold/2, ceil/1, queue_fold/3]).
 -export([sort_field_table/1]).
--export([atom_to_binary/1, parse_bool/1, parse_int/1]).
+-export([parse_bool/1, parse_int/1]).
 -export([pid_to_string/1, string_to_pid/1,
          pid_change_node/2, node_to_fake_pid/1]).
+-export([hexify/1]).
 -export([version_compare/2, version_compare/3]).
 -export([version_minor_equivalent/2, strict_version_minor_equivalent/2]).
 -export([dict_cons/3, orddict_cons/3, maps_cons/3, gb_trees_cons/3]).
@@ -77,9 +79,9 @@
 -export([get_channel_operation_timeout/0]).
 -export([random/1]).
 -export([rpc_call/4, rpc_call/5]).
--export([report_default_thread_pool_size/0]).
 -export([get_gc_info/1]).
 -export([group_proplists_by/2]).
+-export([raw_read_file/1]).
 
 %% Horrible macro to use in guards
 -define(IS_BENIGN_EXIT(R),
@@ -256,9 +258,6 @@
 -spec get_env(atom(), atom(), term())  -> term().
 -spec get_channel_operation_timeout() -> non_neg_integer().
 -spec random(non_neg_integer()) -> non_neg_integer().
--spec rpc_call(node(), atom(), atom(), [any()]) -> any().
--spec rpc_call(node(), atom(), atom(), [any()], infinity | non_neg_integer()) -> any().
--spec report_default_thread_pool_size() -> no_return().
 -spec get_gc_info(pid()) -> [any()].
 -spec group_proplists_by(fun((proplists:proplist()) -> any()),
                          list(proplists:proplist())) -> list(list(proplists:proplist())).
@@ -332,7 +331,7 @@ assert_args_equivalence1(Orig, New, Name, Key) ->
 %%
 %% Fixes rabbitmq/rabbitmq-common#341
 %%
-assert_field_equivalence(_Orig, _Orig, _Name, _Key) ->
+assert_field_equivalence(Current, Current, _Name, _Key) ->
     ok;
 assert_field_equivalence(undefined, {longstr, <<"classic">>}, _Name, <<"x-queue-type">>) ->
     ok;
@@ -504,9 +503,6 @@ report_coverage_percentage(File, Cov, NotCov, Mod) ->
                    true -> 100.0
                end,
                Mod]).
-
-confirm_to_sender(Pid, MsgSeqNos) ->
-    gen_server2:cast(Pid, {confirm, MsgSeqNos, self()}).
 
 %% @doc Halts the emulator returning the given status code to the os.
 %% On Windows this function will block indefinitely so as to give the io
@@ -770,15 +766,20 @@ sort_field_table(Arguments) when is_map(Arguments) ->
 sort_field_table(Arguments) ->
     lists:keysort(1, Arguments).
 
-atom_to_binary(A) ->
-    list_to_binary(atom_to_list(A)).
-
 %% This provides a string representation of a pid that is the same
 %% regardless of what node we are running on. The representation also
 %% permits easy identification of the pid's node.
 pid_to_string(Pid) when is_pid(Pid) ->
     {Node, Cre, Id, Ser} = decompose_pid(Pid),
     format("<~s.~B.~B.~B>", [Node, Cre, Id, Ser]).
+
+-spec hexify(binary() | atom() | list()) -> binary().
+hexify(Bin) when is_binary(Bin) ->
+    iolist_to_binary([io_lib:format("~2.16.0B", [V]) || <<V:8>> <= Bin]);
+hexify(Bin) when is_list(Bin) ->
+    hexify(erlang:binary_to_list(Bin));
+hexify(Bin) when is_atom(Bin) ->
+    hexify(erlang:atom_to_binary(Bin)).
 
 %% inverse of above
 string_to_pid(Str) ->
@@ -1017,12 +1018,7 @@ is_process_alive(Pid) ->
 
 -spec pget(term(), list() | map()) -> term().
 pget(K, M) when is_map(M) ->
-    case maps:find(K, M) of
-        {ok, V} ->
-            V;
-        _ ->
-            undefined
-    end;
+    maps:get(K, M, undefined);
 
 pget(K, P) ->
     case lists:keyfind(K, 1, P) of
@@ -1034,12 +1030,7 @@ pget(K, P) ->
 
 -spec pget(term(), list() | map(), term()) -> term().
 pget(K, M, D) when is_map(M) ->
-    case maps:find(K, M) of
-        {ok, V} ->
-            V;
-        _ ->
-            D
-    end;
+    maps:get(K, M, D);
 
 pget(K, P, D) ->
     case lists:keyfind(K, 1, P) of
@@ -1174,7 +1165,7 @@ is_os_process_alive(Pid) ->
                                  false ->
                                      Cmd =
                                      format(
-                                       "PowerShell -Command "
+                                       "powershell.exe -NoLogo -NoProfile -NonInteractive -Command "
                                        "\"(Get-Process -Id ~s).ProcessName\"",
                                        [PidS]),
                                      Res =
@@ -1226,7 +1217,7 @@ version() ->
 otp_release() ->
     File = filename:join([code:root_dir(), "releases",
                           erlang:system_info(otp_release), "OTP_VERSION"]),
-    case file:read_file(File) of
+    case raw_read_file(File) of
         {ok, VerBin} ->
             %% 17.0 or later, we need the file for the minor version
             string:strip(binary_to_list(VerBin), both, $\n);
@@ -1260,8 +1251,14 @@ sequence_error([T])                      -> T;
 sequence_error([{error, _} = Error | _]) -> Error;
 sequence_error([_ | Rest])               -> sequence_error(Rest).
 
-check_expiry(N) when N < 0                 -> {error, {value_negative, N}};
-check_expiry(_N)                           -> ok.
+check_expiry(N)
+  when N < 0 ->
+    {error, {value_negative, N}};
+check_expiry(N)
+  when N > 315_360_000_000 -> %% 10 years in milliseconds
+    {error, {value_too_large, N}};
+check_expiry(_N) ->
+    ok.
 
 base64url(In) ->
     lists:reverse(lists:foldl(fun ($\+, Acc) -> [$\- | Acc];
@@ -1381,16 +1378,16 @@ escape_html_tags("&" ++ Rest, Acc) ->
 escape_html_tags([C | Rest], Acc) ->
     escape_html_tags(Rest, [C | Acc]).
 
-
-%% Moved from rabbit/src/rabbit_cli.erl
 %% If the server we are talking to has non-standard net_ticktime, and
 %% our connection lasts a while, we could get disconnected because of
 %% a timeout unless we set our ticktime to be the same. So let's do
 %% that.
 %% TODO: do not use an infinite timeout!
+-spec rpc_call(node(), atom(), atom(), [any()]) -> any() | {badrpc, term()}.
 rpc_call(Node, Mod, Fun, Args) ->
     rpc_call(Node, Mod, Fun, Args, ?RPC_INFINITE_TIMEOUT).
 
+-spec rpc_call(node(), atom(), atom(), [any()], infinity | non_neg_integer()) -> any() | {badrpc, term()}.
 rpc_call(Node, Mod, Fun, Args, Timeout) ->
     case rpc:call(Node, net_kernel, get_net_ticktime, [], Timeout) of
         {badrpc, _} = E -> E;
@@ -1407,18 +1404,24 @@ rpc_call(Node, Mod, Fun, Args, Timeout) ->
 get_gc_info(Pid) ->
     rabbit_runtime:get_gc_info(Pid).
 
-guess_number_of_cpu_cores() ->
-    rabbit_runtime:guess_number_of_cpu_cores().
-
-%% Discussion of chosen values is at
-%% https://github.com/rabbitmq/rabbitmq-server/issues/151
-guess_default_thread_pool_size() ->
-    PoolSize = 16 * guess_number_of_cpu_cores(),
-    min(1024, max(64, PoolSize)).
-
-report_default_thread_pool_size() ->
-    io:format("~b", [guess_default_thread_pool_size()]),
-    erlang:halt(0).
+-spec raw_read_file(Filename) -> {ok, Binary} | {error, Reason} when
+      Filename :: file:name_all(),
+      Binary :: binary(),
+      Reason :: file:posix() | badarg | terminated | system_limit.
+raw_read_file(File) ->
+    try
+        % Note: this works around the win32 file leak in file:read_file/1
+        % https://github.com/erlang/otp/issues/5527
+        {ok, FInfo} = file:read_file_info(File, [raw]),
+        {ok, Fd} = file:open(File, [read, raw, binary]),
+        try
+            file:read(Fd, FInfo#file_info.size)
+        after
+            file:close(Fd)
+        end
+    catch
+        error:{badmatch, Error} -> Error
+    end.
 
 %% -------------------------------------------------------------------------
 %% Begin copypasta from gen_server2.erl

@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.RpcStream do
   alias RabbitMQ.CLI.Ctl.InfoKeys
@@ -103,6 +103,10 @@ defmodule RabbitMQ.CLI.Ctl.RpcStream do
       item ->
         InfoKeys.info_for_keys(item, info_keys)
     end)
+  end
+
+  defp init_items_stream(_node, _mod, _fun, _args, 0, pid, ref) do
+    set_stream_timeout(pid, ref, 0)
   end
 
   defp init_items_stream(node, mod, fun, args, timeout, pid, ref) do

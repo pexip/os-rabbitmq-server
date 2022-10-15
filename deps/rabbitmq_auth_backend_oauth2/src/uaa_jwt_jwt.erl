@@ -2,13 +2,9 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(uaa_jwt_jwt).
-
-%% Transitional step until we can require Erlang/OTP 21 and
-%% use the now recommended try/catch syntax for obtaining the stack trace.
--compile(nowarn_deprecated_function).
 
 -export([decode/1, decode_and_verify/2, get_key_id/1]).
 
@@ -24,7 +20,15 @@ decode(Token) ->
     end.
 
 decode_and_verify(Jwk, Token) ->
-    case jose_jwt:verify(Jwk, Token) of
+    UaaEnv = application:get_env(rabbitmq_auth_backend_oauth2, key_config, []),
+    Verify =
+        case proplists:get_value(algorithms, UaaEnv) of
+            undefined ->
+                jose_jwt:verify(Jwk, Token);
+            Algs ->
+                jose_jwt:verify_strict(Jwk, Algs, Token)
+        end,
+    case Verify of
         {true, #jose_jwt{fields = Fields}, _}  -> {true, Fields};
         {false, #jose_jwt{fields = Fields}, _} -> {false, Fields}
     end.

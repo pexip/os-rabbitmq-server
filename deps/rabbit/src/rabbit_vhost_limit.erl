@@ -2,14 +2,14 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_vhost_limit).
 
 -behaviour(rabbit_runtime_parameter).
 
--include("rabbit.hrl").
+-include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([register/0]).
 -export([parse_set/3, set/3, clear/2]).
@@ -90,7 +90,8 @@ is_over_connection_limit(VirtualHost) ->
         %% with limit = 0, no connections are allowed
         {ok, 0}                                              -> {true, 0};
         {ok, Limit} when is_integer(Limit) andalso Limit > 0 ->
-            ConnectionCount = rabbit_connection_tracking:count_connections_in(VirtualHost),
+            ConnectionCount =
+                rabbit_connection_tracking:count_tracked_items_in({vhost, VirtualHost}),
             case ConnectionCount >= Limit of
                 false -> false;
                 true  -> {true, Limit}

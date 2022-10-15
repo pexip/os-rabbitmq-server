@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(ra_snapshot).
 
@@ -55,10 +55,10 @@
          %% typically <data_dir>/snapshots
          %% snapshot subdirs are store below
          %% this as <data_dir>/snapshots/Term_Index
-         directory = file:filename(),
-         pending :: maybe({pid(), ra_idxterm()}),
-         accepting :: maybe(#accept{}),
-         current :: maybe(ra_idxterm())}).
+         directory :: file:filename(),
+         pending :: 'maybe'({pid(), ra_idxterm()}),
+         accepting :: 'maybe'(#accept{}),
+         current :: 'maybe'(ra_idxterm())}).
 
 -define(ETSTBL, ra_log_snapshot_state).
 
@@ -133,8 +133,8 @@ init(UId, Module, SnapshotsDir) ->
     State = #?MODULE{uid = UId,
                      module = Module,
                      directory = SnapshotsDir},
-    true = filelib:is_dir(SnapshotsDir),
-    {ok, Snaps0} = file:list_dir(SnapshotsDir),
+    true = ra_lib:is_dir(SnapshotsDir),
+    {ok, Snaps0} = prim_file:list_dir(SnapshotsDir),
     Snaps = lists:reverse(lists:sort(Snaps0)),
     %% /snapshots/term_index/
     case pick_first_valid(UId, Module, SnapshotsDir, Snaps) of
@@ -162,7 +162,7 @@ pick_first_valid(UId, Mod, Dir, [S | Rem]) ->
     case Mod:validate(filename:join(Dir, S)) of
         ok -> S;
         Err ->
-            ?INFO("ra_snapshot: ~s: skipping ~s as did not validate. Err: ~w~n",
+            ?INFO("ra_snapshot: ~s: skipping ~s as did not validate. Err: ~w",
                   [UId, S, Err]),
             pick_first_valid(UId, Mod, Dir, Rem)
     end.
@@ -178,14 +178,14 @@ init_ets() ->
     _ = ets:new(?ETSTBL, TableFlags),
     ok.
 
--spec current(state()) -> maybe(ra_idxterm()).
+-spec current(state()) -> 'maybe'(ra_idxterm()).
 current(#?MODULE{current = Current}) -> Current.
 
--spec pending(state()) -> maybe({pid(), ra_idxterm()}).
+-spec pending(state()) -> 'maybe'({pid(), ra_idxterm()}).
 pending(#?MODULE{pending = Pending}) ->
     Pending.
 
--spec accepting(state()) -> maybe(ra_idxterm()).
+-spec accepting(state()) -> 'maybe'(ra_idxterm()).
 accepting(#?MODULE{accepting = undefined}) ->
     undefined;
 accepting(#?MODULE{accepting = #accept{idxterm = Accepting}}) ->
@@ -194,7 +194,7 @@ accepting(#?MODULE{accepting = #accept{idxterm = Accepting}}) ->
 -spec directory(state()) -> file:filename().
 directory(#?MODULE{directory = Dir}) -> Dir.
 
--spec last_index_for(ra_uid()) -> maybe(ra_index()).
+-spec last_index_for(ra_uid()) -> 'maybe'(ra_index()).
 last_index_for(UId) ->
     case ets:lookup(?ETSTBL, UId) of
         [] -> undefined;
@@ -208,7 +208,6 @@ begin_snapshot(#{index := Idx, term := Term} = Meta, MacRef,
                         directory = Dir} = State) ->
     %% create directory for this snapshot
     SnapDir = make_snapshot_dir(Dir, Idx, Term),
-    ok = ra_lib:make_dir(SnapDir),
     %% call prepare then write_snapshot
     %% This needs to be called in the current process to "lock" potentially
     %% mutable machine state
@@ -216,6 +215,7 @@ begin_snapshot(#{index := Idx, term := Term} = Meta, MacRef,
     %% write the snapshot in a separate process
     Self = self(),
     Pid = spawn(fun () ->
+                        ok = ra_lib:make_dir(SnapDir),
                         ok = Mod:write(SnapDir, Meta, Ref),
                         Self ! {ra_log_event,
                                 {snapshot_written, {Idx, Term}}},
@@ -262,10 +262,12 @@ accept_chunk(Chunk, Num, last,
     ok = Mod:complete_accept(Chunk, AccState),
     %% run validate here?
     %% delete the current snapshot if any
-    ok = delete(Dir, Current),
+    _ = spawn(fun () -> delete(Dir, Current) end),
     %% update ets table
     true = ets:insert(?ETSTBL, {UId, Idx}),
     {ok, State#?MODULE{accepting = undefined,
+                       %% reset any pending snapshot writes
+                       pending = undefined,
                        current = IdxTerm}};
 accept_chunk(Chunk, Num, next,
              #?MODULE{module = Mod,
@@ -358,7 +360,7 @@ read_meta(Module, Location) ->
     Module:read_meta(Location).
 
 -spec current_snapshot_dir(state()) ->
-    maybe(file:filename()).
+    'maybe'(file:filename()).
 current_snapshot_dir(#?MODULE{directory = Dir,
                               current = {Idx, Term}}) ->
     make_snapshot_dir(Dir, Idx, Term);

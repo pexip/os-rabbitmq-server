@@ -46,6 +46,11 @@
 %%     Type: counter.<br/>
 %%     Total number of transaction restarts.
 %%   </li>
+%%   <li>
+%%     `erlang_mnesia_memory_usage_bytes'<br/>
+%%     Type: gauge.<br/>
+%%     Total number of bytes allocated by all mnesia tables.
+%%   </li>
 %% </ul>
 %%
 %% ==Configuration==
@@ -61,7 +66,8 @@
 %% - `transaction_failures' for `erlang_mnesia_failed_transactions';
 %% - `transaction_commits' for `erlang_mnesia_committed_transactions';
 %% - `transaction_log_writes' for `erlang_mnesia_logged_transactions';
-%% - `transaction_restarts' for `erlang_mnesia_restarted_transactions'.
+%% - `transaction_restarts' for `erlang_mnesia_restarted_transactions';
+%% - `memory_usage_bytes' for `erlang_mnesia_memory_usage_bytes'.
 %%
 %% By default all metrics are enabled.
 %%
@@ -96,7 +102,7 @@ deregister_cleanup(_) -> ok.
     _Registry :: prometheus_registry:registry(),
     Callback :: prometheus_collector:callback().
 collect_mf(_Registry, Callback) ->
-  case is_started(mnesia) of
+  case mnesia_running() of
     true ->
       EnabledMetrics = enabled_metrics(),
       Metrics = metrics(EnabledMetrics),
@@ -115,6 +121,9 @@ add_metric_family({Name, Type, Help, Metrics}, Callback) ->
 
 metrics(EnabledMetrics) ->
   {Participants, Coordinators} = get_tm_info(EnabledMetrics),
+  MemoryUsage = get_memory_usage(),
+  TablewiseMemoryUsage = get_tablewise_memory_usage(),
+  TablewiseSize = get_tablewise_size(),
 
   [{held_locks, gauge,
     "Number of held locks.",
@@ -139,7 +148,17 @@ metrics(EnabledMetrics) ->
     fun() -> mnesia:system_info(transaction_log_writes) end},
    {restarted_transactions, counter,
     "Total number of transaction restarts.",
-    fun() -> mnesia:system_info(transaction_restarts) end}].
+    fun() -> mnesia:system_info(transaction_restarts) end},
+   {memory_usage_bytes, gauge,
+    "Total number of bytes allocated by all mnesia tables",
+    fun() -> MemoryUsage end},
+   {tablewise_memory_usage_bytes, gauge,
+    "Number of bytes allocated per mnesia table",
+    fun() -> TablewiseMemoryUsage end},
+   {tablewise_size, gauge,
+    "Number of rows present per table",
+    fun() -> TablewiseSize end}
+    ].
 
 %%====================================================================
 %% Private Parts
@@ -162,14 +181,44 @@ catch_all(DataFun) ->
     catch _:_ -> undefined
     end.
 
-is_started(App) ->
-  case [V || {A,_,V} <- application:which_applications(), A == App] of
-    [] -> false;
-    [_] -> true
-  end.
+mnesia_running() ->
+  erlang:function_exported(mnesia, system_info, 1) andalso
+    mnesia:system_info(is_running) == yes.
 
 enabled_metrics() ->
   application:get_env(prometheus, mnesia_collector_metrics, all).
 
 metric_enabled(Name, Metrics) ->
   Metrics =:= all orelse lists:member(Name, Metrics).
+
+get_memory_usage() ->
+  WordSize = erlang:system_info(wordsize),
+  Calculator = fun(Tab, Sum) ->
+                 table_info(Tab, memory) + Sum
+               end,
+  lists:foldl(Calculator, 0, mnesia:system_info(tables)) * WordSize.
+
+get_tablewise_memory_usage() ->
+  WordSize = erlang:system_info(wordsize),
+  Calculator =
+    fun(Tab, Acc) ->
+      [{[{table, Tab}], table_info(Tab, memory) * WordSize} | Acc]
+    end,
+  lists:foldl(Calculator, [], mnesia:system_info(tables)).
+
+get_tablewise_size() ->
+  Calculator =
+    fun(Tab, Acc) ->
+      [{[{table, Tab}], table_info(Tab, size)} | Acc]
+    end,
+  lists:foldl(Calculator, [], mnesia:system_info(tables)).
+
+%% mnesia:table_info/2 may return 'undefined' when the table should
+%% be loaded on the local node but hasn't been loaded yet.
+%%
+%% https://github.com/erlang/otp/issues/5830
+table_info(Tab, Item) ->
+    case mnesia:table_info(Tab, Item) of
+        undefined -> 0;
+        Val -> Val
+    end.

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 %% @hidden
 -module(ra_log_snapshot).
@@ -21,8 +21,6 @@
          validate/1,
          read_meta/1
          ]).
-
--include("ra.hrl").
 
 -define(MAGIC, "RASN").
 -define(VERSION, 1).
@@ -49,9 +47,8 @@ write(Dir, Meta, MacState) ->
     %% no compression on meta data to make sure reading it is as fast
     %% as possible
     MetaBin = term_to_binary(Meta),
-    %% the data can however be compressed
-    Bin = term_to_binary(MacState, [{compressed, 9}]),
-    Data = [<<(size(MetaBin)):32/unsigned>>, MetaBin, Bin],
+    IOVec = term_to_iovec(MacState),
+    Data = [<<(size(MetaBin)):32/unsigned>>, MetaBin | IOVec],
     Checksum = erlang:crc32(Data),
     File = filename(Dir),
     ra_lib:write_file(File, [<<?MAGIC,
@@ -84,8 +81,7 @@ complete_accept(Chunk, {PartialCrc, Fd}) ->
     complete_accept(Rest, {PartialCrc, Crc, Fd});
 complete_accept(Chunk, {PartialCrc0, Crc, Fd}) ->
     ok = file:write(Fd, Chunk),
-    {ok, 5} = file:position(Fd, 5),
-    ok = file:write(Fd, <<Crc:32/integer>>),
+    ok = file:pwrite(Fd, 5, <<Crc:32/integer>>),
     Crc = erlang:crc32(PartialCrc0, Chunk),
     ok = file:sync(Fd),
     ok = file:close(Fd),
@@ -116,8 +112,7 @@ read_chunk({Crc, ReadState}, Size, Dir) when is_integer(Crc) ->
             Err
     end;
 read_chunk({Pos, Eof, Fd}, Size, _Dir) ->
-    {ok, _} = file:position(Fd, Pos),
-    case file:read(Fd, Size) of
+    case file:pread(Fd, Pos, Size) of
         {ok, Data} ->
             case Pos + Size >= Eof of
                 true ->
@@ -140,7 +135,7 @@ read_chunk({Pos, Eof, Fd}, Size, _Dir) ->
      file_err()}.
 recover(Dir) ->
     File = filename(Dir),
-    case file:read_file(File) of
+    case prim_file:read_file(File) of
         {ok, <<?MAGIC, ?VERSION:8/unsigned, Crc:32/integer, Data/binary>>} ->
             validate(Crc, Data);
         {ok, <<?MAGIC, Version:8/unsigned, _:32/integer, _/binary>>} ->

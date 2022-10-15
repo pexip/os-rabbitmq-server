@@ -21,7 +21,7 @@ Team RabbitMQ wanted a set of tools that
 ## Supported RabbitMQ Versions
 
 Long lived branches in this repository track the same branch in RabbitMQ core and related
-repositories. So `master` tracks `master` in rabbitmq-server, `v3.7.x` tracks branch `v3.7.x` in
+repositories. So `master` tracks `master` in rabbitmq-server, `v3.10.x` tracks branch `v3.10.x` in
 rabbitmq-server and so on.
 
 Please use the version of CLI tools that come with the RabbitMQ distribution version installed.
@@ -33,8 +33,8 @@ Please use the version of CLI tools that come with the RabbitMQ distribution ver
 
 Building this project requires
 
- * Erlang/OTP 21.3 (or later)
- * [Elixir](https://elixir-lang.org/) 1.10.0 (or later).
+ * Erlang/OTP 23.3 (or later)
+ * [Elixir](https://elixir-lang.org/) 1.12.0 (or later).
 
 Command line tools depend on [rabbitmq-common](https://github.com/rabbitmq/rabbitmq-common).
 Dependencies are being resolved by `erlang.mk`
@@ -42,7 +42,7 @@ Dependencies are being resolved by `erlang.mk`
 ### Building Standalone Executables
 
 This repo produces a `rabbitmqctl` executable which can be used as different tools
-(`rabbitmq-plugins`, `rabbitmq-diagnostics`, `rabbitmq-queues`, `rabbitmq-upgrade`) by copying or symlinking it with different names.
+(`rabbitmq-plugins`, `rabbitmq-diagnostics`, `rabbitmq-queues`, `rabbitmq-streams`, `rabbitmq-upgrade`) by copying or symlinking it with different names.
 Depending on the name, a different set of commands will be loaded and available, including
 for `--help`.
 
@@ -105,7 +105,7 @@ There are also a number of optional callbacks:
  * `usage_additional`: extra values appended to the `usage` output
    to provide additional command-specific documentation.
  * `scopes`: what scopes this command appears in. Scopes associate
-   tools (e.g. `rabbitmqctl`, `rabbitmq-diagnostics`, `rabbitmq-queues`) with commands.
+   tools (e.g. `rabbitmqctl`, `rabbitmq-diagnostics`, `rabbitmq-queues`, `rabbitmq-streams`) with commands.
  * `distribution`: control erlang distribution.
    Can be `:cli` (default), `:none` or `{:fun, fun}`
 

@@ -2,24 +2,25 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_vhost_msg_store).
 
--include("rabbit.hrl").
+-include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([start/4, stop/2, client_init/5, successfully_recovered_state/2]).
 -export([vhost_store_pid/2]).
 
 start(VHost, Type, ClientRefs, StartupFunState) when is_list(ClientRefs);
                                                      ClientRefs == undefined  ->
+    _ = pg:start_link(),
     case rabbit_vhost_sup_sup:get_vhost_sup(VHost) of
         {ok, VHostSup} ->
             VHostDir = rabbit_vhost:msg_store_dir_path(VHost),
             supervisor2:start_child(VHostSup,
                                     {Type, {rabbit_msg_store, start_link,
-                                            [Type, VHostDir, ClientRefs, StartupFunState]},
+                                            [VHost, Type, VHostDir, ClientRefs, StartupFunState]},
                                      transient, ?MSG_STORE_WORKER_WAIT, worker, [rabbit_msg_store]});
         %% we can get here if a vhost is added and removed concurrently
         %% e.g. some integration tests do it
@@ -56,10 +57,16 @@ with_vhost_store(VHost, Type, Fun) ->
     end.
 
 vhost_store_pid(VHost, Type) ->
-    {ok, VHostSup} = rabbit_vhost_sup_sup:get_vhost_sup(VHost),
-    case supervisor2:find_child(VHostSup, Type) of
-        [Pid] -> Pid;
-        []    -> no_pid
+    case pg:get_local_members({rabbit_msg_store, VHost, Type}) of
+        [] ->
+            %% Fall back to using the supervisor (sometimes necessary on queue startup).
+            {ok, VHostSup} = rabbit_vhost_sup_sup:get_vhost_sup(VHost),
+            case supervisor2:find_child(VHostSup, Type) of
+                [Pid] -> Pid;
+                []    -> no_pid
+            end;
+        [Pid|_] ->
+            Pid
     end.
 
 successfully_recovered_state(VHost, Type) ->

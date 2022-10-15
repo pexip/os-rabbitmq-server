@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 %% @doc The primary module for interacting with ra servers and clusters.
 
@@ -31,22 +31,29 @@
          leader_query/3,
          consistent_query/2,
          consistent_query/3,
+         ping/2,
          % cluster operations
          start_cluster/1,
          start_cluster/2,
          start_cluster/3,
          start_cluster/4,
-         start_or_restart_cluster/3,
          start_or_restart_cluster/4,
+         start_or_restart_cluster/5,
          delete_cluster/1,
          delete_cluster/2,
          % server management
+         % deprecated
          start_server/1,
-         start_server/4,
+         start_server/2,
+         start_server/5,
+         % deprecated
          restart_server/1,
          restart_server/2,
+         restart_server/3,
+         % deprecated
          stop_server/1,
-         force_delete_server/1,
+         stop_server/2,
+         force_delete_server/2,
          trigger_election/1,
          trigger_election/2,
          %% membership changes
@@ -54,22 +61,29 @@
          add_member/3,
          remove_member/2,
          remove_member/3,
-         leave_and_terminate/1,
-         leave_and_terminate/2,
          leave_and_terminate/3,
-         leave_and_delete_server/1,
-         leave_and_delete_server/2,
+         leave_and_terminate/4,
          leave_and_delete_server/3,
+         leave_and_delete_server/4,
          %% troubleshooting
+         % deprecated
          overview/0,
+         overview/1,
          %% helpers
          new_uid/1,
          %% rebalancing
          transfer_leadership/2,
+         %% auxiliary commands
          aux_command/2,
          cast_aux_command/2,
          register_external_log_reader/1
         ]).
+
+%% xref should pick these up
+-deprecated({start_server, 1}).
+-deprecated({restart_server, 1}).
+-deprecated({stop_server, 1}).
+-deprecated({overview, 0}).
 
 -define(START_TIMEOUT, ?DEFAULT_TIMEOUT).
 
@@ -89,9 +103,11 @@
 %% export some internal types
 -type index() :: ra_index().
 -type server_id() :: ra_server_id().
+-type cluster_name() :: ra_cluster_name().
 
 -export_type([index/0,
               server_id/0,
+              cluster_name/0,
               query_fun/0,
               from/0]).
 
@@ -99,7 +115,7 @@
 %% @end
 -spec start() -> ok.
 start() ->
-    {ok, _} = application:ensure_all_started(ra),
+    {ok, _} = start([]),
     ok.
 
 %% @doc Starts the ra application.
@@ -113,7 +129,9 @@ start(Params) when is_list(Params) ->
     _ = application:load(ra),
     [ok = application:set_env(ra, Param, Value)
      || {Param, Value} <- Params],
-    application:ensure_all_started(ra).
+    Res = application:ensure_all_started(ra),
+    _ = ra_system:start_default(),
+    Res.
 
 %% @doc Starts the ra application with a provided data directory.
 %% The same as ra:start([{data_dir, dir}])
@@ -126,16 +144,32 @@ start(Params) when is_list(Params) ->
 start_in(DataDir) ->
     start([{data_dir, DataDir}]).
 
+%% @doc Restarts a previously successfully started ra server in the default system
+%% @param ServerId the ra_server_id() of the server
+%% @returns `{ok | error, Error}' where error can be
+%% `not_found', `system_not_started' or `name_not_registered' when the
+%% ra server has never before been started on the Erlang node.
+%% DEPRECATED: use restart_server/2
+%% @end
+-spec restart_server(ra_server_id()) ->
+    ok | {error, term()}.
+restart_server(ServerId) ->
+    %% TODO: this is a bad overload
+    restart_server(default, ServerId).
+
 %% @doc Restarts a previously successfully started ra server
+%% @param System the system identifier
 %% @param ServerId the ra_server_id() of the server
 %% @returns `{ok | error, Error}' where error can be
 %% `not_found' or `name_not_registered' when the ra server has never before
 %% been started on the Erlang node.
 %% @end
--spec restart_server(ra_server_id()) -> ok | {error, term()}.
-restart_server(ServerId) ->
+-spec restart_server(atom(), ra_server_id()) ->
+    ok | {error, term()}.
+restart_server(System, ServerId)
+  when is_atom(System) ->
     % don't match on return value in case it is already running
-    case catch ra_server_sup_sup:restart_server(ServerId, #{}) of
+    case catch ra_server_sup_sup:restart_server(System, ServerId, #{}) of
         {ok, _} -> ok;
         {ok, _, _} -> ok;
         {error, _} = Err -> Err;
@@ -143,6 +177,7 @@ restart_server(ServerId) ->
     end.
 
 %% @doc Restarts a previously successfully started ra server
+%% @param System the system identifier
 %% @param ServerId the ra_server_id() of the server
 %% @param AddConfig additional config parameters to be merged into the
 %% original config.
@@ -151,24 +186,38 @@ restart_server(ServerId) ->
 %% been started on the Erlang node.
 %% @end
 
--spec restart_server(ra_server_id(), ra_server:mutable_config()) ->
+-spec restart_server(atom(), ra_server_id(), ra_server:mutable_config()) ->
     ok | {error, term()}.
-restart_server(ServerId, AddConfig) ->
+restart_server(System, ServerId, AddConfig)
+  when is_atom(System) ->
     % don't match on return value in case it is already running
-    case catch ra_server_sup_sup:restart_server(ServerId, AddConfig) of
+    case catch ra_server_sup_sup:restart_server(System, ServerId, AddConfig) of
         {ok, _} -> ok;
         {ok, _, _} -> ok;
         {error, _} = Err -> Err;
         {'EXIT', Err} -> {error, Err}
     end.
 
+%% @doc Stops a ra server in the default system
+%% @param ServerId the ra_server_id() of the server
+%% @returns `{ok | error, nodedown}'
+%% DEPRECATED: use stop_server/2
+%% @end
+-spec stop_server(ra_server_id()) ->
+    ok | {error, nodedown | system_not_started}.
+stop_server(ServerId) ->
+    stop_server(default, ServerId).
+
 %% @doc Stops a ra server
+%% @param System the system name
 %% @param ServerId the ra_server_id() of the server
 %% @returns `{ok | error, nodedown}'
 %% @end
--spec stop_server(ra_server_id()) -> ok | {error, nodedown}.
-stop_server(ServerId) ->
-    try ra_server_sup_sup:stop_server(ServerId) of
+-spec stop_server(atom(), ra_server_id()) ->
+    ok | {error, nodedown | system_not_started}.
+stop_server(System, ServerId)
+  when is_atom(System) ->
+    try ra_server_sup_sup:stop_server(System, ServerId) of
         ok -> ok;
         {error, not_found} -> ok;
         {error, {badrpc, nodedown}} ->
@@ -184,13 +233,14 @@ stop_server(ServerId) ->
 %% @param ServerId the ra_server_id() of the server
 %% @returns `ok | {error, nodedown} | {badrpc, Reason}'
 %% @end
--spec force_delete_server(ServerId :: ra_server_id()) -> ok | {error, term()} | {badrpc, term()}.
-force_delete_server(ServerId) ->
-    ra_server_sup_sup:delete_server(ServerId).
+-spec force_delete_server(atom(), ServerId :: ra_server_id()) ->
+    ok | {error, term()} | {badrpc, term()}.
+force_delete_server(System, ServerId) ->
+    ra_server_sup_sup:delete_server(System, ServerId).
 
 %% @doc Starts or restarts a ra cluster.
 %%
-%%
+%% @param An atom of the system name
 %% @param ClusterName the name of the cluster.
 %% @param Machine The {@link ra_machine:machine/0} configuration.
 %% @param ServerIds The list of ra server ids.
@@ -206,14 +256,14 @@ force_delete_server(ServerId) ->
 %% any servers that did manage to start are
 %% forcefully deleted.
 %% @end
--spec start_or_restart_cluster(ra_cluster_name(), ra_server:machine_conf(),
+-spec start_or_restart_cluster(atom(), ra_cluster_name(), ra_server:machine_conf(),
                                [ra_server_id()]) ->
     {ok, [ra_server_id()], [ra_server_id()]} |
     {error, cluster_not_formed}.
-start_or_restart_cluster(ClusterName, Machine, ServerIds) ->
-    start_or_restart_cluster(ClusterName, Machine, ServerIds, ?START_TIMEOUT).
+start_or_restart_cluster(System, ClusterName, Machine, ServerIds) ->
+    start_or_restart_cluster(System, ClusterName, Machine, ServerIds, ?START_TIMEOUT).
 
-%% @doc Same as `start_or_restart_cluster/3' but accepts a custom timeout.
+%% @doc Same as `start_or_restart_cluster/4' but accepts a custom timeout.
 %% @param ClusterName the name of the cluster.
 %% @param Machine The {@link ra_machine:machine/0} configuration.
 %% @param ServerIds The list of ra server ids.
@@ -231,21 +281,21 @@ start_or_restart_cluster(ClusterName, Machine, ServerIds) ->
 %% forcefully deleted.
 %% @see start_or_restart_cluster/3
 %% @end
--spec start_or_restart_cluster(ra_cluster_name(), ra_server:machine_conf(),
+-spec start_or_restart_cluster(atom(), ra_cluster_name(), ra_server:machine_conf(),
                                [ra_server_id()], non_neg_integer()) ->
     {ok, [ra_server_id()], [ra_server_id()]} |
     {error, cluster_not_formed}.
-start_or_restart_cluster(ClusterName, Machine,
+start_or_restart_cluster(System, ClusterName, Machine,
                          [FirstServer | RemServers] = ServerIds, Timeout) ->
-    case ra_server_sup_sup:restart_server(FirstServer, #{}) of
+    case ra_server_sup_sup:restart_server(System, FirstServer, #{}) of
         {ok, _} ->
             %% restart the rest of the servers
-            _ = [{ok, _} = ra_server_sup_sup:restart_server(N, #{})
+            _ = [{ok, _} = ra_server_sup_sup:restart_server(System, N, #{})
                  || N <- RemServers],
             {ok, ServerIds, []};
         {error, Err} ->
-            ?ERR("start_or_restart_cluster: got an error: ~p~n", [Err]),
-            start_cluster(ClusterName, Machine, ServerIds, Timeout)
+            ?ERR("start_or_restart_cluster: got an error: ~w", [Err]),
+            start_cluster(System, ClusterName, Machine, ServerIds, Timeout)
     end.
 
 %% @doc Starts a new distributed ra cluster.
@@ -264,13 +314,15 @@ start_or_restart_cluster(ClusterName, Machine,
 %% If a cluster could not be formed any servers that did manage to start are
 %% forcefully deleted.
 %% @end
--spec start_cluster(ra_cluster_name(),
+-spec start_cluster(atom(),
+                    ra_cluster_name(),
                     ra_server:machine_conf(),
                     [ra_server_id()]) ->
     {ok, [ra_server_id()], [ra_server_id()]} |
     {error, cluster_not_formed}.
-start_cluster(ClusterName, Machine, ServerIds) ->
-    start_cluster(ClusterName, Machine, ServerIds, ?START_TIMEOUT).
+start_cluster(System, ClusterName, Machine, ServerIds)
+  when is_atom(System) ->
+    start_cluster(System, ClusterName, Machine, ServerIds, ?START_TIMEOUT).
 
 %% @doc Starts a new distributed ra cluster.
 %%
@@ -289,13 +341,15 @@ start_cluster(ClusterName, Machine, ServerIds) ->
 %% If a cluster could not be formed any servers that did manage to start are
 %% forcefully deleted.
 %% @end
--spec start_cluster(ra_cluster_name(),
+-spec start_cluster(atom(),
+                    ra_cluster_name(),
                     ra_server:machine_conf(),
                     [ra_server_id()],
                     non_neg_integer()) ->
     {ok, [ra_server_id()], [ra_server_id()]} |
     {error, cluster_not_formed}.
-start_cluster(ClusterName, Machine, ServerIds, Timeout) ->
+start_cluster(System, ClusterName, Machine, ServerIds, Timeout)
+  when is_atom(System) ->
     Configs = [begin
                    UId = new_uid(ra_lib:to_binary(ClusterName)),
                    #{id => Id,
@@ -305,10 +359,20 @@ start_cluster(ClusterName, Machine, ServerIds, Timeout) ->
                      initial_members => ServerIds,
                      machine => Machine}
                end || Id <- ServerIds],
-    start_cluster(Configs, Timeout).
+    start_cluster(System, Configs, Timeout).
+
+%% @doc Same as `start_cluster/2' but uses the default Ra system.
+%% @param ServerConfigs a list of initial server configurations
+%% DEPRECATED: use start_cluster/2
+%% @end
+-spec start_cluster([ra_server:ra_server_config()]) ->
+    {ok, [ra_server_id()], [ra_server_id()]} |
+    {error, cluster_not_formed}.
+start_cluster(ServerConfigs) ->
+  start_cluster(default, ServerConfigs).
 
 %% @doc Starts a new distributed ra cluster.
-%%
+%% @param System the system name
 %% @param ServerConfigs a list of initial server configurations
 %% @returns
 %% `{ok, Started, NotStarted}'  if a cluster could be successfully
@@ -321,28 +385,31 @@ start_cluster(ClusterName, Machine, ServerIds, Timeout) ->
 %% If a cluster could not be formed any servers that did manage to start are
 %% forcefully deleted.
 %% @end
--spec start_cluster([ra_server:ra_server_config()]) ->
+-spec start_cluster(atom(), [ra_server:ra_server_config()]) ->
     {ok, [ra_server_id()], [ra_server_id()]} |
     {error, cluster_not_formed}.
-start_cluster(ServerConfigs) ->
-    start_cluster(ServerConfigs, ?START_TIMEOUT).
+start_cluster(System, ServerConfigs)
+  when is_atom(System) ->
+    start_cluster(System, ServerConfigs, ?START_TIMEOUT).
 
-%% @doc Same as `start_cluster/1' but accepts a custom timeout.
+%% @doc Same as `start_cluster/2' but accepts a custom timeout.
+%% @param System the system name
 %% @param ServerConfigs a list of initial server configurations
 %% @param Timeout the timeout to use
 %% @end
--spec start_cluster([ra_server:ra_server_config()], non_neg_integer()) ->
+-spec start_cluster(atom(),
+                    [ra_server:ra_server_config()], non_neg_integer()) ->
     {ok, [ra_server_id()], [ra_server_id()]} |
     {error, cluster_not_formed}.
-start_cluster([#{cluster_name := ClusterName} | _] =
-               ServerConfigs, Timeout) ->
+start_cluster(System, [#{cluster_name := ClusterName} | _] = ServerConfigs,
+              Timeout) when is_atom(System) ->
     {Started, NotStarted} =
         ra_lib:partition_parallel(
             fun (C) ->
-                case start_server(C) of
+                case start_server(System, C) of
                     ok  -> true;
                     Err ->
-                        ?ERR("ra: failed to start a server ~w, error: ~p~n",
+                        ?ERR("ra: failed to start a server ~w, error: ~p",
                               [C, Err]),
                         false
                 end
@@ -350,7 +417,7 @@ start_cluster([#{cluster_name := ClusterName} | _] =
     case Started of
         [] ->
             ?ERR("ra: failed to form a new cluster ~w.~n "
-                  "No servers were succesfully started.~n",
+                  "No servers were successfully started.",
                   [ClusterName]),
             {error, cluster_not_formed};
         _ ->
@@ -372,8 +439,8 @@ start_cluster([#{cluster_name := ClusterName} | _] =
                     {ok, StartedIds, NotStartedIds};
                 Err ->
                     ?WARN("ra: failed to form new cluster ~w.~n "
-                          "Error: ~w~n", [ClusterName, Err]),
-                    _ = [force_delete_server(N) || N <- StartedIds],
+                          "Error: ~w", [ClusterName, Err]),
+                    _ = [force_delete_server(System, N) || N <- StartedIds],
                     % we do not have a functioning cluster
                     {error, cluster_not_formed}
             end
@@ -383,7 +450,7 @@ start_cluster([#{cluster_name := ClusterName} | _] =
 %% @param ClusterName the name of the cluster.
 %% @param ServerId the ra_server_id() of the server
 %% @param Machine The {@link ra_machine:machine/0} configuration.
-%% @param ServerConfigs a list of initial server configurations
+%% @param ServerIds a list of initial (seed) server configurations
 %% @returns
 %% `{ok, Started, NotStarted}'  if a cluster could be successfully
 %% started. A cluster can be successfully started if more than half of the
@@ -396,10 +463,11 @@ start_cluster([#{cluster_name := ClusterName} | _] =
 %% forcefully deleted.
 %% @see start_server/1
 %% @end
--spec start_server(ra_cluster_name(), ra_server_id(),
+-spec start_server(atom(), ra_cluster_name(), ra_server_id(),
                    ra_server:machine_conf(), [ra_server_id()]) ->
     ok | {error, term()}.
-start_server(ClusterName, ServerId, Machine, ServerIds) ->
+start_server(System, ClusterName, {_, _} = ServerId, Machine, ServerIds)
+  when is_atom(System) ->
     UId = new_uid(ra_lib:to_binary(ClusterName)),
     Conf = #{cluster_name => ClusterName,
              id => ServerId,
@@ -407,19 +475,31 @@ start_server(ClusterName, ServerId, Machine, ServerIds) ->
              initial_members => ServerIds,
              log_init_args => #{uid => UId},
              machine => Machine},
-    start_server(Conf).
+    start_server(System, Conf).
+
+%% @doc Starts a ra server in the default system
+%% @param Conf a ra_server_config() configuration map.
+%% @returns `{ok | error, Error}'
+%% DEPRECATED: use start_server/2
+%% @end
+-spec start_server(ra_server:ra_server_config()) ->
+    ok | {error, term()}.
+start_server(Conf) ->
+    start_server(default, Conf).
 
 %% @doc Starts a ra server
+%% @param System the system name
 %% @param Conf a ra_server_config() configuration map.
 %% @returns `{ok | error, Error}'
 %% @end
--spec start_server(ra_server:ra_server_config()) -> ok | {error, term()}.
-start_server(Conf) ->
+-spec start_server(atom(), ra_server:ra_server_config()) ->
+    ok | {error, term()}.
+start_server(System, Conf) when is_atom(System) ->
     %% validate UID is safe
     case ra_lib:validate_base64uri(maps:get(uid, Conf)) of
         true ->
             % don't match on return value in case it is already running
-            case catch ra_server_sup_sup:start_server(Conf) of
+            case catch ra_server_sup_sup:start_server(System, Conf) of
                 {ok, _} -> ok;
                 {ok, _, _} -> ok;
                 {error, _} = Err -> Err;
@@ -528,7 +608,7 @@ remove_member(ServerRef, ServerId, Timeout) ->
                            {'$ra_leave', ServerId, after_log_append},
                            Timeout).
 
-%% @doc Makes the server to enter a pre-vote state and attempt to become the leader.
+%% @doc Makes the server enter a pre-vote state and attempt to become the leader.
 %% It is necessary to call this function when starting a new cluster as a
 %% brand new Ra server (node) will not automatically enter the pre-vote state.
 %% This does not apply to recovering (previously started) servers: they will
@@ -546,15 +626,6 @@ trigger_election(ServerId) ->
 trigger_election(ServerId, Timeout) ->
     ra_server_proc:trigger_election(ServerId, Timeout).
 
-%% @doc A safe way for a an active server to remove itself from its cluster.
-%% The server is first removed, then asked to terminate.
-%% Use this when a node knows that it is being permanently decommissioned.
-%% @param ServerId the ra server to send the command to and to remove
-%% @see remove_member/2
-%% @end
-leave_and_terminate(ServerId) ->
-    leave_and_terminate(ServerId, ServerId).
-
 %% @doc A safe way to remove an active server from its cluster.
 %% The command is added to the log by the `ServerRef' node.
 %% Use this to decommission a node that's unable to start
@@ -563,10 +634,11 @@ leave_and_terminate(ServerId) ->
 %% @param ServerId the ra server to remove
 %% @see leave_and_terminate/3
 %% @end
--spec leave_and_terminate(ra_server_id() | [ra_server_id()], ra_server_id()) ->
-    ok | timeout | {error, noproc}.
-leave_and_terminate(ServerRef, ServerId) ->
-    leave_and_terminate(ServerRef, ServerId, ?DEFAULT_TIMEOUT).
+-spec leave_and_terminate(atom(),
+                          ra_server_id() | [ra_server_id()], ra_server_id()) ->
+    ok | timeout | {error, noproc | system_not_started}.
+leave_and_terminate(System, ServerRef, ServerId) ->
+    leave_and_terminate(System, ServerRef, ServerId, ?DEFAULT_TIMEOUT).
 
 %% @doc Same as `leave_and_terminate/2' but also accepts a timeout.
 %% @param ServerRef the ra server to send the command to and to remove
@@ -574,10 +646,11 @@ leave_and_terminate(ServerRef, ServerId) ->
 %% @param Timeout timeout to use
 %% @see leave_and_terminate/2
 %% @end
--spec leave_and_terminate(ra_server_id() | [ra_server_id()],
+-spec leave_and_terminate(atom(),
+                          ra_server_id() | [ra_server_id()],
                           ra_server_id(), timeout()) ->
-    ok | timeout | {error, noproc}.
-leave_and_terminate(ServerRef, ServerId, Timeout) ->
+    ok | timeout | {error, noproc | system_not_started}.
+leave_and_terminate(System, ServerRef, ServerId, Timeout) ->
     LeaveCmd = {'$ra_leave', ServerId, await_consensus},
     case ra_server_proc:command(ServerRef, LeaveCmd, Timeout) of
         {timeout, Who} ->
@@ -587,19 +660,8 @@ leave_and_terminate(ServerRef, ServerId, Timeout) ->
             Err;
         {ok, _, _} ->
             ?INFO("We (Ra node ~w) has successfully left the cluster. Terminating.", [ServerId]),
-            stop_server(ServerId)
+            stop_server(System, ServerId)
     end.
-
-%% @doc A safe way for a an active server to force remove itself from its cluster.
-%% The server will be force removed after a membership transition command was
-%% added to the log.
-%% Use this when a node knows that it is being permanently decommissioned.
-%% @param ServerRef the ra server to send the command to and to force remove
-%% @see leave_and_terminate/2
-%% @see leave_and_delete_server/3
-%% @end
-leave_and_delete_server(ServerId) ->
-    leave_and_delete_server(ServerId, ServerId).
 
 %% @doc A safe way to remove an active server from its cluster.
 %% The server will be force removed after a membership transition command was
@@ -607,15 +669,16 @@ leave_and_delete_server(ServerId) ->
 %% The command is added to the log by the `ServerRef' node.
 %% Use this to decommission a node that's unable to start
 %% or is permanently lost.
+%% @param System the system identifier
 %% @param ServerRef the ra server to send the command to and to remove
 %% @param ServerId the ra server to force remove
 %% @see leave_and_delete_server/3
 %% @end
--spec leave_and_delete_server(ra_server_id() | [ra_server_id()],
-                               ra_server_id()) ->
+-spec leave_and_delete_server(atom(), ra_server_id() | [ra_server_id()],
+                              ra_server_id()) ->
     ok | timeout | {error, noproc}.
-leave_and_delete_server(ServerRef, ServerId) ->
-    leave_and_delete_server(ServerRef, ServerId, ?DEFAULT_TIMEOUT).
+leave_and_delete_server(System, ServerRef, ServerId) ->
+    leave_and_delete_server(System, ServerRef, ServerId, ?DEFAULT_TIMEOUT).
 
 %% @doc Same as `leave_and_delete_server/2' but also accepts a timeout.
 %% @param ServerRef the ra server to send the command to and to remove
@@ -623,10 +686,10 @@ leave_and_delete_server(ServerRef, ServerId) ->
 %% @param Timeout timeout to use
 %% @see leave_and_delete_server/2
 %% @end
--spec leave_and_delete_server(ra_server_id() | [ra_server_id()],
+-spec leave_and_delete_server(atom(), ra_server_id() | [ra_server_id()],
                               ra_server_id(), timeout()) ->
     ok | timeout | {error, noproc}.
-leave_and_delete_server(ServerRef, ServerId, Timeout) ->
+leave_and_delete_server(System, ServerRef, ServerId, Timeout) ->
     LeaveCmd = {'$ra_leave', ServerId, await_consensus},
     case ra_server_proc:command(ServerRef, LeaveCmd, Timeout) of
         {timeout, Who} ->
@@ -636,7 +699,7 @@ leave_and_delete_server(ServerRef, ServerId, Timeout) ->
             Err;
         {ok, _, _} ->
             ?INFO("Ra node ~w has successfully left the cluster.", [ServerId]),
-            force_delete_server(ServerId)
+            force_delete_server(System, ServerId)
     end.
 
 %% @doc generates a random uid using the provided source material for the first
@@ -647,19 +710,37 @@ new_uid(Source) when is_binary(Source) ->
     ra_lib:make_uid(string:uppercase(Prefix)).
 
 
+%% @doc Returns a map of overview data of the default Ra system on the current Erlang
+%% node.
+%% DEPRECATED: user overview/1
+%% @end
+-spec overview() -> map() | system_not_started.
+overview() ->
+    overview(default).
+
 %% @doc Returns a map of overview data of the Ra system on the current Erlang
 %% node.
 %% @end
--spec overview() -> map().
-overview() ->
-    #{node => node(),
-      servers => ra_directory:overview(),
-      counters => ra_counters:overview(),
-      wal => #{status => lists:nth(5, element(4, sys:get_status(ra_log_wal))),
-               open_mem_tables => ets:info(ra_log_open_mem_tables, size),
-               closed_mem_tables => ets:info(ra_log_closed_mem_tables, size)},
-      segment_writer => ra_log_segment_writer:overview()
-     }.
+-spec overview(atom()) -> map() | system_not_started.
+overview(System) ->
+    case ra_system:fetch(System) of
+        undefined ->
+            system_not_started;
+        Config ->
+            #{names := #{segment_writer := SegWriter,
+                         open_mem_tbls := OpenTbls,
+                         closed_mem_tbls := ClosedTbls,
+                         wal := Wal}} = Config,
+            #{node => node(),
+              servers => ra_directory:overview(System),
+              %% TODO:filter counter keys by system
+              counters => ra_counters:overview(),
+              wal => #{status => lists:nth(5, element(4, sys:get_status(Wal))),
+                       open_mem_tables => ets:info(OpenTbls, size),
+                       closed_mem_tables => ets:info(ClosedTbls, size)},
+              segment_writer => ra_log_segment_writer:overview(SegWriter)
+             }
+    end.
 
 %% @doc Submits a command to a ra server. Returns after the command has
 %% been applied to the Raft state machine. If the state machine returned a
@@ -705,7 +786,7 @@ process_command(ServerId, Command) ->
 %% to implement reliable async interactions with the ra system. The calling
 %% process can retain a map of commands that have not yet been applied to the
 %% state machine successfully and resend them if a notification is not received
-%% withing some time window.
+%% within some time window.
 %% When the submitted command(s) is applied to the state machine, the ra server will send
 %% the calling process a ra_event of the following structure:
 %%
@@ -744,9 +825,8 @@ process_command(ServerId, Command) ->
 %% @end
 -spec pipeline_command(ServerId :: ra_server_id(), Command :: term(),
                        Correlation :: ra_server:command_correlation() |
-                                      no_correlation,
-                       Priority :: normal | low) ->
-    ok.
+                       no_correlation,
+                       Priority :: ra_server:command_priority()) -> ok.
 pipeline_command(ServerId, Command, Correlation, Priority)
   when Correlation /= no_correlation ->
     Cmd = usr(Command, {notify, Correlation, self()}),
@@ -770,10 +850,14 @@ pipeline_command(ServerId, Command, Correlation) ->
     pipeline_command(ServerId, Command, Correlation, low).
 
 
+-spec ping(ServerId :: ra_server_id(), Timeout :: timeout()) -> safe_call_ret({pong, states()}).
+ping(ServerId, Timeout) ->
+    ra_server_proc:ping(ServerId, Timeout).
+
 %% @doc Sends a command to the ra server using a gen_statem:cast without
 %% any correlation identifier.
 %% Effectively the same as
-%% `ra:pipeline_command(ServerId, Command, low, no_correlation)'
+%% `ra:pipeline_command(ServerId, Command, no_correlation, low)'
 %% This is the least reliable way to interact with a ra system ("fire and forget")
 %% and should only be used for commands that are of little importance
 %% and/or where waiting for a response is prohibitively slow.
@@ -874,22 +958,51 @@ consistent_query(ServerId, QueryFun, Timeout) ->
     ra_server_proc:query(ServerId, QueryFun, consistent, Timeout).
 
 %% @doc Returns a list of cluster members
+%%
+%% Except if `{local, ServerId}' is passed, the query is sent to the specified
+%% server which may redirect it to the leader if it is a follower. It may
+%% timeout if there is currently no leader (i.e. an election is in progress).
+%%
+%% With `{local, ServerId}', the query is always handled by the specified
+%% server. It means the returned list might be out-of-date compared to what the
+%% leader would have returned.
+%%
 %% @param ServerId the Ra server(s) to send the query to
 %% @end
--spec members(ra_server_id() | [ra_server_id()]) ->
+-spec members(ra_server_id() | [ra_server_id()] | {local, ra_server_id()}) ->
     ra_server_proc:ra_leader_call_ret([ra_server_id()]).
 members(ServerId) ->
     members(ServerId, ?DEFAULT_TIMEOUT).
 
 %% @doc Returns a list of cluster members
+%%
+%% Except if `{local, ServerId}' is passed, the query is sent to the specified
+%% server which may redirect it to the leader if it is a follower. It may
+%% timeout if there is currently no leader (i.e. an election is in progress).
+%%
+%% With `{local, ServerId}', the query is always handled by the specified
+%% server. It means the returned list might be out-of-date compared to what the
+%% leader would have returned.
+%%
 %% @param ServerId the Ra server(s) to send the query to
 %% @param Timeout the timeout to use
 %% @end
--spec members(ra_server_id() | [ra_server_id()], timeout()) ->
+-spec members(ra_server_id() | [ra_server_id()] | {local, ra_server_id()},
+              timeout()) ->
     ra_server_proc:ra_leader_call_ret([ra_server_id()]).
+members({local, ServerId}, Timeout) ->
+    ra_server_proc:local_state_query(ServerId, members, Timeout);
 members(ServerId, Timeout) ->
     ra_server_proc:state_query(ServerId, members, Timeout).
 
+%% @doc Returns a list of initial (seed) cluster members.
+%%
+%% This allows Ra-based systems with dynamic cluster membership
+%% discover the original set of members and use them to seed newly
+%% joining ones.
+%%
+%% @param ServerId the Ra server(s) to send the query to
+%% @end
 -spec initial_members(ra_server_id() | [ra_server_id()]) ->
     ra_server_proc:ra_leader_call_ret([ra_server_id()] | error).
 initial_members(ServerId) ->
@@ -901,17 +1014,27 @@ initial_members(ServerId, Timeout) ->
     ra_server_proc:state_query(ServerId, initial_members, Timeout).
 
 %% @doc Transfers leadership from the leader to a follower.
-%% Returns `already_leader' if the transfer targer is already the leader.
+%% Returns `already_leader' if the transfer target is already the leader.
 %% @end
 -spec transfer_leadership(ra_server_id(), ra_server_id()) ->
     ok | already_leader | {error, term()} | {timeout, ra_server_id()}.
 transfer_leadership(ServerId, TargetServerId) ->
     ra_server_proc:transfer_leadership(ServerId, TargetServerId, ?DEFAULT_TIMEOUT).
 
+%% @doc Executes (using a call) an auxiliary command that the state machine can handle.
+%%
+%% @param ServerId the Ra server(s) to send the query to
+%% @param Command an arbitrary term that the state machine can handle
+%% @end
 -spec aux_command(ra_server_id(), term()) -> term().
 aux_command(ServerRef, Cmd) ->
     gen_statem:call(ServerRef, {aux_command, Cmd}).
 
+%% @doc Executes (using a cast) an auxiliary command that the state machine can handle.
+%%
+%% @param ServerId the Ra server(s) to send the query to
+%% @param Command an arbitrary term that the state machine can handle
+%% @end
 -spec cast_aux_command(ra_server_id(), term()) -> ok.
 cast_aux_command(ServerRef, Cmd) ->
     gen_statem:cast(ServerRef, {aux_command, Cmd}).
@@ -923,9 +1046,8 @@ cast_aux_command(ServerRef, Cmd) ->
     ra_log_reader:state().
 register_external_log_reader({_, Node} = ServerId)
  when Node =:= node() ->
-    {ok, UId, Idx, SegRefs} = gen_statem:call(ServerId,
-                                              {register_external_log_reader, self()}),
-    ra_log_reader:init(UId, Idx, 1, SegRefs).
+    {ok, Reader} = gen_statem:call(ServerId, {register_external_log_reader, self()}),
+    Reader.
 
 %% internal
 

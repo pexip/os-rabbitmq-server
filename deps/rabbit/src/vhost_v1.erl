@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2018-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(vhost_v1).
@@ -57,11 +57,11 @@
               vhost_v1_pattern/0]).
 
 
--spec new(rabbit_vhost:name(), list()) -> vhost().
+-spec new(vhost:name(), list()) -> vhost().
 new(Name, Limits) ->
   #vhost{virtual_host = Name, limits = Limits}.
 
--spec new(rabbit_vhost:name(), list(), map()) -> vhost().
+-spec new(vhost:name(), list(), map()) -> vhost().
 new(Name, Limits, _Metadata) ->
   #vhost{virtual_host = Name, limits = Limits}.
 

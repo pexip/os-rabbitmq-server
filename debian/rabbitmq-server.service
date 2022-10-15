@@ -1,7 +1,7 @@
 [Unit]
 Description=RabbitMQ Messaging Server
-After=network.target epmd@.socket
-Wants=network.target epmd@.socket
+After=network.target epmd.socket
+Wants=network.target epmd.socket
 
 [Service]
 Type=notify
@@ -19,6 +19,7 @@ ExecStart=/usr/lib/rabbitmq/bin/rabbitmq-server
 ExecStop=/usr/sbin/rabbitmqctl stop
 StandardOutput=append:/var/log/rabbitmq/rabbitmq-server.log
 StandardError=append:/var/log/rabbitmq/rabbitmq-server.error.log
+OOMScoreAdjust=-500
 
 [Install]
 WantedBy=multi-user.target

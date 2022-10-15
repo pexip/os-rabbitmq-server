@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQ.CLI.InformationUnit do
   require MapSet
@@ -30,12 +30,16 @@ defmodule RabbitMQ.CLI.InformationUnit do
     :rabbit_resource_monitor_misc.parse_information_unit(val)
   end
 
-  def convert(bytes, "bytes") do
+  def convert(bytes, "bytes") when is_number(bytes) do
     bytes
   end
 
-  def convert(bytes, unit) do
+  def convert(bytes, unit) when is_number(bytes) do
     do_convert(bytes, String.downcase(unit))
+  end
+
+  def convert(:unknown, _) do
+    :unknown
   end
 
   def known_unit?(val) do

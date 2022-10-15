@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2010-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_stats).
@@ -53,14 +53,12 @@ format_range(#range{last = Last, first = First, incr = Incr}, _Now, Table,
 format_no_range(Table, Now, Interval, InstantRateFun) ->
     RangePoint = ((Now div Interval) * Interval) - Interval,
     case calculate_instant_rate(InstantRateFun, Table, RangePoint) of
-        {Total, Rate} ->
-            format_rate(Table, Total, Rate);
-        not_found ->
-            []
+        {Total, Rate} -> format_rate(Table, Total, Rate);
+        not_found     -> []
     end.
 
 -spec calculate_instant_rate(maybe_slide_fun(), atom(), integer()) ->
-    not_found | {integer(), number()}.
+    'not_found' | {integer(), number()} | {tuple(), tuple()}.
 calculate_instant_rate(Fun, Table, RangePoint) ->
     case Fun() of
         [] ->
@@ -278,11 +276,11 @@ format_rate(node_coarse_stats, {TF, TS, TM, TD, TP, TGC, TGCW, TCS},
     ];
 format_rate(node_persister_stats,
             {TIR, TIB, TIA, TIWC, TIWB, TIWAT, TIS, TISAT, TISC,
-             TISEAT, TIRC, TMRTC, TMDTC, TMSRC, TMSWC, TQIJWC, TQIWC, TQIRC,
-             TIO, TIOAT},
+             TISEAT, TIRC, TMRTC, TMDTC, TMSRC, TMSWC, _TUnused1, TQIWC, TQIRC,
+             _TUnused2, _TUnused3},
             {RIR, RIB, RIA, RIWC, RIWB, RIWAT, RIS, RISAT, RISC,
-             RISEAT, RIRC, RMRTC, RMDTC, RMSRC, RMSWC, RQIJWC, RQIWC, RQIRC,
-             RIO, RIOAT}) ->
+             RISEAT, RIRC, RMRTC, RMDTC, RMSRC, RMSWC, _RUnused1, RQIWC, RQIRC,
+             _RUnused2, _RUnused3}) ->
     %% Calculates average times for read/write/sync/seek from the
     %% accumulated time and count
     %% io_<op>_avg_time is the average operation time for the life of the node
@@ -319,16 +317,10 @@ format_rate(node_persister_stats,
      {msg_store_read_count_details, [{rate, RMSRC}]},
      {msg_store_write_count, TMSWC},
      {msg_store_write_count_details, [{rate, RMSWC}]},
-     {queue_index_journal_write_count, TQIJWC},
-     {queue_index_journal_write_count_details, [{rate, RQIJWC}]},
      {queue_index_write_count, TQIWC},
      {queue_index_write_count_details, [{rate, RQIWC}]},
      {queue_index_read_count, TQIRC},
-     {queue_index_read_count_details, [{rate, RQIRC}]},
-     {io_file_handle_open_attempt_count, TIO},
-     {io_file_handle_open_attempt_count_details, [{rate, RIO}]},
-     {io_file_handle_open_attempt_avg_time, avg_time(TIOAT, TIO)},
-     {io_file_handle_open_attempt_avg_time_details, [{rate, avg_time(RIOAT, RIO)}]}
+     {queue_index_read_count_details, [{rate, RQIRC}]}
     ];
 format_rate(node_node_coarse_stats, {TS, TR}, {RS, RR}) ->
     [
@@ -518,17 +510,17 @@ format_rate(node_coarse_stats, {TF, TS, TM, TD, TP, TGC, TGCW, TCS},
     ];
 format_rate(node_persister_stats,
             {TIR, TIB, TIA, TIWC, TIWB, TIWAT, TIS, TISAT, TISC,
-             TISEAT, TIRC, TMRTC, TMDTC, TMSRC, TMSWC, TQIJWC, TQIWC, TQIRC,
-             TIO, TIOAT},
+             TISEAT, TIRC, TMRTC, TMDTC, TMSRC, TMSWC, _TUnused1, TQIWC, TQIRC,
+             _TUnused2, _TUnused3},
             {RIR, RIB, _RIA, RIWC, RIWB, _RIWAT, RIS, _RISAT, RISC,
-             _RISEAT, RIRC, RMRTC, RMDTC, RMSRC, RMSWC, RQIJWC, RQIWC, RQIRC,
-             RIO, _RIOAT},
+             _RISEAT, RIRC, RMRTC, RMDTC, RMSRC, RMSWC, _RUnused1, RQIWC, RQIRC,
+             _RUnused2, _RUnused3},
         {SIR, SIB, SIA, SIWC, SIWB, SIWAT, SIS, SISAT, SISC,
-             SISEAT, SIRC, SMRTC, SMDTC, SMSRC, SMSWC, SQIJWC, SQIWC, SQIRC,
-             SIO, SIOAT},
+             SISEAT, SIRC, SMRTC, SMDTC, SMSRC, SMSWC, _SUnused1, SQIWC, SQIRC,
+             _SUnused2, _SUnused3},
         {STIR, STIB, _STIA, STIWC, STIWB, _STIWAT, STIS, _STISAT, STISC,
-             _STISEAT, STIRC, STMRTC, STMDTC, STMSRC, STMSWC, STQIJWC, STQIWC, STQIRC,
-             STIO, _STIOAT}, Length) ->
+             _STISEAT, STIRC, STMRTC, STMDTC, STMSRC, STMSWC, _STUnused1, STQIWC, STQIRC,
+             _STUnused2, _STUnused3}, Length) ->
     %% Calculates average times for read/write/sync/seek from the
     %% accumulated time and count
     %% io_<op>_avg_time is the average operation time for the life of the node
@@ -581,21 +573,12 @@ format_rate(node_persister_stats,
      {msg_store_write_count, TMSWC},
      {msg_store_write_count_details, [{rate, RMSWC},
                       {samples, SMSWC}] ++ average(SMSWC, STMSWC, Length)},
-     {queue_index_journal_write_count, TQIJWC},
-     {queue_index_journal_write_count_details, [{rate, RQIJWC},
-                        {samples, SQIJWC}] ++ average(SQIJWC, STQIJWC, Length)},
      {queue_index_write_count, TQIWC},
      {queue_index_write_count_details, [{rate, RQIWC},
                     {samples, SQIWC}] ++ average(SQIWC, STQIWC, Length)},
      {queue_index_read_count, TQIRC},
      {queue_index_read_count_details, [{rate, RQIRC},
-                       {samples, SQIRC}] ++ average(SQIRC, STQIRC, Length)},
-     {io_file_handle_open_attempt_count, TIO},
-     {io_file_handle_open_attempt_count_details, [{rate, RIO},
-                          {samples, SIO}] ++ average(SIO, STIO, Length)},
-     {io_file_handle_open_attempt_avg_time, avg_time(TIOAT, TIO)},
-     {io_file_handle_open_attempt_avg_time_details,
-      [{samples, unit_samples(SIOAT, SIO)}] ++ avg_time_details(avg_time(TIOAT, TIO))}
+                       {samples, SQIRC}] ++ average(SQIRC, STQIRC, Length)}
     ];
 format_rate(node_node_coarse_stats, {TS, TR}, {RS, RR}, {SS, SR}, {STS, STR}, Length) ->
     [

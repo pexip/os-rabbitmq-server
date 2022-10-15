@@ -37,9 +37,7 @@
 -include("syslog.hrl").
 
 -define(PERCENTAGE, 10).
--define(FACILITY, ?SYSLOG_FACILITY).
 -define(LIMIT, infinity).
--define(NO_PROGRESS, false).
 -define(VERBOSITY, true).
 
 %% ** Generic server ... terminating
@@ -67,15 +65,15 @@
 %% @private
 %%------------------------------------------------------------------------------
 init(_Arg) ->
-    Facility = syslog_lib:get_property(facility, ?FACILITY),
-    CrashFacility = syslog_lib:get_property(crash_facility, ?FACILITY),
+    Facility = syslog_lib:get_property(facility, ?SYSLOG_FACILITY),
+    CrashFacility = syslog_lib:get_property(crash_facility, ?SYSLOG_FACILITY),
     {ok, #state{
             %% Starting with OTP 20.1 one does need a valid group_leader to call
             %% sasl_format:format_report/3. Since init (<0.0.0>) is the
             %% group_leader of all group_leaders and thus kind of static, we'll
             %% use that to determine the supported system encoding.
             init_pid        = whereis(init),
-            no_progress     = syslog_lib:get_property(no_progress, ?NO_PROGRESS),
+            no_progress     = syslog_lib:get_property(no_progress, ?SYSLOG_NO_PROGRESS),
             verbose         = syslog_lib:get_property(verbose, ?VERBOSITY),
             msg_queue_limit = syslog_lib:get_property(msg_queue_limit, ?LIMIT),
             drop_percentage = syslog_lib:get_property(drop_percentage, ?PERCENTAGE),

@@ -9,6 +9,8 @@ ERLC_OPTS = +debug_info
 export ERLC_OPTS
 ERLC_OPTS += -Drecent_otp=1
 
+DEPS += quantile_estimator
+dep_quantile_estimator = hex 0.2.1 quantile_estimator
 
 
 rebar_dep: preprocess pre-deps deps pre-app app

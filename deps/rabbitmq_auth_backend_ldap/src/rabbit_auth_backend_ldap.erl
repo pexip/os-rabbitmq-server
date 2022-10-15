@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_auth_backend_ldap).
@@ -352,9 +352,15 @@ search_groups(LDAP, Desc, GroupsBase, Scope, DN) ->
             [];
         {ok, {referral, Referrals}} ->
             {error, {referrals_not_supported, Referrals}};
-        {ok, #eldap_search_result{entries = []}} ->
+        %% support #eldap_search_result before and after
+        %% https://github.com/erlang/otp/pull/5538
+        {ok, {eldap_search_result, [], _Referrals}} ->
             [];
-        {ok, #eldap_search_result{entries = Entries}} ->
+        {ok, {eldap_search_result, [], _Referrals, _Controls}}->
+            [];
+        {ok, {eldap_search_result, Entries, _Referrals}} ->
+            [ON || #eldap_entry{object_name = ON} <- Entries];
+        {ok, {eldap_search_result, Entries, _Referrals, _Controls}} ->
             [ON || #eldap_entry{object_name = ON} <- Entries]
     end.
 
@@ -438,7 +444,11 @@ object_exists(DN, Filter, LDAP) ->
                        {scope, eldap:baseObject()}]) of
         {ok, {referral, Referrals}} ->
             {error, {referrals_not_supported, Referrals}};
-        {ok, #eldap_search_result{entries = Entries}} ->
+        %% support #eldap_search_result before and after
+        %% https://github.com/erlang/otp/pull/5538
+        {ok, {eldap_search_result, Entries, _Referrals}} ->
+            length(Entries) > 0;
+        {ok, {eldap_search_result, Entries, _Referrals, _Controls}} ->
             length(Entries) > 0;
         {error, _} = E ->
             E
@@ -451,9 +461,15 @@ attribute(DN, AttributeName, LDAP) ->
                        {attributes, [AttributeName]}]) of
         {ok, {referral, Referrals}} ->
             {error, {referrals_not_supported, Referrals}};
-        {ok, #eldap_search_result{entries = E = [#eldap_entry{}|_]}} ->
+        %% support #eldap_search_result before and after
+        %% https://github.com/erlang/otp/pull/5538
+        {ok, {eldap_search_result, E = [#eldap_entry{}|_], _Referrals}} ->
             get_attributes(AttributeName, E);
-        {ok, #eldap_search_result{entries = _}} ->
+        {ok, {eldap_search_result, E = [#eldap_entry{}|_], _Referrals, _Controls}} ->
+            get_attributes(AttributeName, E);
+        {ok, {eldap_search_result, _Entries, _Referrals}} ->
+            {error, not_found};
+        {ok, {eldap_search_result, _Entries, _Referrals, _Controls}} ->
             {error, not_found};
         {error, _} = E ->
             E
@@ -483,7 +499,7 @@ with_ldap({ok, Creds}, Fun, Servers) ->
                 network ->
                     Pre = "    LDAP network traffic: ",
                     rabbit_log_ldap:info(
-                      "    LDAP connecting to servers: ~p~n", [Servers]),
+                      "    LDAP connecting to servers: ~p", [Servers]),
                     [{log, fun(1, S, A) -> rabbit_log_ldap:warning(Pre ++ S, A);
                               (2, S, A) ->
                                    rabbit_log_ldap:info(Pre ++ S, scrub_creds(A, []))
@@ -491,7 +507,7 @@ with_ldap({ok, Creds}, Fun, Servers) ->
                 network_unsafe ->
                     Pre = "    LDAP network traffic: ",
                     rabbit_log_ldap:info(
-                      "    LDAP connecting to servers: ~p~n", [Servers]),
+                      "    LDAP connecting to servers: ~p", [Servers]),
                     [{log, fun(1, S, A) -> rabbit_log_ldap:warning(Pre ++ S, A);
                               (2, S, A) -> rabbit_log_ldap:info(   Pre ++ S, A)
                            end} | Opts0];
@@ -706,18 +722,27 @@ eldap_open(Servers, Opts) ->
 ssl_conf() ->
     %% We must make sure not to add SSL options unless a) we have at least R16A
     %% b) we have SSL turned on (or it breaks StartTLS...)
-    case env(use_ssl) of
+    case env(use_ssl, false) of
         false -> [{ssl, false}];
         true  -> %% Only the unfixed version can be []
-                 case {env(ssl_options), at_least("5.10")} of %% R16A
-                     {_,  true}  -> [{ssl, true}, {sslopts, ssl_options()}];
-                     {[], _}     -> [{ssl, true}];
-                     {_,  false} -> exit({ssl_options_requires_min_r16a})
+                 case env(ssl_options) of
+                     []        -> [{ssl, true}];
+                     undefined -> [{ssl, true}];
+                     _         -> [{ssl, true}, {sslopts, ssl_options()}]
                  end
     end.
 
 ssl_options() ->
-    rabbit_networking:fix_ssl_options(env(ssl_options)).
+    Opts0 = rabbit_networking:fix_ssl_options(env(ssl_options)),
+    case env(ssl_hostname_verification, undefined) of
+        wildcard ->
+            rabbit_log_ldap:debug("Enabling wildcard-aware hostname verification for LDAP client connections"),
+            %% Needed for non-HTTPS connections that connect to servers that use wildcard certificates.
+            %% See https://erlang.org/doc/man/public_key.html#pkix_verify_hostname_match_fun-1.
+            [{customize_hostname_check, [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]} | Opts0];
+        _ ->
+            Opts0
+    end.
 
 at_least(Ver) ->
     rabbit_misc:version_compare(erlang:system_info(version), Ver) =/= lt.
@@ -728,7 +753,7 @@ get_expected_env_str(Key, Default) ->
     V = case env(Key) of
             Default ->
                 rabbit_log_ldap:warning("rabbitmq_auth_backend_ldap configuration key '~p' is set to "
-                                        "the default value of '~p', expected to get a non-default value~n",
+                                        "the default value of '~p', expected to get a non-default value",
                                         [Key, Default]),
                 Default;
             V0 ->
@@ -736,9 +761,14 @@ get_expected_env_str(Key, Default) ->
         end,
     rabbit_data_coercion:to_list(V).
 
-env(F) ->
-    {ok, V} = application:get_env(rabbitmq_auth_backend_ldap, F),
-    V.
+env(Key) ->
+    case application:get_env(rabbitmq_auth_backend_ldap, Key) of
+       {ok, V} -> V;
+        undefined -> undefined
+    end.
+
+env(Key, Default) ->
+    application:get_env(rabbitmq_auth_backend_ldap, Key, Default).
 
 login_fun(User, UserDN, Password, AuthProps) ->
     fun(L) -> case pget(vhost, AuthProps) of
@@ -815,11 +845,20 @@ dn_lookup(Username, LDAP) ->
                        {attributes, ["distinguishedName"]}]) of
         {ok, {referral, Referrals}} ->
             {error, {referrals_not_supported, Referrals}};
-        {ok, #eldap_search_result{entries = [#eldap_entry{object_name = DN}]}}->
+        %% support #eldap_search_result before and after
+        %% https://github.com/erlang/otp/pull/5538
+        {ok, {eldap_search_result, [#eldap_entry{object_name = DN}], _Referrals}}->
             ?L1("DN lookup: ~s -> ~s", [Username, DN]),
             DN;
-        {ok, #eldap_search_result{entries = Entries}} ->
-            rabbit_log_ldap:warning("Searching for DN for ~s, got back ~p~n",
+        {ok, {eldap_search_result, [#eldap_entry{object_name = DN}], _Referrals, _Controls}}->
+            ?L1("DN lookup: ~s -> ~s", [Username, DN]),
+            DN;
+        {ok, {eldap_search_result, Entries, _Referrals}} ->
+            rabbit_log_ldap:warning("Searching for DN for ~s, got back ~p",
+                               [Filled, Entries]),
+            Filled;
+        {ok, {eldap_search_result, Entries, _Referrals, _Controls}} ->
+            rabbit_log_ldap:warning("Searching for DN for ~s, got back ~p",
                                [Filled, Entries]),
             Filled;
         {error, _} = E ->
@@ -889,20 +928,15 @@ scrub_rdn([DN|Rem], Acc) ->
   scrub_rdn(Rem, [string:join(DN0, "=")|Acc]).
 
 is_dn(S) when is_list(S) ->
-    case catch string:tokens(to_list(S), "=") of
+    case catch string:tokens(rabbit_data_coercion:to_list(S), "=") of
         L when length(L) > 1 -> true;
         _                    -> false
     end;
 is_dn(_S) -> false.
 
-to_list(S) when is_list(S)   -> S;
-to_list(S) when is_binary(S) -> binary_to_list(S);
-to_list(S) when is_atom(S)   -> atom_to_list(S);
-to_list(S)                   -> {error, {badarg, S}}.
-
 log(Fmt,  Args) -> case env(log) of
                        false -> ok;
-                       _     -> rabbit_log_ldap:info(Fmt ++ "~n", Args)
+                       _     -> rabbit_log_ldap:info(Fmt ++ "", Args)
                    end.
 
 fill(Fmt, Args) ->

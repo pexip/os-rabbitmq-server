@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_util).
@@ -15,6 +15,7 @@
          is_authorized_user/4,
          is_authorized_monitor/2, is_authorized_policies/2,
          is_authorized_vhost_visible/2,
+         is_authorized_vhost_visible_for_monitoring/2,
          is_authorized_global_parameters/2]).
 
 -export([bad_request/3, bad_request_exception/4, internal_server_error/4,
@@ -116,6 +117,15 @@ is_authorized_vhost_visible(ReqData, Context) ->
                   fun(#user{tags = Tags} = User) ->
                           is_admin(Tags) orelse user_matches_vhost_visible(ReqData, User)
                   end).
+
+is_authorized_vhost_visible_for_monitoring(ReqData, Context) ->
+  is_authorized(ReqData, Context,
+    <<"User not authorised to access virtual host">>,
+    fun(#user{tags = Tags} = User) ->
+      is_admin(Tags)
+          orelse is_monitor(Tags)
+          orelse user_matches_vhost_visible(ReqData, User)
+    end).
 
 disable_stats(ReqData) ->
     MgmtOnly = case qs_val(<<"disable_stats">>, ReqData) of
@@ -248,29 +258,39 @@ is_authorized(ReqData, Context, Username, Password, ErrorMsg, Fun) ->
         VHost when is_binary(VHost) -> [{vhost, VHost}];
         _                           -> []
     end,
+    {IP, _} = cowboy_req:peer(ReqData),
+    RemoteAddress = list_to_binary(inet:ntoa(IP)),
     case rabbit_access_control:check_user_login(Username, AuthProps) of
         {ok, User = #user{tags = Tags}} ->
-            {IP, _} = cowboy_req:peer(ReqData),
             case rabbit_access_control:check_user_loopback(Username, IP) of
                 ok ->
                     case is_mgmt_user(Tags) of
                         true ->
                             case Fun(User) of
-                                true  -> {true, ReqData,
-                                          Context#context{user     = User,
-                                                          password = Password}};
-                                false -> ErrFun(ErrorMsg)
+                                true  ->
+                                    rabbit_core_metrics:auth_attempt_succeeded(RemoteAddress,
+                                                                               Username, http),
+                                    {true, ReqData,
+                                     Context#context{user     = User,
+                                                     password = Password}};
+                                false ->
+                                    rabbit_core_metrics:auth_attempt_failed(RemoteAddress,
+                                                                            Username, http),
+                                    ErrFun(ErrorMsg)
                             end;
                         false ->
+                            rabbit_core_metrics:auth_attempt_failed(RemoteAddress, Username, http),
                             ErrFun(<<"Not management user">>)
                     end;
                 not_allowed ->
+                    rabbit_core_metrics:auth_attempt_failed(RemoteAddress, Username, http),
                     ErrFun(<<"User can only log in via localhost">>)
             end;
         {refused, _Username, Msg, Args} ->
+            rabbit_core_metrics:auth_attempt_failed(RemoteAddress, Username, http),
             rabbit_log:warning("HTTP access denied: ~s",
                                [rabbit_misc:format(Msg, Args)]),
-            not_authorised(<<"Login failed">>, ReqData, Context)
+            not_authenticated(<<"Login failed">>, ReqData, Context)
     end.
 
 vhost_from_headers(ReqData) ->
@@ -610,7 +630,7 @@ range_filter(List, RP = #pagination{page = PageNum, page_size = PageSize},
 	     TotalElements) ->
     Offset = (PageNum - 1) * PageSize + 1,
     try
-        range_response(lists:sublist(List, Offset, PageSize), RP, List,
+        range_response(sublist(List, Offset, PageSize), RP, List,
 		       TotalElements)
     catch
         error:function_clause ->
@@ -716,7 +736,12 @@ a2b(B)                 -> B.
 bad_request(Reason, ReqData, Context) ->
     halt_response(400, bad_request, Reason, ReqData, Context).
 
+not_authenticated(Reason, ReqData, Context) ->
+    ReqData1 = cowboy_req:set_resp_header(<<"www-authenticate">>, ?AUTH_REALM, ReqData),
+    halt_response(401, not_authorized, Reason, ReqData1, Context).
+
 not_authorised(Reason, ReqData, Context) ->
+    %% TODO: consider changing to 403 in 4.0
     halt_response(401, not_authorised, Reason, ReqData, Context).
 
 not_found(Reason, ReqData, Context) ->
@@ -806,17 +831,29 @@ decode(Keys, Body) ->
         Else -> Else
     end.
 
+-type parsed_json() :: map() | atom() | binary().
+-spec decode(binary()) -> {ok, parsed_json()} | {error, term()}.
+
 decode(<<"">>) ->
+    {ok, #{}};
+%% some HTTP API clients include "null" for payload in certain scenarios
+decode(<<"null">>) ->
+    {ok, #{}};
+decode(<<"undefined">>) ->
     {ok, #{}};
 decode(Body) ->
     try
-        %% handle double encoded JSON, see rabbitmq/rabbitmq-management#839
         case rabbit_json:decode(Body) of
-            Val when is_map(Val)    -> {ok, Val};
-            Val when is_list(Val)   -> {ok, maps:from_list(Val)};
-            Bin when is_binary(Bin) -> {error, "invalid payload: the request body JSON-decoded to a string. "
-                                               "Is the input doubly-JSON-encoded?"};
-            _                       -> {error, not_json}
+            Val when is_map(Val) ->
+                {ok, Val};
+            Val when is_atom(Val) ->
+                {ok, #{}};
+            %% handle double encoded JSON, see rabbitmq/rabbitmq-management#839
+            Bin when is_binary(Bin) ->
+                {error, "invalid payload: the request body JSON-decoded to a string. "
+                        "Is the input doubly-JSON-encoded?"};
+            _                       ->
+                {error, not_json}
         end
     catch error:_ -> {error, not_json}
     end.
@@ -870,11 +907,6 @@ direct_request(MethodName, Transformers, Extra, ErrorMsg, ReqData,
               end
       end, ReqData, Context).
 
-props_as_map(Val) when is_map(Val)  -> Val;
-props_as_map(null)                  -> #{};
-props_as_map(undefined)             -> #{};
-props_as_map(Val) when is_list(Val) -> maps:from_list(Val).
-
 with_vhost_and_props(Fun, ReqData, Context) ->
     case vhost(ReqData) of
         not_found ->
@@ -885,7 +917,7 @@ with_vhost_and_props(Fun, ReqData, Context) ->
             case decode(Body) of
                 {ok, Props} ->
                     try
-                        Fun(VHost, props_as_map(Props), ReqData1)
+                        Fun(VHost, Props, ReqData1)
                     catch {error, Error} ->
                             bad_request(Error, ReqData1, Context)
                     end;
@@ -936,6 +968,7 @@ with_channel(VHost, ReqData,
                                  virtual_host = VHost},
     case amqp_connection:start(Params) of
         {ok, Conn} ->
+            _ = erlang:link(Conn),
             {ok, Ch} = amqp_connection:open_channel(Conn),
             try
                 Fun(Ch)
@@ -956,6 +989,7 @@ with_channel(VHost, ReqData,
                        ServerClose =:= server_initiated_hard_close ->
                     bad_request_exception(Code, Reason, ReqData, Context)
             after
+            erlang:unlink(Conn),
             catch amqp_channel:close(Ch),
             catch amqp_connection:close(Conn)
             end;
@@ -1196,3 +1230,8 @@ catch_no_such_user_or_vhost(Fun, Replacement) ->
     catch throw:{error, {E, _}} when E =:= no_such_user; E =:= no_such_vhost ->
         Replacement()
     end.
+
+%% this retains the old, buggy, pre 23.1 behavour of lists:sublist/3 where an
+%% error is thrown when the request is out of range
+sublist(List, S, L) when is_integer(L), L >= 0 ->
+    lists:sublist(lists:nthtail(S-1, List), L).

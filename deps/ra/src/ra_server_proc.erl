@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 %% @hidden
 -module(ra_server_proc).
@@ -13,6 +13,7 @@
 
 
 -include("ra.hrl").
+-include("ra_server.hrl").
 
 %% State functions
 -export([
@@ -45,19 +46,18 @@
          cast_command/3,
          query/4,
          state_query/3,
+         local_state_query/3,
          trigger_election/2,
          ping/2,
          log_fold/4,
          transfer_leadership/3
         ]).
 
--export([send_rpc/2]).
+-export([send_rpc/3]).
 
--define(SERVER, ?MODULE).
 -define(DEFAULT_BROADCAST_TIME, 100).
 -define(DEFAULT_ELECTION_MULT, 5).
 -define(TICK_INTERVAL_MS, 1000).
--define(DEFAULT_STOP_FOLLOWER_ELECTION, false).
 -define(DEFAULT_AWAIT_CONDITION_TIMEOUT, 30000).
 %% Utilisation average calculations are all in μs.
 -define(INSTALL_SNAP_RPC_TIMEOUT, 120 * 1000).
@@ -74,22 +74,20 @@
 -type ra_command() :: {ra_server:command_type(), term(),
                        ra_server:command_reply_mode()}.
 
--type ra_command_priority() :: normal | low.
-
 -type ra_leader_call_ret(Result) :: {ok, Result, Leader::ra_server_id()} |
                                     {error, term()} |
                                     {timeout, ra_server_id()}.
+
+-type ra_local_call_ret(Result) :: {ok, Result, LocalServer::ra_server_id()} |
+                                   {error, term()} |
+                                   {timeout, ra_server_id()}.
 
 -type ra_cmd_ret() :: ra_leader_call_ret(term()).
 
 -type gen_statem_start_ret() :: {ok, pid()} | ignore | {error, term()}.
 
--type safe_call_ret(T) :: timeout | {error, noproc | nodedown} | T.
-
--type states() :: leader | follower | candidate | await_condition.
-
 %% ra_event types
--type ra_event_reject_detail() :: {not_leader, Leader :: maybe(ra_server_id()),
+-type ra_event_reject_detail() :: {not_leader, Leader :: 'maybe'(ra_server_id()),
                                    ra_server:command_correlation()}.
 
 -type ra_event_body() ::
@@ -107,6 +105,7 @@
 -type server_loc() :: ra_server_id() | [ra_server_id()].
 
 -export_type([ra_leader_call_ret/1,
+              ra_local_call_ret/1,
               ra_cmd_ret/0,
               safe_call_ret/1,
               ra_event_reject_detail/0,
@@ -127,7 +126,9 @@
                flush_commands_size = ?FLUSH_COMMANDS_SIZE :: non_neg_integer(),
                snapshot_chunk_size = ?DEFAULT_SNAPSHOT_CHUNK_SIZE :: non_neg_integer(),
                receive_snapshot_timeout = ?DEFAULT_RECEIVE_SNAPSHOT_TIMEOUT :: non_neg_integer(),
-               aten_poll_interval = 1000 :: non_neg_integer()
+               install_snap_rpc_timeout :: non_neg_integer(),
+               aten_poll_interval = 1000 :: non_neg_integer(),
+               counter :: undefined | counters:counters_ref()
               }).
 
 -record(state, {conf :: #conf{},
@@ -140,7 +141,7 @@
                                                     ra_server:command()),
                 election_timeout_set = false :: boolean(),
                 %% the log index last time gc was forced
-                force_gc_index = 0 :: ra_index()
+                pending_notifys = #{} :: #{pid() => [term()]}
                }).
 
 %%%===================================================================
@@ -161,7 +162,7 @@ command(ServerLoc, Cmd, Timeout) ->
 cast_command(ServerId, Cmd) ->
     gen_statem:cast(ServerId, {command, low, Cmd}).
 
--spec cast_command(ra_server_id(), ra_command_priority(), ra_command()) -> ok.
+-spec cast_command(ra_server_id(), ra_server:command_priority(), ra_command()) -> ok.
 cast_command(ServerId, Priority, Cmd) ->
     gen_statem:cast(ServerId, {command, Priority, Cmd}).
 
@@ -191,6 +192,15 @@ log_fold(ServerId, Fun, InitialState, Timeout) ->
 state_query(ServerLoc, Spec, Timeout) ->
     leader_call(ServerLoc, {state_query, Spec}, Timeout).
 
+-spec local_state_query(server_loc(),
+                        all |
+                        members |
+                        initial_members |
+                        machine, timeout()) ->
+    ra_local_call_ret(term()).
+local_state_query(ServerLoc, Spec, Timeout) ->
+    local_call(ServerLoc, {state_query, Spec}, Timeout).
+
 -spec trigger_election(ra_server_id(), timeout()) -> ok.
 trigger_election(ServerId, Timeout) ->
     gen_statem:call(ServerId, trigger_election, Timeout).
@@ -206,6 +216,9 @@ ping(ServerId, Timeout) ->
 
 leader_call(ServerLoc, Msg, Timeout) ->
     statem_call(ServerLoc, {leader_call, Msg}, Timeout).
+
+local_call(ServerLoc, Msg, Timeout) ->
+    statem_call(ServerLoc, {local_call, Msg}, Timeout).
 
 statem_call(ServerIds, Msg, Timeout)
   when is_list(ServerIds) ->
@@ -244,16 +257,18 @@ multi_statem_call([ServerId | ServerIds], Msg, Errs, Timeout) ->
 
 init(Config0 = #{id := Id, cluster_name := ClusterName}) ->
     process_flag(trap_exit, true),
-    Config = maps:merge(config_defaults(), Config0),
+    Config = #{counter := Counter,
+               system_config := SysConf} = maps:merge(config_defaults(Id),
+                                                      Config0),
     #{cluster := Cluster} = ServerState = ra_server:init(Config),
     LogId = ra_server:log_id(ServerState),
     UId = ra_server:uid(ServerState),
-    Id = ra_server:id(ServerState),
-    Key = ra_lib:ra_server_id_to_local_name(Id),
     % ensure ra_directory has the new pid
-    yes = ra_directory:register_name(UId, self(),
-                                     maps:get(parent, Config, undefined), Key,
-                                     ClusterName),
+    #{names := Names} = SysConf,
+    Key = ra_lib:ra_server_id_to_local_name(Id),
+    ok = ra_directory:register_name(Names, UId, self(),
+                                    maps:get(parent, Config, undefined), Key,
+                                    ClusterName),
 
     % ensure each relevant erlang node is connected
     Peers = maps:keys(maps:remove(Id, Cluster)),
@@ -266,6 +281,7 @@ init(Config0 = #{id := Id, cluster_name := ClusterName}) ->
                                         end, Peers)
               end),
     TickTime = maps:get(tick_timeout, Config),
+    InstallSnapRpcTimeout = maps:get(install_snap_rpc_timeout, Config),
     AwaitCondTimeout = maps:get(await_condition_timeout, Config),
     RaEventFormatterMFA = maps:get(ra_event_formatter, Config, undefined),
     FlushCommandsSize = application:get_env(ra, low_priority_commands_flush_size,
@@ -283,8 +299,10 @@ init(Config0 = #{id := Id, cluster_name := ClusterName}) ->
                                 ra_event_formatter = RaEventFormatterMFA,
                                 flush_commands_size = FlushCommandsSize,
                                 snapshot_chunk_size = SnapshotChunkSize,
+                                install_snap_rpc_timeout = InstallSnapRpcTimeout,
                                 receive_snapshot_timeout = ReceiveSnapshotTimeout,
-                                aten_poll_interval = AtenPollInt},
+                                aten_poll_interval = AtenPollInt,
+                                counter = Counter},
                    server_state = ServerState},
     ok = net_kernel:monitor_nodes(true, [nodedown_reason]),
     {ok, recover, State, [{next_event, cast, go}]}.
@@ -300,7 +318,7 @@ recover(enter, OldState, State0) ->
     {keep_state, State, Actions};
 recover(_EventType, go, State = #state{server_state = ServerState0}) ->
     ServerState = ra_server:recover(ServerState0),
-    true = erlang:garbage_collect(),
+    incr_counter(State#state.conf, ?C_RA_SRV_GCS, 1),
     %% we have to issue the next_event here so that the recovered state is
     %% only passed through very briefly
     next_state(recovered, State#state{server_state = ServerState},
@@ -316,6 +334,7 @@ recovered(enter, OldState, State0) ->
     {State, Actions} = handle_enter(?FUNCTION_NAME, OldState, State0),
     {keep_state, State, Actions};
 recovered(internal, next, #state{server_state = ServerState} = State) ->
+    true = erlang:garbage_collect(),
     _ = ets:insert(ra_metrics, ra_server:metrics(ServerState)),
     next_state(follower, State, set_tick_timer(State, [])).
 
@@ -323,9 +342,13 @@ leader(enter, OldState, State0) ->
     {State, Actions} = handle_enter(?FUNCTION_NAME, OldState, State0),
     ok = record_leader_change(id(State0), State0),
     {keep_state, State#state{leader_last_seen = undefined,
+                             pending_notifys = #{},
+                             delayed_commands = queue:new(),
                              election_timeout_set = false}, Actions};
 leader(EventType, {leader_call, Msg}, State) ->
     %  no need to redirect
+    leader(EventType, Msg, State);
+leader(EventType, {local_call, Msg}, State) ->
     leader(EventType, Msg, State);
 leader(EventType, {leader_cast, Msg}, State) ->
     leader(EventType, Msg, State);
@@ -385,18 +408,21 @@ leader(EventType, flush_commands,
     end,
     {keep_state, State#state{delayed_commands = DelQ}, Actions};
 leader({call, From}, {local_query, QueryFun},
-       #state{server_state = ServerState} = State) ->
-    Reply = perform_local_query(QueryFun, id(State), ServerState),
+       #state{conf = Conf,
+              server_state = ServerState} = State) ->
+    Reply = perform_local_query(QueryFun, id(State), ServerState, Conf),
     {keep_state, State, [{reply, From, Reply}]};
 leader({call, From}, {state_query, Spec},
        #state{server_state = ServerState} = State) ->
     Reply = {ok, do_state_query(Spec, ServerState), id(State)},
     {keep_state, State, [{reply, From, Reply}]};
 leader({call, From}, {consistent_query, QueryFun},
-       #state{server_state = ServerState0} = State0) ->
+       #state{conf = Conf,
+              server_state = ServerState0} = State0) ->
     {leader, ServerState1, Effects} =
         ra_server:handle_leader({consistent_query, From, QueryFun},
                                 ServerState0),
+    incr_counter(Conf, ?C_RA_SRV_CONSISTENT_QUERIES, 1),
     {State1, Actions} =
         ?HANDLE_EFFECTS(Effects, {call, From},
                         State0#state{server_state = ServerState1}),
@@ -410,12 +436,17 @@ leader(info, {'DOWN', _MRef, process, Pid, Info}, State0) ->
 leader(info, {Status, Node, InfoList}, State0)
   when Status =:= nodedown orelse Status =:= nodeup ->
     handle_node_status_change(Node, Status, InfoList, ?FUNCTION_NAME, State0);
+leader(info, {update_peer, PeerId, Update}, State0) ->
+    State = update_peer(PeerId, Update, State0),
+    {keep_state, State, []};
 leader(_, tick_timeout, State0) ->
     {State1, RpcEffs} = make_rpcs(State0),
     ServerState = State1#state.server_state,
     Effects = ra_server:tick(ServerState),
-    {State, Actions} = ?HANDLE_EFFECTS(RpcEffs ++ Effects ++ [{aux, tick}],
-                                       cast, State1),
+    {State2, Actions} = ?HANDLE_EFFECTS(RpcEffs ++ Effects ++ [{aux, tick}],
+                                        cast, State1),
+    %% try sending any pending applied notifications again
+    State = send_applied_notifications(State2, #{}),
     {keep_state, handle_tick_metrics(State),
      set_tick_timer(State, Actions)};
 leader({timeout, Name}, machine_timeout,
@@ -462,19 +493,25 @@ leader(EventType, Msg, State0) ->
 
 candidate(enter, OldState, State0) ->
     {State1, Actions0} = handle_enter(?FUNCTION_NAME, OldState, State0),
-    {State, Actions} = maybe_set_election_timeout(long, State1, Actions0),
+    {State, Actions} = maybe_set_election_timeout(short, State1, Actions0),
     {keep_state, State, Actions};
 candidate({call, From}, {leader_call, Msg},
           #state{pending_commands = Pending} = State) ->
     {keep_state, State#state{pending_commands = [{From, Msg} | Pending]}};
+candidate(EventType, {local_call, Msg}, State) ->
+    candidate(EventType, Msg, State);
 candidate(cast, {command, _Priority,
                  {_CmdType, _Data, {notify, Corr, Pid}}},
           State) ->
-    ok = reject_command(Pid, Corr, State),
+    _ = reject_command(Pid, Corr, State),
     {keep_state, State, []};
 candidate({call, From}, {local_query, QueryFun},
+          #state{conf = Conf, server_state = ServerState} = State) ->
+    Reply = perform_local_query(QueryFun, not_known, ServerState, Conf),
+    {keep_state, State, [{reply, From, Reply}]};
+candidate({call, From}, {state_query, Spec},
           #state{server_state = ServerState} = State) ->
-    Reply = perform_local_query(QueryFun, not_known, ServerState),
+    Reply = {ok, do_state_query(Spec, ServerState), id(State)},
     {keep_state, State, [{reply, From, Reply}]};
 candidate({call, From}, ping, State) ->
     {keep_state, State, [{reply, From, {pong, candidate}}]};
@@ -488,8 +525,8 @@ candidate({call, From}, trigger_election, State) ->
 candidate(EventType, Msg, #state{pending_commands = Pending} = State0) ->
     case handle_candidate(Msg, State0) of
         {candidate, State1, Effects} ->
-            {State1, Actions0} = ?HANDLE_EFFECTS(Effects, EventType, State1),
-            {State, Actions} = maybe_set_election_timeout(long, State1, Actions0),
+            {State2, Actions0} = ?HANDLE_EFFECTS(Effects, EventType, State1),
+            {State, Actions} = maybe_set_election_timeout(medium, State2, Actions0),
             {keep_state, State, Actions};
         {follower, State1, Effects} ->
             {State, Actions} = ?HANDLE_EFFECTS(Effects, EventType, State1),
@@ -506,7 +543,6 @@ candidate(EventType, Msg, #state{pending_commands = Pending} = State0) ->
             next_state(leader, State, Actions ++ NextEvents)
     end.
 
-
 pre_vote(enter, OldState, #state{leader_monitor = MRef} = State0) ->
     _ = stop_monitor(MRef),
     {State1, Actions0} = handle_enter(?FUNCTION_NAME, OldState, State0),
@@ -515,14 +551,20 @@ pre_vote(enter, OldState, #state{leader_monitor = MRef} = State0) ->
 pre_vote({call, From}, {leader_call, Msg},
           State = #state{pending_commands = Pending}) ->
     {keep_state, State#state{pending_commands = [{From, Msg} | Pending]}};
+pre_vote(EventType, {local_call, Msg}, State) ->
+    pre_vote(EventType, Msg, State);
 pre_vote(cast, {command, _Priority,
                 {_CmdType, _Data, {notify, Corr, Pid}}},
          State) ->
-    ok = reject_command(Pid, Corr, State),
+    _ = reject_command(Pid, Corr, State),
     {keep_state, State, []};
 pre_vote({call, From}, {local_query, QueryFun},
-          #state{server_state = ServerState} = State) ->
-    Reply = perform_local_query(QueryFun, not_known, ServerState),
+          #state{conf = Conf, server_state = ServerState} = State) ->
+    Reply = perform_local_query(QueryFun, not_known, ServerState, Conf),
+    {keep_state, State, [{reply, From, Reply}]};
+pre_vote({call, From}, {state_query, Spec},
+         #state{server_state = ServerState} = State) ->
+    Reply = {ok, do_state_query(Spec, ServerState), id(State)},
     {keep_state, State, [{reply, From, Reply}]};
 pre_vote({call, From}, ping, State) ->
     {keep_state, State, [{reply, From, {pong, pre_vote}}]};
@@ -541,8 +583,8 @@ pre_vote({call, From}, trigger_election, State) ->
 pre_vote(EventType, Msg, State0) ->
     case handle_pre_vote(Msg, State0) of
         {pre_vote, State1, Effects} ->
-            {State1, Actions0} = ?HANDLE_EFFECTS(Effects, EventType, State1),
-            {State, Actions} = maybe_set_election_timeout(long, State1, Actions0),
+            {State2, Actions0} = ?HANDLE_EFFECTS(Effects, EventType, State1),
+            {State, Actions} = maybe_set_election_timeout(long, State2, Actions0),
             {keep_state, State, Actions};
         {follower, State1, Effects} ->
             {State, Actions} = ?HANDLE_EFFECTS(Effects, EventType, State1),
@@ -567,24 +609,26 @@ follower(enter, OldState, #state{server_state = ServerState} = State0) ->
                                {State1, Actions0};
                            false ->
                                ?DEBUG("~s: is not new, setting "
-                                      "election timeout.~n",
+                                      "election timeout.",
                                       [log_id(State0)]),
                                maybe_set_election_timeout(TimeoutLen, State1,
                                                           Actions0)
                        end,
-    {keep_state, State, Actions};
+    {keep_state, State#state{delayed_commands = queue:new()}, Actions};
 follower({call, From}, {leader_call, Msg}, State) ->
     maybe_redirect(From, Msg, State);
+follower(EventType, {local_call, Msg}, State) ->
+    follower(EventType, Msg, State);
 follower(_, {command, Priority, {_CmdType, Data, noreply}},
          State) ->
     % forward to leader
     case leader_id(State) of
         undefined ->
             ?WARN("~s: leader cast - leader not known. "
-                  "Command is dropped.~n", [log_id(State)]),
+                  "Command is dropped.", [log_id(State)]),
             {keep_state, State, []};
         LeaderId ->
-            ?INFO("~s: follower leader cast - redirecting to ~w ~n",
+            ?INFO("~s: follower leader cast - redirecting to ~w ",
                   [log_id(State), LeaderId]),
             ok = ra:pipeline_command(LeaderId, Data, no_correlation, Priority),
             {keep_state, State, []}
@@ -592,15 +636,19 @@ follower(_, {command, Priority, {_CmdType, Data, noreply}},
 follower(cast, {command, _Priority,
                 {_CmdType, _Data, {notify, Corr, Pid}}},
          State) ->
-    ok = reject_command(Pid, Corr, State),
+    _ = reject_command(Pid, Corr, State),
     {keep_state, State, []};
 follower({call, From}, {local_query, QueryFun},
-         #state{server_state = ServerState} = State) ->
+         #state{conf = Conf, server_state = ServerState} = State) ->
     Leader = case ra_server:leader_id(ServerState) of
                  undefined -> not_known;
                  L -> L
              end,
-    Reply = perform_local_query(QueryFun, Leader, ServerState),
+    Reply = perform_local_query(QueryFun, Leader, ServerState, Conf),
+    {keep_state, State, [{reply, From, Reply}]};
+follower({call, From}, {state_query, Spec},
+         #state{server_state = ServerState} = State) ->
+    Reply = {ok, do_state_query(Spec, ServerState), id(State)},
     {keep_state, State, [{reply, From, Reply}]};
 follower(EventType, {aux_command, Cmd}, State0) ->
     {_, ServerState, Effects} = ra_server:handle_aux(?FUNCTION_NAME, EventType, Cmd,
@@ -617,8 +665,22 @@ follower({call, From}, ping, State) ->
     {keep_state, State, [{reply, From, {pong, follower}}]};
 follower(info, {'DOWN', MRef, process, _Pid, Info},
          #state{leader_monitor = MRef} = State0) ->
-    ?INFO("~s: Leader monitor down with ~W, setting election timeout~n",
+    ?INFO("~s: Leader monitor down with ~W, setting election timeout",
           [log_id(State0), Info, 8]),
+    %% If the DOWN reason is something else than `noconnection', we know that
+    %% the leader process is really gone. We want to clear the leader ID we
+    %% know at this point, while a new election is running.
+    %%
+    %% This is to make sure that `follower_leader_change()' won't create a
+    %% useless monitor and more importantly, it won't redirect pending
+    %% commands to that old leader. This would cause the commands callers to
+    %% get a `noproc' error or a timeout.
+    State1 = case Info of
+                 noconnection ->
+                     State0;
+                 _ ->
+                     clear_leader_id(State0)
+             end,
     TimeoutLen = case Info of
                      noconnection ->
                          short;
@@ -627,7 +689,7 @@ follower(info, {'DOWN', MRef, process, _Pid, Info},
                          %% set the shortest timeout
                          really_short
                  end,
-    {State, Actions} = maybe_set_election_timeout(TimeoutLen, State0, []),
+    {State, Actions} = maybe_set_election_timeout(TimeoutLen, State1, []),
     {keep_state, State#state{leader_monitor = undefined}, Actions};
 follower(info, {'DOWN', _MRef, process, Pid, Info}, State0) ->
     handle_process_down(Pid, Info, ?FUNCTION_NAME, State0);
@@ -639,7 +701,7 @@ follower(info, {node_event, Node, down}, State0) ->
             {State, Actions} = maybe_set_election_timeout(long, State0, []),
             {keep_state, State, Actions};
         _ ->
-            {keep_state, State0}
+            {keep_state, State0, []}
     end;
 follower(info, {node_event, Node, up}, State) ->
     case leader_id(State) of
@@ -650,7 +712,7 @@ follower(info, {node_event, Node, up}, State) ->
              State#state{election_timeout_set = false},
              [{state_timeout, infinity, election_timeout}]};
         _ ->
-            {keep_state, State}
+            {keep_state, State, []}
     end;
 follower(info, {Status, Node, InfoList}, State0)
   when Status =:= nodedown orelse Status =:= nodeup ->
@@ -694,7 +756,8 @@ receive_snapshot(_, tick_timeout, State0) ->
 receive_snapshot(EventType, Msg, State0) ->
     case handle_receive_snapshot(Msg, State0) of
         {receive_snapshot, State1, Effects} ->
-            {#state{conf = Conf} = State, Actions} = ?HANDLE_EFFECTS(Effects, EventType, State1),
+            {#state{conf = Conf} = State, Actions} =
+                ?HANDLE_EFFECTS(Effects, EventType, State1),
             #conf{receive_snapshot_timeout = ReceiveSnapshotTimeout} = Conf,
             {keep_state, State,
              [{state_timeout, ReceiveSnapshotTimeout,
@@ -713,7 +776,7 @@ terminating_leader(_EvtType, {command, _, _}, State0) ->
     {keep_state, State0, []};
 terminating_leader(EvtType, Msg, State0) ->
     LogName = log_id(State0),
-    ?DEBUG("~s: terminating leader received ~W~n", [LogName, Msg, 10]),
+    ?DEBUG("~s: terminating leader received ~W", [LogName, Msg, 10]),
     {State, Actions} = case leader(EvtType, Msg, State0) of
                            {next_state, terminating_leader, S, A} ->
                                {S, A};
@@ -727,7 +790,7 @@ terminating_leader(EvtType, Msg, State0) ->
         true ->
             {stop, {shutdown, delete}, State};
         false ->
-            ?DEBUG("~s: is not fully replicated after ~W~n",
+            ?DEBUG("~s: is not fully replicated after ~W",
                    [LogName, Msg, 7]),
             {keep_state, send_rpcs(State), Actions}
     end.
@@ -738,7 +801,7 @@ terminating_follower(enter, OldState, State0) ->
 terminating_follower(EvtType, Msg, State0) ->
     % only process ra_log_events
     LogName = log_id(State0),
-    ?DEBUG("~s: terminating follower received ~W~n", [LogName, Msg, 10]),
+    ?DEBUG("~s: terminating follower received ~W", [LogName, Msg, 10]),
     {State, Actions} = case follower(EvtType, Msg, State0) of
                            {next_state, terminating_follower, S, A} ->
                                {S, A};
@@ -754,16 +817,22 @@ terminating_follower(EvtType, Msg, State0) ->
         true ->
             {stop, {shutdown, delete}, State};
         false ->
-            ?DEBUG("~s: is not fully persisted after ~W~n",
+            ?DEBUG("~s: is not fully persisted after ~W",
                    [log_id(State), Msg, 7]),
             {keep_state, State, Actions}
     end.
 
 await_condition({call, From}, {leader_call, Msg}, State) ->
     maybe_redirect(From, Msg, State);
+await_condition(EventType, {local_call, Msg}, State) ->
+    await_condition(EventType, Msg, State);
 await_condition({call, From}, {local_query, QueryFun},
+                #state{conf = Conf, server_state = ServerState} = State) ->
+    Reply = perform_local_query(QueryFun, follower, ServerState, Conf),
+    {keep_state, State, [{reply, From, Reply}]};
+await_condition({call, From}, {state_query, Spec},
                 #state{server_state = ServerState} = State) ->
-    Reply = perform_local_query(QueryFun, follower, ServerState),
+    Reply = {ok, do_state_query(Spec, ServerState), id(State)},
     {keep_state, State, [{reply, From, Reply}]};
 await_condition(EventType, {aux_command, Cmd}, State0) ->
     {_, ServerState, Effects} = ra_server:handle_aux(?FUNCTION_NAME, EventType,
@@ -814,39 +883,47 @@ await_condition(EventType, Msg, State0) ->
         {pre_vote, State1, Effects} ->
             {State, Actions} = ?HANDLE_EFFECTS(Effects, EventType, State1),
             next_state(pre_vote, State, Actions);
-        {await_condition, State1, []} ->
-            {keep_state, State1, []}
+        {leader, State1, Effects} ->
+            {State, Actions} = ?HANDLE_EFFECTS(Effects, EventType, State1),
+            next_state(leader, State, Actions);
+        {await_condition, State1, Effects} ->
+            {State, Actions} = ?HANDLE_EFFECTS(Effects, EventType, State1),
+            {keep_state, State, Actions}
     end.
 
 handle_event(_EventType, EventContent, StateName, State) ->
-    ?WARN("~s: handle_event unknown ~P~n", [log_id(State), EventContent, 10]),
+    ?WARN("~s: handle_event unknown ~P", [log_id(State), EventContent, 10]),
     {next_state, StateName, State}.
 
 terminate(Reason, StateName,
           #state{conf = #conf{name = Key, cluster_name = ClusterName},
-                 server_state = ServerState} = State) ->
-    ?INFO("~s: terminating with ~w in state ~w~n",
-          [log_id(State), Reason, StateName]),
+                 server_state = ServerState = #{cfg := #cfg{metrics_key = MetricsKey}}} = State) ->
+    ?DEBUG("~s: terminating with ~w in state ~w",
+           [log_id(State), Reason, StateName]),
+    #{names := #{server_sup := SrvSup,
+                 log_meta := MetaName} = Names} =
+        ra_server:system_config(ServerState),
     UId = uid(State),
+    Id = id(State),
     _ = ra_server:terminate(ServerState, Reason),
-    Parent = ra_directory:where_is_parent(UId),
+    Parent = ra_directory:where_is_parent(Names, UId),
     case Reason of
         {shutdown, delete} ->
             catch ra_leaderboard:clear(ClusterName),
-            catch ra_directory:unregister_name(UId),
-            catch ra_log_meta:delete_sync(UId),
+            catch ra_directory:unregister_name(Names, UId),
+            catch ra_log_meta:delete_sync(MetaName, UId),
             catch ets:delete(ra_state, UId),
+            catch ra_counters:delete(Id),
             Self = self(),
             %% we have to terminate the child spec from the supervisor as it
-            %% wont do this automatically, even for transient children
+            %% won't do this automatically, even for transient children
             %% for simple_one_for_one terminate also removes
             _ = spawn(fun () ->
                               Ref = erlang:monitor(process, Self),
                               receive
                                   {'DOWN', Ref, _, _, _} ->
                                       ok = supervisor:terminate_child(
-                                             ra_server_sup_sup,
-                                             Parent)
+                                             SrvSup, Parent)
                               after 5000 ->
                                         ok
                               end
@@ -856,7 +933,7 @@ terminate(Reason, StateName,
 
         _ -> ok
     end,
-    _ = ets:delete(ra_metrics, Key),
+    _ = ets:delete(ra_metrics, MetricsKey),
     _ = ets:delete(ra_state, Key),
     ok.
 
@@ -868,14 +945,18 @@ format_status(Opt, [_PDict, StateName,
                            leader_last_seen = LastSeen,
                            pending_commands = Pending,
                            delayed_commands = Delayed,
+                           pending_notifys = PendingNots,
                            election_timeout_set = ElectionSet
                           }]) ->
+    NumPendingNots = maps:fold(fun (_, Corrs, Acc) -> Acc + length(Corrs) end,
+                               0, PendingNots),
     [{id, ra_server:id(NS)},
      {opt, Opt},
      {raft_state, StateName},
      {leader_last_seen, LastSeen},
      {num_pending_commands, length(Pending)},
      {num_delayed_commands, queue:len(Delayed)},
+     {num_pending_applied_notifications, NumPendingNots},
      {election_timeout_set, ElectionSet},
      {ra_server_state, ra_server:overview(NS)}
     ].
@@ -894,11 +975,11 @@ handle_enter(RaftState, OldRaftState,
         true ->
             %% ensure transitions from and to leader are logged at a higher
             %% level
-            ?NOTICE("~s: ~s -> ~s in term: ~b machine version: ~b~n",
+            ?NOTICE("~s: ~s -> ~s in term: ~b machine version: ~b",
                     [log_id(State), OldRaftState, RaftState,
                      current_term(State), machine_version(State)]);
         false ->
-            ?DEBUG("~s: ~s -> ~s in term: ~b machine version: ~b~n",
+            ?DEBUG("~s: ~s -> ~s in term: ~b machine version: ~b",
                    [log_id(State), OldRaftState, RaftState,
                     current_term(State), machine_version(State)])
     end,
@@ -925,7 +1006,7 @@ handle_leader(Msg, #state{server_state = ServerState0} = State0) ->
                                  ra_server:persist_last_applied(ServerState)},
             {NextState, State, Effects};
         OtherErr ->
-            ?ERR("handle_leader err ~p~n", [OtherErr]),
+            ?ERR("handle_leader err ~p", [OtherErr]),
             exit(OtherErr)
     end.
 
@@ -958,7 +1039,8 @@ handle_receive_snapshot(Msg, State) ->
 handle_await_condition(Msg, State) ->
     handle_raft_state(?FUNCTION_NAME, Msg, State).
 
-perform_local_query(QueryFun, Leader, ServerState) ->
+perform_local_query(QueryFun, Leader, ServerState, Conf) ->
+    incr_counter(Conf, ?C_RA_SRV_LOCAL_QUERIES, 1),
     try ra_server:machine_query(QueryFun, ServerState) of
         Result ->
             {ok, Result, Leader}
@@ -983,18 +1065,39 @@ handle_effects(RaftState, Effects0, EvtType, State0, Actions0) ->
                          end, {State0, Actions0}, Effects0),
     {State, lists:reverse(Actions)}.
 
-handle_effect(_, {send_rpc, To, Rpc}, _, State0, Actions) ->
+handle_effect(_, {send_rpc, To, Rpc}, _,
+              #state{conf = Conf} = State0, Actions) ->
     % fully qualified use only so that we can mock it for testing
     % TODO: review / refactor to remove the mod call here
-    ?MODULE:send_rpc(To, Rpc),
-    {State0, Actions};
+    case ?MODULE:send_rpc(To, Rpc, State0) of
+        ok ->
+            {State0, Actions};
+        nosuspend ->
+            %% update peer status to suspended and spawn a process
+            %% to send the rpc without nosuspend so that it will block until
+            %% the data can get through
+            Self = self(),
+            _Pid = spawn(fun () ->
+                                 %% AFAIK none of the below code will throw and
+                                 %% exception so we should always end up setting
+                                 %% the peer status back to normal
+                                 ok = gen_statem:cast(To, Rpc),
+                                 incr_counter(Conf, ?C_RA_SRV_MSGS_SENT, 1),
+                                 Self ! {update_peer, To, #{status => normal}}
+                         end),
+            {update_peer(To, #{status => suspended}, State0), Actions};
+        noconnect ->
+            %% for noconnects just allow it to pipeline and catch up later
+            {State0, Actions}
+    end;
 handle_effect(_, {next_event, Evt}, EvtType, State, Actions) ->
     {State, [{next_event, EvtType, Evt} |  Actions]};
 handle_effect(_, {next_event, _, _} = Next, _, State, Actions) ->
     {State, [Next | Actions]};
 handle_effect(_, {send_msg, To, Msg}, _, State, Actions) ->
     %% default is to send without any wrapping
-    ok = send(To, Msg),
+    %% TODO: handle send failure? how?
+    _ = send(To, Msg, State#state.conf),
     {State, Actions};
 handle_effect(RaftState, {send_msg, To, _Msg, Options} = Eff,
               _, State, Actions) ->
@@ -1022,24 +1125,20 @@ handle_effect(RaftState, {log, Idxs, Fun, {local, Node}}, EvtType,
         false ->
             {State, Actions}
     end;
+handle_effect(leader, {append, Cmd}, _EvtType, State, Actions) ->
+    Evt = {command, normal, {'$usr', Cmd, noreply}},
+    {State, [{next_event, cast, Evt} | Actions]};
+handle_effect(leader, {append, Cmd, ReplyMode}, _EvtType, State, Actions) ->
+    Evt = {command, normal, {'$usr', Cmd, ReplyMode}},
+    {State, [{next_event, cast, Evt} | Actions]};
 handle_effect(RaftState, {log, Idxs, Fun}, EvtType,
               State = #state{server_state = SS0}, Actions)
   when is_list(Idxs) ->
     %% Useful to implement a batch send of data obtained from the log.
     %% 1) Retrieve all data from the list of indexes
-    {Data, SS} = lists:foldr(
-                   fun(Idx, {Data0, Acc0}) ->
-                           case ra_server:read_at(Idx, Acc0) of
-                               {ok, D, Acc} ->
-                                   {[D | Data0], Acc};
-                               {error, _} ->
-                                   %% this is unrecoverable
-                                   exit({failed_to_read_index_for_log_effect,
-                                         Idx})
-                           end
-                   end, {[], SS0}, Idxs),
-    %% 2) Apply the fun to the list of data as a whole and deal with any effects
-    case Fun(Data) of
+    {ok, Cmds, SS} = ra_server:log_read(Idxs, SS0),
+    %% 2) Apply the fun to the list of commands as a whole and deal with any effects
+    case Fun(Cmds) of
         [] ->
             {State#state{server_state = SS}, Actions};
         Effects ->
@@ -1051,15 +1150,16 @@ handle_effect(RaftState, {aux, Cmd}, EventType, State0, Actions0) ->
     {_, ServerState, Effects} = ra_server:handle_aux(RaftState, cast, Cmd,
                                                      State0#state.server_state),
     {State, Actions} =
-        handle_effects(RaftState, Effects,  EventType,
+        handle_effects(RaftState, Effects, EventType,
                        State0#state{server_state = ServerState}),
     {State, Actions0 ++ Actions};
-handle_effect(_, {notify, Who, Correlations}, _, State, Actions) ->
+handle_effect(_, {notify, Nots}, _, #state{} = State0, Actions) ->
     %% should only be done by leader
-    ok = send_ra_event(Who, Correlations, id(State), applied, State),
+    State = send_applied_notifications(State0, Nots),
     {State, Actions};
 handle_effect(_, {cast, To, Msg}, _, State, Actions) ->
-    ok = gen_cast(To, Msg),
+    %% TODO: handle send failure
+    _ = gen_cast(To, Msg, State),
     {State, Actions};
 handle_effect(_, {reply, From, Reply}, _, State, Actions) ->
     % reply directly
@@ -1074,12 +1174,17 @@ handle_effect(_, {reply, Reply}, EvtType, _, _) ->
 handle_effect(leader, {send_snapshot, To, {SnapState, Id, Term}}, _,
               #state{server_state = SS0,
                      monitors = Monitors,
-                     conf = #conf{snapshot_chunk_size = ChunkSize}} = State0, Actions) ->
+                     conf = #conf{snapshot_chunk_size = ChunkSize,
+                     install_snap_rpc_timeout = InstallSnapTimeout} = Conf} = State0,
+              Actions) ->
+    ok = incr_counter(Conf, ?C_RA_SRV_SNAPSHOTS_SENT, 1),
     %% leader effect only
-    Me = self(),
+    Self = self(),
+    Machine = ra_server:machine(SS0),
     Pid = spawn(fun () ->
-                        try send_snapshots(Me, Id, Term, To,
-                                           ChunkSize, SnapState) of
+                        try send_snapshots(Self, Id, Term, To,
+                                           ChunkSize, InstallSnapTimeout,
+                                           SnapState, Machine) of
                             _ -> ok
                         catch
                             C:timeout:S ->
@@ -1096,7 +1201,7 @@ handle_effect(leader, {send_snapshot, To, {SnapState, Id, Term}}, _,
                 end),
     %% update the peer state so that no pipelined entries are sent during
     %% the snapshot sending phase
-    SS = ra_server:update_peer_status(To, {sending_snapshot, Pid}, SS0),
+    SS = ra_server:update_peer(To, #{status => {sending_snapshot, Pid}}, SS0),
     {State0#state{server_state = SS,
                   monitors = ra_monitors:add(Pid, snapshot_sender, Monitors)},
                   Actions};
@@ -1107,24 +1212,29 @@ handle_effect(_, {delete_snapshot, Dir,  SnapshotRef}, _, State0, Actions) ->
               end),
     {State0, Actions};
 handle_effect(_, {send_vote_requests, VoteRequests}, _, % EvtType
-              State, Actions) ->
+              #state{conf = #conf{aten_poll_interval = Poll}} = State, Actions) ->
     % transient election processes
-    T = {dirty_timeout, 500},
+    %% set the timeout to the aten poll interval which is the approximate maximum
+    %% election timeout value
+    Timeout = {dirty_timeout, Poll},
     Me = self(),
     [begin
-         _ = spawn(fun () -> Reply = gen_statem:call(N, M, T),
-                             ok = gen_statem:cast(Me, Reply)
+         _ = spawn(fun () ->
+                           Reply = gen_statem:call(ServerId, Request, Timeout),
+                           ok = gen_statem:cast(Me, Reply)
                    end)
-     end || {N, M} <- VoteRequests],
+     end || {ServerId, Request} <- VoteRequests],
     {State, Actions};
 handle_effect(RaftState, {release_cursor, Index, MacState}, EvtType,
               #state{server_state = ServerState0} = State0, Actions0) ->
+    incr_counter(State0#state.conf, ?C_RA_SRV_RELEASE_CURSORS, 1),
     {ServerState, Effects} = ra_server:update_release_cursor(Index, MacState,
                                                              ServerState0),
     State1 = State0#state{server_state = ServerState},
     handle_effects(RaftState, Effects, EvtType, State1, Actions0);
 handle_effect(_, garbage_collection, _EvtType, State, Actions) ->
     true = erlang:garbage_collect(),
+    incr_counter(State#state.conf, ?C_RA_SRV_GCS, 1),
     {State, Actions};
 handle_effect(_, {monitor, _ProcOrNode, PidOrNode}, _,
               #state{monitors = Monitors} = State, Actions0) ->
@@ -1146,13 +1256,14 @@ handle_effect(_, {timer, Name, T}, _, State, Actions) ->
     {State, [{{timeout, Name}, T, machine_timeout} | Actions]};
 handle_effect(_, {mod_call, Mod, Fun, Args}, _,
               State, Actions) ->
+    %% TODO: catch and log failures or rely on calling function never crashing
     _ = erlang:apply(Mod, Fun, Args),
     {State, Actions};
 handle_effect(_RaftState, start_election_timeout, _, State, Actions) ->
     maybe_set_election_timeout(long, State, Actions);
 handle_effect(follower, {record_leader_msg, _LeaderId}, _, State0, Actions) ->
     %% record last time leader seen
-    State = State0#state{leader_last_seen = os:system_time(millisecond),
+    State = State0#state{leader_last_seen = erlang:system_time(millisecond),
                          election_timeout_set = false},
     %% always cancel state timeout when a valid leader message has been
     %% received just in case a timeout is currently active
@@ -1165,23 +1276,25 @@ handle_effect(_, {record_leader_msg, _LeaderId}, _, State0, Actions) ->
 send_rpcs(State0) ->
     {State, Rpcs} = make_rpcs(State0),
     % module call so that we can mock
-    % TODO: review
-    [ok = ?MODULE:send_rpc(To, Rpc) || {send_rpc, To, Rpc} <-  Rpcs],
+    % We can ignore send failures here as they have not incremented
+    % the peer's next index
+    [_ = ?MODULE:send_rpc(To, Rpc, State) || {send_rpc, To, Rpc} <- Rpcs],
     State.
 
 make_rpcs(State) ->
     {ServerState, Rpcs} = ra_server:make_rpcs(State#state.server_state),
     {State#state{server_state = ServerState}, Rpcs}.
 
-send_rpc(To, Msg) ->
-    % fake gen cast - need to avoid any blocking delays here
-    gen_cast(To, Msg).
+send_rpc(To, Msg, State) ->
+    incr_counter(State#state.conf, ?C_RA_SRV_RPCS_SENT, 1),
+    % fake gen cast
+    gen_cast(To, Msg, State).
 
-gen_cast(To, Msg) ->
-    send(To, {'$gen_cast', Msg}).
+gen_cast(To, Msg, State) ->
+    send(To, {'$gen_cast', Msg}, State#state.conf).
 
 send_ra_event(To, Msg, FromId, EvtType, State) ->
-    send(To, wrap_ra_event(State, FromId, EvtType, Msg)).
+    send(To, wrap_ra_event(State, FromId, EvtType, Msg), State#state.conf).
 
 wrap_ra_event(#state{conf = #conf{ra_event_formatter = undefined}},
               FromId, EvtType, Evt) ->
@@ -1211,6 +1324,10 @@ uid(#state{server_state = ServerState}) ->
 leader_id(#state{server_state = ServerState}) ->
     ra_server:leader_id(ServerState).
 
+clear_leader_id(#state{server_state = ServerState} = State) ->
+    ServerState1 = ra_server:clear_leader_id(ServerState),
+    State#state{server_state = ServerState1}.
+
 current_term(#state{server_state = ServerState}) ->
     ra_server:current_term(ServerState).
 
@@ -1231,6 +1348,11 @@ election_timeout_action(really_short, #conf{broadcast_time = Timeout}) ->
     {state_timeout, T, election_timeout};
 election_timeout_action(short, #conf{broadcast_time = Timeout}) ->
     T = rand:uniform(Timeout * ?DEFAULT_ELECTION_MULT) + Timeout,
+    {state_timeout, T, election_timeout};
+election_timeout_action(medium, #conf{broadcast_time = Timeout,
+                                      aten_poll_interval = Poll}) ->
+    %% this is roughly in between broadcast time and aten poll interval
+    T = rand:uniform(Poll) + Timeout,
     {state_timeout, T, election_timeout};
 election_timeout_action(long, #conf{broadcast_time = Timeout,
                                     aten_poll_interval = Poll}) ->
@@ -1263,7 +1385,7 @@ follower_leader_change(Old, #state{pending_commands = Pending,
             ok = aten:unregister(OldLeaderNode),
             ok = record_leader_change(NewLeader, New),
             % leader has either changed or just been set
-            ?INFO("~s: detected a new leader ~w in term ~b~n",
+            ?INFO("~s: detected a new leader ~w in term ~b",
                   [log_id(New), NewLeader, current_term(New)]),
             [ok = gen_statem:reply(From, {redirect, NewLeader})
              || {From, _Data} <- Pending],
@@ -1314,11 +1436,14 @@ do_state_query(initial_members, #{log := Log}) ->
             error
     end.
 
-config_defaults() ->
+config_defaults(ServerId) ->
     #{broadcast_time => ?DEFAULT_BROADCAST_TIME,
       tick_timeout => ?TICK_INTERVAL_MS,
+      install_snap_rpc_timeout => ?INSTALL_SNAP_RPC_TIMEOUT,
       await_condition_timeout => ?DEFAULT_AWAIT_CONDITION_TIMEOUT,
-      initial_members => []
+      initial_members => [],
+      counter => ra_counters:new(ServerId, ?RA_COUNTER_FIELDS),
+      system_config => ra_system:default_config()
      }.
 
 maybe_redirect(From, Msg, #state{pending_commands = Pending,
@@ -1327,7 +1452,7 @@ maybe_redirect(From, Msg, #state{pending_commands = Pending,
     case LeaderMon of
         undefined ->
             ?INFO("~s: leader call - leader not known. "
-                  "Command will be forwarded once leader is known.~n",
+                  "Command will be forwarded once leader is known.",
                   [log_id(State)]),
             {keep_state,
              State#state{pending_commands = [{From, Msg} | Pending]}};
@@ -1335,28 +1460,38 @@ maybe_redirect(From, Msg, #state{pending_commands = Pending,
             {keep_state, State, {reply, From, {redirect, Leader}}}
     end.
 
-reject_command(Pid, Corr, State) ->
+reject_command(Pid, Corr, #state{leader_monitor = _Mon} = State) ->
+    Id = id(State),
     LeaderId = leader_id(State),
     case LeaderId of
         undefined ->
             %% don't log these as they may never be resolved
             ok;
+        Id ->
+            %% this can happen during an explicit leader change
+            %% best not rejecting them to oneself!
+            ok;
         _ ->
             ?INFO("~s: follower received leader command from ~w. "
-                  "Rejecting to ~w ~n", [log_id(State), Pid, LeaderId])
-    end,
-    send_ra_event(Pid, {not_leader, LeaderId, Corr},
-                  id(State), rejected, State).
+                  "Rejecting to ~w ", [log_id(State), Pid, LeaderId]),
+            send_ra_event(Pid, {not_leader, LeaderId, Corr},
+                          id(State), rejected, State)
+    end.
 
 maybe_persist_last_applied(#state{server_state = NS} = State) ->
      State#state{server_state = ra_server:persist_last_applied(NS)}.
 
-send(To, Msg) ->
+send(To, Msg, Conf) ->
     % we do not want to block the ra server whilst attempting to set up
-    % a TCP connection to a potentially down node.
+    % a TCP connection to a potentially down node or when the distribution
+    % buffer is full, better to drop and try again later
     case erlang:send(To, Msg, [noconnect, nosuspend]) of
-        ok -> ok;
-        _ -> ok
+        ok ->
+            incr_counter(Conf, ?C_RA_SRV_MSGS_SENT, 1),
+            ok;
+        Res ->
+            incr_counter(Conf, ?C_RA_SRV_DROPPED_SENDS, 1),
+            Res
     end.
 
 
@@ -1370,19 +1505,28 @@ fold_log(From, Fun, Term, State) ->
              [{reply, From, {error, Reason}}]}
     end.
 
-send_snapshots(Me, Id, Term, To, ChunkSize, SnapState) ->
-    {ok, Meta, ReadState} = ra_snapshot:begin_read(SnapState),
+send_snapshots(Me, Id, Term, {_, ToNode} = To, ChunkSize,
+               InstallTimeout, SnapState, Machine) ->
+    {ok, #{machine_version := SnapMacVer} = Meta, ReadState} =
+        ra_snapshot:begin_read(SnapState),
 
-    RPC = #install_snapshot_rpc{term = Term,
-                                leader_id = Id,
-                                meta = Meta},
+    %% only send the snapshot if the target server can accept it
+    TheirMacVer = rpc:call(ToNode, ra_machine, version, [Machine]),
 
-    Result = read_chunks_and_send_rpc(RPC, To, ReadState, 1,
-                                      ChunkSize, SnapState),
-    ok = gen_statem:cast(Me, {To, Result}).
+    case SnapMacVer > TheirMacVer of
+        true ->
+            ok;
+        false ->
+            RPC = #install_snapshot_rpc{term = Term,
+                                        leader_id = Id,
+                                        meta = Meta},
+            Result = read_chunks_and_send_rpc(RPC, To, ReadState, 1,
+                                              ChunkSize, InstallTimeout, SnapState),
+            ok = gen_statem:cast(Me, {To, Result})
+    end.
 
 read_chunks_and_send_rpc(RPC0,
-                         To, ReadState0, Num, ChunkSize, SnapState) ->
+                         To, ReadState0, Num, ChunkSize, InstallTimeout, SnapState) ->
     {ok, Data, ContState} = ra_snapshot:read_chunk(ReadState0, ChunkSize,
                                                    SnapState),
     ChunkFlag = case ContState of
@@ -1394,20 +1538,20 @@ read_chunks_and_send_rpc(RPC0,
     RPC1 = RPC0#install_snapshot_rpc{chunk_state = {Num, ChunkFlag},
                                      data = Data},
     Res1 = gen_statem:call(To, RPC1,
-                           {dirty_timeout, ?INSTALL_SNAP_RPC_TIMEOUT}),
+                           {dirty_timeout, InstallTimeout}),
     case ContState of
         {next, ReadState1} ->
             read_chunks_and_send_rpc(RPC0, To, ReadState1, Num + 1,
-                                     ChunkSize, SnapState);
+                                     ChunkSize, InstallTimeout, SnapState);
         last ->
             Res1
     end.
 
 make_command(Type, {call, From}, Data, Mode) ->
-    Ts = os:system_time(millisecond),
+    Ts = erlang:system_time(millisecond),
     {Type, #{from => From, ts => Ts}, Data, Mode};
 make_command(Type, _, Data, Mode) ->
-    Ts = os:system_time(millisecond),
+    Ts = erlang:system_time(millisecond),
     {Type, #{ts => Ts}, Data, Mode}.
 
 maybe_set_election_timeout(_TimeoutLen,
@@ -1425,15 +1569,18 @@ next_state(Next, State, Actions) ->
     {next_state, Next, State#state{election_timeout_set = false}, Actions}.
 
 send_msg({send_msg, To, Msg, Options}, State) ->
+    incr_counter(State#state.conf, ?C_RA_SRV_SEND_MSG_EFFS_SENT, 1),
     case parse_send_msg_options(Options) of
         {true, true} ->
-            gen_cast(To, wrap_ra_event(State, leader_id(State), machine, Msg));
+            gen_cast(To, wrap_ra_event(State, leader_id(State), machine, Msg),
+                    State);
         {true, false} ->
-            send(To, wrap_ra_event(State, leader_id(State), machine, Msg));
+            send(To, wrap_ra_event(State, leader_id(State), machine, Msg),
+                 State#state.conf);
         {false, true} ->
-            gen_cast(To, Msg);
+            gen_cast(To, Msg, State);
         {false, false} ->
-            send(To, Msg)
+            send(To, Msg, State#state.conf)
     end.
 
 has_local_opt(local) ->
@@ -1490,24 +1637,62 @@ handle_node_status_change(Node, Status, InfoList, RaftState,
 
 handle_process_down(Pid, Info, RaftState,
                     #state{monitors = Monitors0,
+                           pending_notifys = Nots,
                            server_state = ServerState0} = State0) ->
     {Comps, Monitors} = ra_monitors:handle_down(Pid, Monitors0),
     {ServerState, Effects} =
-    lists:foldl(
-      fun(Comp, {S0, E0}) ->
-              {_, S, E} = ra_server:handle_down(RaftState, Comp,
-                                                Pid, Info, S0),
-              {S, E0 ++ E}
-      end, {ServerState0, []}, Comps),
+        lists:foldl(
+          fun(Comp, {S0, E0}) ->
+                  {_, S, E} = ra_server:handle_down(RaftState, Comp,
+                                                    Pid, Info, S0),
+                  {S, E0 ++ E}
+          end, {ServerState0, []}, Comps),
 
     {State, Actions} =
         handle_effects(RaftState, Effects, cast,
                        State0#state{server_state = ServerState,
+                                    pending_notifys = maps:remove(Pid, Nots),
                                     monitors = Monitors}),
     {keep_state, State, Actions}.
 
 record_leader_change(Leader, #state{conf = #conf{cluster_name = ClusterName},
-                            server_state = ServerState}) ->
+                                    server_state = ServerState}) ->
     Members = do_state_query(members, ServerState),
     ok = ra_leaderboard:record(ClusterName, Leader, Members),
     ok.
+
+incr_counter(#conf{counter = Cnt}, Ix, N) when Cnt =/= undefined ->
+    counters:add(Cnt, Ix, N);
+incr_counter(#conf{counter = undefined}, _Ix, _N) ->
+    ok.
+
+update_peer(PeerId, Update,
+            #state{server_state = ServerState} = State0)
+  when is_map(Update) ->
+    State0#state{server_state =
+                 ra_server:update_peer(PeerId, Update, ServerState)}.
+
+send_applied_notifications(#state{pending_notifys = PendingNots} = State,
+                           Nots0) when map_size(PendingNots) > 0 ->
+    Nots = ra_lib:maps_merge_with(fun(_K, V1, V2) ->
+                                          V1 ++ V2
+                                  end, PendingNots, Nots0),
+    send_applied_notifications(State#state{pending_notifys = #{}}, Nots);
+send_applied_notifications(#state{} = State, Nots) ->
+    Id = id(State),
+    %% any notifications that could not be sent
+    %% will be kept and retried
+    RemNots = maps:filter(
+                fun(Who, Correlations0) ->
+                        %% correlations are build up in reverse order so we need
+                        %% to reverse before sending
+                        Correlations = lists:reverse(Correlations0),
+                        ok =/= send_ra_event(Who, Correlations, Id,
+                                             applied, State)
+                end, Nots),
+    case map_size(RemNots) of
+        0  ->
+            State;
+        _ ->
+            State#state{pending_notifys = RemNots}
+    end.

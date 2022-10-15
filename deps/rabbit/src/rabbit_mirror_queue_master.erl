@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2010-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2010-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mirror_queue_master).
@@ -15,6 +15,7 @@
          dropwhile/2, fetchwhile/4, set_ram_duration_target/2, ram_duration/1,
          needs_timeout/1, timeout/1, handle_pre_hibernate/1, resume/1,
          msg_rates/1, info/2, invoke/3, is_duplicate/2, set_queue_mode/2,
+         set_queue_version/2,
          zip_msgs_and_acks/4, handle_info/2]).
 
 -export([start/2, stop/1, delete_crashed/1]).
@@ -150,19 +151,20 @@ sync_mirrors(HandleInfo, EmitStats,
                               backing_queue_state = BQS }) ->
     Log = fun (Fmt, Params) ->
                   rabbit_mirror_queue_misc:log_info(
-                    QName, "Synchronising: " ++ Fmt ++ "~n", Params)
+                    QName, "Synchronising: " ++ Fmt ++ "", Params)
           end,
     Log("~p messages to synchronise", [BQ:len(BQS)]),
     {ok, Q} = rabbit_amqqueue:lookup(QName),
     SPids = amqqueue:get_slave_pids(Q),
     SyncBatchSize = rabbit_mirror_queue_misc:sync_batch_size(Q),
-    Log("batch size: ~p", [SyncBatchSize]),
+    SyncThroughput = rabbit_mirror_queue_misc:default_max_sync_throughput(),
+    log_mirror_sync_config(Log, SyncBatchSize, SyncThroughput),
     Ref = make_ref(),
     Syncer = rabbit_mirror_queue_sync:master_prepare(Ref, QName, Log, SPids),
     gm:broadcast(GM, {sync_start, Ref, Syncer, SPids}),
     S = fun(BQSN) -> State#state{backing_queue_state = BQSN} end,
     case rabbit_mirror_queue_sync:master_go(
-           Syncer, Ref, Log, HandleInfo, EmitStats, SyncBatchSize, BQ, BQS) of
+           Syncer, Ref, Log, HandleInfo, EmitStats, SyncBatchSize, SyncThroughput, BQ, BQS) of
         {cancelled, BQS1}      -> Log(" synchronisation cancelled ", []),
                                   {ok, S(BQS1)};
         {shutdown,  R, BQS1}   -> {stop, R, S(BQS1)};
@@ -172,6 +174,11 @@ sync_mirrors(HandleInfo, EmitStats,
         {ok, BQS1}             -> Log("complete", []),
                                   {ok, S(BQS1)}
     end.
+
+log_mirror_sync_config(Log, SyncBatchSize, 0) ->
+  Log("batch size: ~p", [SyncBatchSize]);
+log_mirror_sync_config(Log, SyncBatchSize, SyncThroughput) ->
+  Log("max batch size: ~p; max sync throughput: ~p bytes/s", [SyncBatchSize, SyncThroughput]).
 
 terminate({shutdown, dropped} = Reason,
           State = #state { backing_queue       = BQ,
@@ -198,7 +205,7 @@ terminate(Reason,
         true  -> %% Remove the whole queue to avoid data loss
                  rabbit_mirror_queue_misc:log_warning(
                    QName, "Stopping all nodes on master shutdown since no "
-                   "synchronised mirror (replica) is available~n", []),
+                   "synchronised mirror (replica) is available", []),
                  stop_all_slaves(Reason, State);
         false -> %% Just let some other mirror take over.
                  ok
@@ -487,6 +494,18 @@ set_queue_mode(Mode, State = #state { gm                  = GM,
     ok = gm:broadcast(GM, {set_queue_mode, Mode}),
     BQS1 = BQ:set_queue_mode(Mode, BQS),
     State #state { backing_queue_state = BQS1 }.
+
+set_queue_version(Version, State = #state { gm                  = GM,
+                                            backing_queue       = BQ,
+                                            backing_queue_state = BQS }) ->
+    case rabbit_feature_flags:is_enabled(classic_mirrored_queue_version) of
+        true ->
+            ok = gm:broadcast(GM, {set_queue_version, Version}),
+            BQS1 = BQ:set_queue_version(Version, BQS),
+            State #state { backing_queue_state = BQS1 };
+        false ->
+            State
+    end.
 
 zip_msgs_and_acks(Msgs, AckTags, Accumulator,
                   #state { backing_queue = BQ,

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(file_handle_cache_stats).
@@ -16,12 +16,12 @@
 -define(COUNT,
         [io_reopen, mnesia_ram_tx, mnesia_disk_tx,
          msg_store_read, msg_store_write,
-         queue_index_journal_write, queue_index_write, queue_index_read]).
--define(COUNT_TIME, [io_sync, io_seek, io_file_handle_open_attempt]).
+         queue_index_write, queue_index_read]).
+-define(COUNT_TIME, [io_sync, io_seek]).
 -define(COUNT_TIME_BYTES, [io_read, io_write]).
 
 init() ->
-    _ = ets:new(?TABLE, [public, named_table]),
+    _ = ets:new(?TABLE, [public, named_table, {write_concurrency,true}]),
     [ets:insert(?TABLE, {{Op, Counter}, 0}) || Op      <- ?COUNT_TIME_BYTES,
                                                Counter <- [count, bytes, time]],
     [ets:insert(?TABLE, {{Op, Counter}, 0}) || Op      <- ?COUNT_TIME,

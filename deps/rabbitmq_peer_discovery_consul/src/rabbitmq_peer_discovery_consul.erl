@@ -2,9 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% The Initial Developer of the Original Code is AWeber Communications.
-%% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2020 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbitmq_peer_discovery_consul).
@@ -14,7 +12,6 @@
          post_registration/0, lock/1, unlock/1]).
 -export([send_health_check_pass/0]).
 -export([session_ttl_update_callback/1]).
-
 
 -define(DELEGATE, rabbit_peer_discovery_consul).
 

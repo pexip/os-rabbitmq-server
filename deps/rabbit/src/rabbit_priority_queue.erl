@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Copyright (c) 2015-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%%  Copyright (c) 2015-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_priority_queue).
@@ -34,6 +34,7 @@
          set_ram_duration_target/2, ram_duration/1, needs_timeout/1, timeout/1,
          handle_pre_hibernate/1, resume/1, msg_rates/1,
          info/2, invoke/3, is_duplicate/2, set_queue_mode/2,
+         set_queue_version/2,
          zip_msgs_and_acks/4, handle_info/2]).
 
 -record(state, {bq, bqss, max_priority}).
@@ -67,7 +68,7 @@ enable() ->
     {ok, RealBQ} = application:get_env(rabbit, backing_queue_module),
     case RealBQ of
         ?MODULE -> ok;
-        _       -> rabbit_log:info("Priority queues enabled, real BQ is ~s~n",
+        _       -> rabbit_log:info("Priority queues enabled, real BQ is ~s",
                                    [RealBQ]),
                    application:set_env(
                      rabbitmq_priority_queue, backing_queue_module, RealBQ),
@@ -418,12 +419,17 @@ info(backing_queue_status, #state{bq = BQ, bqss = BQSs}) ->
           end, nothing, BQSs);
 info(head_message_timestamp, #state{bq = BQ, bqss = BQSs}) ->
     find_head_message_timestamp(BQ, BQSs, '');
+info(online, _) ->
+    '';
 info(Item, #state{bq = BQ, bqss = BQSs}) ->
     fold0(fun (_P, BQSN, Acc) ->
-                  Acc + BQ:info(Item, BQSN)
+                 add(Acc, BQ:info(Item, BQSN))
           end, 0, BQSs);
 info(Item, #passthrough{bq = BQ, bqs = BQS}) ->
     BQ:info(Item, BQS).
+
+add(Acc, Value) when is_number(Acc), is_number(Value) -> Acc + Value;
+add(_, Value) -> Value.
 
 invoke(Mod, {P, Fun}, State = #state{bq = BQ}) ->
     pick1(fun (_P, BQSN) -> BQ:invoke(Mod, Fun, BQSN) end, P, State);
@@ -441,6 +447,11 @@ set_queue_mode(Mode, State = #state{bq = BQ}) ->
     foreach1(fun (_P, BQSN) -> BQ:set_queue_mode(Mode, BQSN) end, State);
 set_queue_mode(Mode, State = #passthrough{bq = BQ, bqs = BQS}) ->
     ?passthrough1(set_queue_mode(Mode, BQS)).
+
+set_queue_version(Version, State = #state{bq = BQ}) ->
+    foreach1(fun (_P, BQSN) -> BQ:set_queue_version(Version, BQSN) end, State);
+set_queue_version(Version, State = #passthrough{bq = BQ, bqs = BQS}) ->
+    ?passthrough1(set_queue_version(Version, BQS)).
 
 zip_msgs_and_acks(Msgs, AckTags, Accumulator, #state{bqss = [{MaxP, _} |_]}) ->
     MsgsByPriority = partition_publish_delivered_batch(Msgs, MaxP),

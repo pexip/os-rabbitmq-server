@@ -2,11 +2,8 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
-
-%% stomp_frame implements the STOMP framing protocol "version 1.0", as
-%% per https://stomp.codehaus.org/Protocol
 
 -module(rabbit_stomp_frame).
 
@@ -18,6 +15,7 @@
          boolean_header/2, boolean_header/3,
          integer_header/2, integer_header/3,
          binary_header/2, binary_header/3]).
+-export([stream_offset_header/2]).
 -export([serialize/1, serialize/2]).
 
 initial_state() -> none.
@@ -212,6 +210,22 @@ binary_header(F, K) ->
     end.
 
 binary_header(F, K, D) -> default_value(binary_header(F, K), D).
+
+stream_offset_header(F, D) ->
+    case binary_header(F, ?HEADER_X_STREAM_OFFSET, D) of
+        <<"first">> ->
+            {longstr, <<"first">>};
+        <<"last">> ->
+            {longstr, <<"last">>};
+        <<"next">> ->
+            {longstr, <<"next">>};
+        <<"offset=", OffsetValue/binary>> ->
+            {long, binary_to_integer(OffsetValue)};
+        <<"timestamp=", TimestampValue/binary>> ->
+            {timestamp, binary_to_integer(TimestampValue)};
+        _ ->
+            D
+    end.
 
 serialize(Frame) ->
     serialize(Frame, true).

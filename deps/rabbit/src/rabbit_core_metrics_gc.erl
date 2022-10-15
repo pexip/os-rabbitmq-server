@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(rabbit_core_metrics_gc).
 
@@ -36,6 +36,7 @@ handle_info(start_gc, State) ->
     gc_exchanges(),
     gc_nodes(),
     gc_gen_server2(),
+    gc_auth_attempts(),
     {noreply, start_timer(State)}.
 
 terminate(_Reason, #state{timer = TRef}) ->
@@ -101,7 +102,7 @@ gc_exchanges() ->
     gc_process_and_entity(channel_exchange_metrics, GbSet).
 
 gc_nodes() ->
-    Nodes = rabbit_mnesia:cluster_nodes(all),
+    Nodes = rabbit_nodes:all(),
     GbSet = gb_sets:from_list(Nodes),
     gc_entity(node_node_metrics, GbSet).
 
@@ -193,3 +194,6 @@ gc_process_and_entities(Table, QueueGbSet, ExchangeGbSet) ->
                       gc_entity(Q, Table, Key, QueueGbSet),
                       gc_entity(X, Table, Key, ExchangeGbSet)
               end, none, Table).
+
+gc_auth_attempts() ->
+    ets:delete_all_objects(auth_attempt_detailed_metrics).

@@ -20,10 +20,6 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 
 	mkdir -p /etc/rabbitmq
 	chown rabbitmq:rabbitmq /etc/rabbitmq
-	if [ -f /etc/rabbitmq/rabbitmq.conf ] && [ ! -f /etc/rabbitmq/rabbitmq-env.conf ]; then
-		mv /etc/rabbitmq/rabbitmq.conf /etc/rabbitmq/rabbitmq-env.conf
-		chown rabbitmq:rabbitmq /etc/rabbitmq/rabbitmq-env.conf
-	fi
 	if [ -r /usr/share/rabbitmq/rabbitmq-env.conf ] && ! [ -e /etc/rabbitmq/rabbitmq-env.conf ] ; then
 		install -m 0644 -o rabbitmq -g rabbitmq /usr/share/rabbitmq/rabbitmq-env.conf /etc/rabbitmq/rabbitmq-env.conf
 	fi
@@ -35,9 +31,29 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	chmod 750 /var/lib/rabbitmq/mnesia
 	chmod -R o-rwx,g-w /var/lib/rabbitmq/mnesia
 
+	# We generate the erlang cookie by ourselves, just to make sure we don't
+	# leave the job to erlang that doesn't do it with enough entropy.
+	if ! [ -e /var/lib/rabbitmq/.erlang.cookie ] ; then
+		OLD_UMASK=$(umask)
+		umask 077; openssl rand -base64 -out /var/lib/rabbitmq/.erlang.cookie 42
+		umask ${OLD_UMASK}
+	else
+		# This matches an Erlang generated cookie file: 20 upper case chars
+		if grep -q -E '^[A-Z]{20}$' /var/lib/rabbitmq/.erlang.cookie ; then
+			OLD_UMASK=$(umask)
+			umask 077; openssl rand -base64 -out /var/lib/rabbitmq/.erlang.cookie 42
+			umask ${OLD_UMASK}
+			if [ ""$(ps --no-headers -o comm 1) = "systemd" ] ; then
+				if systemctl is-active --quiet rabbitmq-server.service ; then
+					systemctl restart rabbitmq-server.service
+				fi
+			fi
+		fi
+	fi
+	chmod 0400 /var/lib/rabbitmq/.erlang.cookie
+
 	chown -R rabbitmq:rabbitmq /var/lib/rabbitmq
 	chown -R rabbitmq:rabbitmq /var/log/rabbitmq
-
 fi
 
 #DEBHELPER#

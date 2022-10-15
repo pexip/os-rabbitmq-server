@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_stomp_client_sup).
@@ -11,9 +11,9 @@
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 
--export([start_link/4, init/1]).
+-export([start_link/3, init/1]).
 
-start_link(Ref, _Sock, _Transport, Configuration) ->
+start_link(Ref, _Transport, Configuration) ->
     {ok, SupPid} = supervisor2:start_link(?MODULE, []),
     {ok, HelperPid} =
         supervisor2:start_child(SupPid,
