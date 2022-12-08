@@ -22,6 +22,10 @@ dispatcher_add(function(sammy) {
             if (redirect !== undefined) {
                 delete this.params['redirect'];
             }
+            var stream_offset = this.params['src-consumer-args-stream-offset'];
+            var src_consumer_args = {'x-stream-offset': stream_offset};
+            delete this.params['src-consumer-args-stream-offset'];
+            this.params['src-consumer-args'] = src_consumer_args;
             put_parameter(this, [], num_keys, bool_keys, arrayable_keys);
             if (redirect !== undefined) {
                 go_to(redirect);
@@ -83,7 +87,7 @@ dispatcher_add(function(sammy) {
             if (sync_delete(this, '/shovels/vhost/:vhost/:name')) {
                 go_to('#/dynamic-shovels');
             } else {
-                show_popup('warn', 'Shovel not deleted because it is not running on this node.');
+                show_popup('warn', 'Shovel could not be deleted');
                 return false;
             }
         });
@@ -91,7 +95,7 @@ dispatcher_add(function(sammy) {
             if (sync_delete(this, '/shovels/vhost/:vhost/:name/restart')) {
                 update();
             } else {
-                show_popup('warn', 'Shovel not restarted because it is not running on this node.');
+                show_popup('warn', 'Shovel could not be restarted');
                 return false;
             }
         });

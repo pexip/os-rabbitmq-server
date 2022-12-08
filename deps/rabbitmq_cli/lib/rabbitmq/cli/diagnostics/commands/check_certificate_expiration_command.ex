@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Diagnostics.Commands.CheckCertificateExpirationCommand do
   alias RabbitMQ.CLI.Core.DocGuide
@@ -58,7 +58,8 @@ defmodule RabbitMQ.CLI.Diagnostics.Commands.CheckCertificateExpirationCommand do
   end
 
   def output([], %{unit: unit, within: within}) do
-    {:ok, "No certificates are expiring within #{within} #{unit}."}
+    unit_label = unit_label(within, unit)
+    {:ok, "No certificates are expiring within #{within} #{unit_label}."}
   end
 
   def output(listeners, %{formatter: "json"}) do
@@ -67,6 +68,13 @@ defmodule RabbitMQ.CLI.Diagnostics.Commands.CheckCertificateExpirationCommand do
 
   def output(listeners, %{}) do
     {:error, :check_failed, Enum.map(listeners, &expired_listener_map/1)}
+  end
+
+  def unit_label(1, unit) do
+    unit |> String.slice(0..-2)
+  end
+  def unit_label(_within, unit) do
+    unit
   end
 
   def usage, do: "check_certificate_expiration [--within <period>] [--unit <unit>]"

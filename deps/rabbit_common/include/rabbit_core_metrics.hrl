@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2020-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% These tables contain the raw metrics as stored by RabbitMQ core
@@ -24,7 +24,9 @@
                       {node_node_metrics, set},
                       {connection_churn_metrics, set}]).
 
--define(CORE_EXTRA_TABLES, [{gen_server2_metrics, set}]).
+-define(CORE_EXTRA_TABLES, [{gen_server2_metrics, set},
+                            {auth_attempt_metrics, set},
+                            {auth_attempt_detailed_metrics, set}]).
 
 -define(CONNECTION_CHURN_METRICS, {node(), 0, 0, 0, 0, 0, 0, 0}).
 

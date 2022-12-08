@@ -9,6 +9,7 @@
 -export([start_link/0]).
 %% Supervisor callbacks
 -export([init/1]).
+-export([register_metrics/1]).
 
 -behaviour(supervisor).
 
@@ -49,6 +50,7 @@ create_tables() ->
             {?PROMETHEUS_COUNTER_TABLE, write_concurrency},
             {?PROMETHEUS_GAUGE_TABLE, write_concurrency},
             {?PROMETHEUS_SUMMARY_TABLE, write_concurrency},
+            {?PROMETHEUS_QUANTILE_SUMMARY_TABLE, write_concurrency},
             {?PROMETHEUS_HISTOGRAM_TABLE, write_concurrency},
             {?PROMETHEUS_BOOLEAN_TABLE, write_concurrency}
            ],
@@ -61,6 +63,12 @@ register_collectors() ->
 
 register_metrics() ->
   [declare_metric(Decl) || Decl <- default_metrics()].
+
+register_metrics(Metrics) ->
+  DefaultMetrics0 = default_metrics(),
+  DefaultMetrics1 = lists:usort(DefaultMetrics0 ++ Metrics),
+  application:set_env(prometheus, default_metrics, DefaultMetrics1),
+  [declare_metric(Decl) || Decl <- Metrics].
 
 setup_instrumenters() ->
   [prometheus_instrumenter:setup(Instrumenter) ||

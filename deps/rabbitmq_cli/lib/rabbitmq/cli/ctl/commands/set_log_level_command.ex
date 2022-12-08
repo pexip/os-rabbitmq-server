@@ -2,11 +2,13 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.SetLogLevelCommand do
   alias RabbitMQ.CLI.Core.DocGuide
   @behaviour RabbitMQ.CLI.CommandBehaviour
+  # This command allows all log levels that the OTP logger defines
+  # but intentionally only documents those which are actually used in RabbitMQ
   @known_levels [
     "debug",
     "info",
@@ -34,7 +36,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.SetLogLevelCommand do
         :ok
 
       false ->
-        {:error, "level #{level} is not supported. Try one of debug, info, warning, error, none"}
+        {:error, "level #{level} is not supported. Try one of debug, info, warning, error, critical, none"}
     end
   end
 
@@ -42,7 +44,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.SetLogLevelCommand do
 
   def run([log_level], %{node: node_name}) do
     arg = String.to_atom(log_level)
-    :rabbit_misc.rpc_call(node_name, :rabbit_lager, :set_log_level, [arg])
+    :rabbit_misc.rpc_call(node_name, :rabbit, :set_log_level, [arg])
   end
 
   def usage, do: "set_log_level <log_level>"
@@ -67,7 +69,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.SetLogLevelCommand do
 
   def output({:error, {:invalid_log_level, level}}, _opts) do
     {:error, RabbitMQ.CLI.Core.ExitCodes.exit_software(),
-     "level #{level} is not supported. Try one of debug, info, warning, error, none"}
+     "level #{level} is not supported. Try one of debug, info, warning, error, critical, none"}
   end
 
   use RabbitMQ.CLI.DefaultOutput

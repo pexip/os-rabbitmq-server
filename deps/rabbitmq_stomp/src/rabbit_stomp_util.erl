@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_stomp_util).
@@ -105,6 +105,8 @@ adhoc_convert_headers(Headers, Existing) ->
     lists:foldr(fun ({K, longstr, V}, Acc) ->
                         [{binary_to_list(K), binary_to_list(V)} | Acc];
                     ({K, signedint, V}, Acc) ->
+                        [{binary_to_list(K), integer_to_list(V)} | Acc];
+                    ({K, long, V}, Acc) ->
                         [{binary_to_list(K), integer_to_list(V)} | Acc];
                     (_, Acc) ->
                         Acc

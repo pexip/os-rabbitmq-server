@@ -2,13 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_format).
 
 -export([format/2, ip/1, ipb/1, amqp_table/1, tuple/1]).
--export([parameter/1, now_to_str/1, now_to_str_ms/1, strip_pids/1]).
+-export([parameter/1, now_to_str/0, now_to_str/1, strip_pids/1]).
 -export([protocol/1, resource/1, queue/1, queue_state/1, queue_info/1]).
 -export([exchange/1, user/1, internal_user/1, binding/1, url/2]).
 -export([pack_binding_props/2, tokenise/1]).
@@ -30,6 +30,7 @@
 -export([args_hash/1]).
 
 -import(rabbit_misc, [pget/2, pget/3, pset/3]).
+-import(rabbit_data_coercion, [to_binary/1]).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
@@ -176,7 +177,9 @@ protocol(unknown) ->
 protocol(Version = {_Major, _Minor, _Revision}) ->
     protocol({'AMQP', Version});
 protocol({Family, Version}) ->
-    print("~s ~s", [Family, protocol_version(Version)]).
+    print("~s ~s", [Family, protocol_version(Version)]);
+protocol(Protocol) when is_binary(Protocol) ->
+    print("~s", [Protocol]).
 
 protocol_version(Arbitrary)
   when is_list(Arbitrary)                  -> Arbitrary;
@@ -184,20 +187,18 @@ protocol_version({Major, Minor})           -> io_lib:format("~B-~B", [Major, Min
 protocol_version({Major, Minor, 0})        -> protocol_version({Major, Minor});
 protocol_version({Major, Minor, Revision}) -> io_lib:format("~B-~B-~B",
                                                     [Major, Minor, Revision]).
+% Note:
+% Uses the same format as the OTP logger:
+% https://github.com/erlang/otp/blob/82e74303e715c7c64c1998bf034b12a48ce814b1/lib/kernel/src/logger_formatter.erl#L306-L311
+now_to_str() ->
+    Str = calendar:system_time_to_rfc3339(os:system_time(millisecond), [{unit, millisecond}]),
+    rabbit_data_coercion:to_binary(Str).
 
-now_to_str(unknown) ->
-    unknown;
-now_to_str(MilliSeconds) ->
-    BaseDate = calendar:datetime_to_gregorian_seconds({{1970, 1, 1},
-                                                       {0, 0, 0}}),
-    Seconds = BaseDate + (MilliSeconds div 1000),
-    {{Y, M, D}, {H, Min, S}} = calendar:gregorian_seconds_to_datetime(Seconds),
-    print("~w-~2.2.0w-~2.2.0w ~w:~2.2.0w:~2.2.0w", [Y, M, D, H, Min, S]).
-
-now_to_str_ms(unknown) ->
-    unknown;
-now_to_str_ms(MilliSeconds) ->
-    print("~s:~3.3.0w", [now_to_str(MilliSeconds), MilliSeconds rem 1000]).
+now_to_str(MilliSeconds) when is_integer(MilliSeconds) ->
+    Str = calendar:system_time_to_rfc3339(MilliSeconds, [{unit, millisecond}]),
+    rabbit_data_coercion:to_binary(Str);
+now_to_str(NonInteger) ->
+    rabbit_data_coercion:to_binary(NonInteger).
 
 resource(unknown) -> unknown;
 resource(Res)     -> resource(name, Res).
@@ -211,18 +212,20 @@ policy('')     -> [];
 policy(Policy) -> [{policy, Policy}].
 
 internal_user(User) ->
-    [{name,              User#internal_user.username},
-     {password_hash,     base64:encode(User#internal_user.password_hash)},
+    [{name,              internal_user:get_username(User)},
+     {password_hash,     base64:encode(internal_user:get_password_hash(User))},
      {hashing_algorithm, rabbit_auth_backend_internal:hashing_module_for_user(
                              User)},
-     {tags,              tags(User#internal_user.tags)}].
+     {tags,              tags_as_binaries(internal_user:get_tags(User))},
+     {limits,            internal_user:get_limits(User)}].
 
 user(User) ->
     [{name, User#user.username},
-     {tags, tags(User#user.tags)}].
+     {tags, tags_as_binaries(User#user.tags)}].
 
-tags(Tags) ->
-    list_to_binary(string:join([atom_to_list(T) || T <- Tags], ",")).
+tags_as_binaries(Tags) ->
+    [to_binary(T) || T <- Tags].
+
 
 listener(#listener{node = Node, protocol = Protocol,
                    ip_address = IPAddress, port = Port, opts=Opts}) ->
@@ -249,7 +252,7 @@ format_socket_opts([{ssl_opts, Value} | Tail], Acc) ->
 %% exclude options that have values that are nested
 %% data structures or may include functions. They are fairly
 %% obscure and not worth reporting via HTTP API.
-format_socket_opts([{verify_fun, _Value} | Tail], Acc) ->
+format_socket_opts([{customize_hostname_check, _Value} | Tail], Acc) ->
     format_socket_opts(Tail, Acc);
 format_socket_opts([{crl_cache, _Value} | Tail], Acc) ->
     format_socket_opts(Tail, Acc);
@@ -274,7 +277,10 @@ format_socket_opts([{ciphers, _Value} | Tail], Acc) ->
 format_socket_opts([Head | Tail], Acc) when is_atom(Head) ->
     format_socket_opts(Tail, [{Head, true} | Acc]);
 %% verify_fun value is a tuple that includes a function
-format_socket_opts([_Head = {verify_fun, _Value} | Tail], Acc) ->
+format_socket_opts([{verify_fun, _Value} | Tail], Acc) ->
+    format_socket_opts(Tail, Acc);
+%% match_fun value is a tuple that includes a function
+format_socket_opts([{match_fun, _Value} | Tail], Acc) ->
     format_socket_opts(Tail, Acc);
 format_socket_opts([Head = {Name, Value} | Tail], Acc) when is_list(Value) ->
     case io_lib:printable_unicode_list(Value) of
@@ -337,6 +343,7 @@ queue(Q) when ?is_amqqueue(Q) ->
     Type = case amqqueue:get_type(Q) of
                rabbit_classic_queue -> classic;
                rabbit_quorum_queue -> quorum;
+               rabbit_stream_queue -> stream;
                T -> T
            end,
     format(

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_vm).
@@ -20,8 +20,8 @@ memory() ->
     {Sums, _Other} = sum_processes(
                        lists:append(All), distinguishers(), [memory]),
 
-    [Qs, QsSlave, Qqs, ConnsReader, ConnsWriter, ConnsChannel, ConnsOther,
-     MsgIndexProc, MgmtDbProc, Plugins] =
+    [Qs, QsSlave, Qqs, DlxWorkers, Ssqs, Srqs, SCoor, ConnsReader, ConnsWriter, ConnsChannel,
+     ConnsOther, MsgIndexProc, MgmtDbProc, Plugins] =
         [aggregate(Names, Sums, memory, fun (X) -> X end)
          || Names <- distinguished_interesting_sups()],
 
@@ -55,7 +55,8 @@ memory() ->
 
     OtherProc = Processes
         - ConnsReader - ConnsWriter - ConnsChannel - ConnsOther
-        - Qs - QsSlave - Qqs - MsgIndexProc - Plugins - MgmtDbProc - MetricsProc,
+        - Qs - QsSlave - Qqs - DlxWorkers - Ssqs - Srqs - SCoor - MsgIndexProc - Plugins
+        - MgmtDbProc - MetricsProc,
 
     [
      %% Connections
@@ -68,6 +69,10 @@ memory() ->
      {queue_procs,          Qs},
      {queue_slave_procs,    QsSlave},
      {quorum_queue_procs,   Qqs},
+     {quorum_queue_dlx_procs, DlxWorkers},
+     {stream_queue_procs,   Ssqs},
+     {stream_queue_replica_reader_procs,  Srqs},
+     {stream_queue_coordinator_procs, SCoor},
 
      %% Processes
      {plugins,              Plugins},
@@ -114,8 +119,8 @@ binary() ->
                                       sets:add_element({Ptr, Sz}, Acc0)
                               end, Acc, Info)
           end, distinguishers(), [{binary, sets:new()}]),
-    [Other, Qs, QsSlave, Qqs, ConnsReader, ConnsWriter, ConnsChannel, ConnsOther,
-     MsgIndexProc, MgmtDbProc, Plugins] =
+    [Other, Qs, QsSlave, Qqs, DlxWorkers, Ssqs, Srqs, Scoor, ConnsReader, ConnsWriter,
+     ConnsChannel, ConnsOther, MsgIndexProc, MgmtDbProc, Plugins] =
         [aggregate(Names, [{other, Rest} | Sums], binary, fun sum_binary/1)
          || Names <- [[other] | distinguished_interesting_sups()]],
     [{connection_readers,  ConnsReader},
@@ -125,6 +130,10 @@ binary() ->
      {queue_procs,         Qs},
      {queue_slave_procs,   QsSlave},
      {quorum_queue_procs,  Qqs},
+     {quorum_queue_dlx_procs, DlxWorkers},
+     {stream_queue_procs,  Ssqs},
+     {stream_queue_replica_reader_procs, Srqs},
+     {stream_queue_coordinator_procs, Scoor},
      {plugins,             Plugins},
      {mgmt_db,             MgmtDbProc},
      {msg_index,           MsgIndexProc},
@@ -168,7 +177,8 @@ bytes(Words) ->  try
                  end.
 
 interesting_sups() ->
-    [queue_sups(), quorum_sups(), conn_sups() | interesting_sups0()].
+    [queue_sups(), quorum_sups(), dlx_sups(), stream_server_sups(), stream_reader_sups(),
+     conn_sups() | interesting_sups0()].
 
 queue_sups() ->
     all_vhosts_children(rabbit_amqqueue_sup_sup).
@@ -183,6 +193,10 @@ quorum_sups() ->
             [Pid || {_, Pid, _, _} <-
                     supervisor:which_children(ra_server_sup_sup)]
     end.
+
+dlx_sups() -> [rabbit_fifo_dlx_sup].
+stream_server_sups() -> [osiris_server_sup].
+stream_reader_sups() -> [osiris_replica_reader_sup].
 
 msg_stores() ->
     all_vhosts_children(msg_store_transient)
@@ -220,7 +234,7 @@ conn_sups()     ->
 
 ranch_server_sups() ->
     try
-        ets:match(ranch_server, {{conns_sup, '_'}, '$1'})
+        [Pid || {_, _, Pid} <- ranch_server:get_connections_sups()]
     catch
         %% Ranch ETS table doesn't exist yet
         error:badarg  -> []
@@ -229,13 +243,18 @@ ranch_server_sups() ->
 with(Sups, With) -> [{Sup, With} || Sup <- Sups].
 
 distinguishers() -> with(queue_sups(), fun queue_type/1) ++
-                    with(conn_sups(), fun conn_type/1).
+                    with(conn_sups(), fun conn_type/1) ++
+                    with(quorum_sups(), fun ra_type/1).
 
 distinguished_interesting_sups() ->
     [
      with(queue_sups(), master),
      with(queue_sups(), slave),
-     quorum_sups(),
+     with(quorum_sups(), quorum),
+     dlx_sups(),
+     stream_server_sups(),
+     stream_reader_sups(),
+     with(quorum_sups(), stream),
      with(conn_sups(), reader),
      with(conn_sups(), writer),
      with(conn_sups(), channel),
@@ -292,6 +311,12 @@ conn_type(PDict) ->
         _                            -> other
     end.
 
+ra_type(PDict) ->
+    case keyfind('$rabbit_vm_category', PDict) of
+        {value, rabbit_stream_coordinator} -> stream;
+        _                                  -> quorum
+    end.
+
 %%----------------------------------------------------------------------------
 
 %% NB: this code is non-rabbit specific.
@@ -304,16 +329,17 @@ conn_type(PDict) ->
                                   info_value()).
 -type distinguisher() :: fun (([{term(), term()}]) -> atom()).
 -type distinguishers() :: [{info_key(), distinguisher()}].
+
 -spec sum_processes([process()], distinguishers(), [info_key()]) ->
-                              {[{process(), [info_item()]}], [info_item()]}.
--spec sum_processes([process()], accumulate(), distinguishers(),
-                          [info_item()]) ->
                               {[{process(), [info_item()]}], [info_item()]}.
 
 sum_processes(Names, Distinguishers, Items) ->
     sum_processes(Names, fun (_, X, Y) -> X + Y end, Distinguishers,
                   [{Item, 0} || Item <- Items]).
 
+-spec sum_processes([process()], accumulate(), distinguishers(),
+                          [info_item()]) ->
+                              {[{process(), [info_item()]}], [info_item()]}.
 %% summarize the process_info of all processes based on their
 %% '$ancestor' hierarchy, recorded in their process dictionary.
 %%

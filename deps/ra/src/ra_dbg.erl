@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 %% @doc utilities to debug ra
 
@@ -55,13 +55,15 @@ replay_log(WalFile, Module, InitialState, Func) ->
   lists:foldl(WalFunc, InitialState, Wal).
 
 filter_duplicate_entries(WalInReverseOrder) ->
-  {_IndexRegistry, OrderedAndFilteredWal} = lists:foldl(fun({Index, _Term, _Command} = Entry, {IndexRegistry, WalAcc}) ->
-      case maps:is_key(Index, IndexRegistry) of
-        true ->
-          {IndexRegistry, WalAcc};
-        false ->
-          {maps:put(Index, true, IndexRegistry), lists:append([Entry], WalAcc)}
-      end
-    end, {#{}, []}, WalInReverseOrder),
-  OrderedAndFilteredWal.
+    {_IndexRegistry, OrderedAndFilteredWal} =
+    lists:foldl(fun({Index, _Term, _Command} = Entry, {IndexRegistry, WalAcc}) ->
+                        case maps:is_key(Index, IndexRegistry) of
+                            true ->
+                                {IndexRegistry, WalAcc};
+                            false ->
+                                {maps:put(Index, true, IndexRegistry),
+                                 lists:append([Entry], WalAcc)}
+                        end
+                end, {#{}, []}, WalInReverseOrder),
+    OrderedAndFilteredWal.
 

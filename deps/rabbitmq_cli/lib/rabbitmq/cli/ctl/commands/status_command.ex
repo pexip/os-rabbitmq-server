@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
   alias RabbitMQ.CLI.Core.DocGuide
@@ -92,8 +92,10 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
     product_version_section ++
     [
       "RabbitMQ version: #{m[:rabbitmq_version]}",
+      "RabbitMQ release series support status: #{m[:release_series_support_status]}",
       "Node name: #{node_name}",
       "Erlang configuration: #{m[:erlang_version]}",
+      "Crypto library: #{m[:crypto_lib_version]}",
       "Erlang processes: #{m[:processes][:used]} used, #{m[:processes][:limit]} limit",
       "Scheduler run queue: #{m[:run_queue]}",
       "Cluster heartbeat timeout (net_ticktime): #{m[:net_ticktime]}"
@@ -204,6 +206,11 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
   #
 
   defp result_map(result) do
+    crypto_lib_version = case Keyword.get(result, :crypto_lib_info) do
+      {_, _, version} -> version
+      other           -> other
+    end
+
     %{
       os: os_name(Keyword.get(result, :os)),
       pid: Keyword.get(result, :pid),
@@ -211,6 +218,8 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
       product_version: Keyword.get(result, :product_version) |> to_string,
       rabbitmq_version: Keyword.get(result, :rabbitmq_version) |> to_string,
       erlang_version: Keyword.get(result, :erlang_version) |> to_string |> String.trim_trailing,
+      crypto_lib_version: crypto_lib_version,
+      release_series_support_status: Keyword.get(result, :release_series_support_status, true),
       uptime: Keyword.get(result, :uptime),
       is_under_maintenance: Keyword.get(result, :is_under_maintenance, false),
       processes: Enum.into(Keyword.get(result, :processes), %{}),

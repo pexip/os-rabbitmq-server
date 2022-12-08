@@ -2,14 +2,10 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_trust_store).
-
-%% Transitional step until we can require Erlang/OTP 21 and
-%% use the now recommended try/catch syntax for obtaining the stack trace.
--compile(nowarn_deprecated_function).
 
 -behaviour(gen_server).
 
@@ -238,7 +234,7 @@ refresh_provider_certs(Provider, Config, ProviderState) ->
             NewProviderState;
         {error, Reason} ->
             rabbit_log:error("Unable to load certificate list for provider ~p,"
-                             " reason: ~p~n",
+                             " reason: ~p",
                              [Provider, Reason]),
             ProviderState
     end.
@@ -317,7 +313,7 @@ providers(Config) ->
                 {module, Provider} -> true;
                 {error, Error} ->
                     rabbit_log:warning("Unable to load trust store certificates"
-                                       " with provider module ~p. Reason: ~p~n",
+                                       " with provider module ~p. Reason: ~p",
                                        [Provider, Error]),
                     false
             end

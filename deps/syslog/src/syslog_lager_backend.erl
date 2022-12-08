@@ -20,10 +20,6 @@
 %%%   {handlers, [{syslog_lager_backend, []}]},
 %%% </pre>
 %%%
-%%% Note:
-%%% This modules uses apply/3 to call lager-specific functions in order to
-%%% prevent dialyzer from complaining when lager is not in path.
-%%%
 %%% @see https://github.com/basho/lager
 %%% @end
 %%%=============================================================================
@@ -46,6 +42,9 @@
 
 -define(CFG, [message]).
 
+%% avoid warnings when lager is not a project dependency
+-dialyzer(no_missing_calls).
+
 %%%=============================================================================
 %%% API
 %%%=============================================================================
@@ -59,7 +58,7 @@
 set_log_level(informational) ->
     set_log_level(info);
 set_log_level(Level) ->
-    catch apply(lager, set_loglevel, [?MODULE, Level]),
+    catch lager:set_loglevel(?MODULE, Level),
     ok.
 
 %%%=============================================================================
@@ -72,7 +71,7 @@ set_log_level(Level) ->
           format_cfg      :: list(),
           sd_id           :: string() | undefined,
           metadata_keys   :: [atom()],
-          use_msg_appname :: boolean()}).
+          appname_key     :: atom() | undefined}).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -85,11 +84,12 @@ init([Level, {}, {Formatter, FormatterConfig}]) when is_atom(Formatter) ->
     init([Level, {undefined, []}, {Formatter, FormatterConfig}]);
 init([Level, SData, {Formatter, FormatterConfig}])
   when is_atom(Formatter) ->
-    init([Level, SData, {Formatter, FormatterConfig}, false]);
-init([Level, {}, {Formatter, FormatterConfig}, UseMsgAppName])
+    AppnameKey = syslog_lib:get_name_metdata_key(),
+    init([Level, SData, {Formatter, FormatterConfig}, AppnameKey]);
+init([Level, {}, {Formatter, FormatterConfig}, AppnameKey])
   when is_atom(Formatter) ->
-    init([Level, {undefined, []}, {Formatter, FormatterConfig}, UseMsgAppName]);
-init([Level, {SDataId, MDKeys}, {Formatter, FormatterConfig}, UseMsgAppName])
+    init([Level, {undefined, []}, {Formatter, FormatterConfig}, AppnameKey]);
+init([Level, {SDataId, MDKeys}, {Formatter, FormatterConfig}, AppnameKey])
   when is_atom(Formatter) ->
     {ok, #state{
             log_level = level_to_mask(Level),
@@ -97,7 +97,7 @@ init([Level, {SDataId, MDKeys}, {Formatter, FormatterConfig}, UseMsgAppName])
             metadata_keys = MDKeys,
             formatter = Formatter,
             format_cfg = FormatterConfig,
-            use_msg_appname = UseMsgAppName}}.
+            appname_key = get_appname_key(AppnameKey)}}.
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -110,12 +110,12 @@ handle_event({log, Level, _, [_, Location, Message]}, State)
     syslog_logger:log(Severity, Pid, Timestamp, [], Message, no_format),
     {ok, State};
 handle_event({log, Msg}, State = #state{log_level = Level}) ->
-    case apply(lager_util, is_loggable, [Msg, Level, ?MODULE]) of
+    case lager_util:is_loggable(Msg, Level, ?MODULE) of
         true ->
             syslog_logger:log(get_severity(Msg),
                               get_pid(Msg),
-                              apply(lager_msg, timestamp, [Msg]),
-                              metadata_to_sd(Msg, State),
+                              lager_msg:timestamp(Msg),
+                              get_structured_data(Msg, State),
                               format_msg(Msg, State),
                               no_format,
                               get_appname_override(Msg, State));
@@ -167,9 +167,9 @@ get_severity(info) ->
 get_severity(Level) when is_atom(Level) ->
     Level;
 get_severity(Level) when is_integer(Level) ->
-    get_severity(apply(lager_util, num_to_level, [Level]));
+    get_severity(lager_util:num_to_level(Level));
 get_severity(Msg) ->
-    get_severity(apply(lager_msg, severity, [Msg])).
+    get_severity(lager_msg:severity(Msg)).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -177,7 +177,7 @@ get_severity(Msg) ->
 get_pid(Location) when is_list(Location) ->
     Location;
 get_pid(Msg) ->
-    try apply(lager_msg, metadata, [Msg]) of
+    try lager_msg:metadata(Msg) of
         Metadata ->
             case lists:keyfind(pid, 1, Metadata) of
                 {pid, Pid} when is_pid(Pid)    -> Pid;
@@ -195,38 +195,42 @@ level_to_mask(informational) ->
     level_to_mask(info);
 level_to_mask(Level) ->
     try
-        apply(lager_util, config_to_mask, [Level])
+        lager_util:config_to_mask(Level)
     catch
-        error:undef -> apply(lager_util, level_to_num, [Level])
+        error:undef -> lager_util:level_to_num(Level)
     end.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-metadata_to_sd(_Msg, #state{sd_id = undefined}) ->
+get_structured_data(_Msg, #state{sd_id = undefined}) ->
     [];
-metadata_to_sd(_Msg, #state{metadata_keys = []}) ->
+get_structured_data(_Msg, #state{metadata_keys = []}) ->
     [];
-metadata_to_sd(Msg, #state{sd_id = SDataId, metadata_keys = MDKeys}) ->
-    try apply(lager_msg, metadata, [Msg]) of
-        Metadata ->
-            case [D || D = {K, _} <- Metadata, lists:member(K, MDKeys)] of
-                []     -> [];
-                Result -> [{SDataId, Result}]
-            end
+get_structured_data(Msg, #state{sd_id = SDId, metadata_keys = MDKeys}) ->
+    try lager_msg:metadata(Msg) of
+        Metadata -> syslog_lib:get_structured_data(Metadata, SDId, MDKeys)
     catch
         _:_ -> []
     end.
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Map `true' to `application' for backwards compatibility.
 %%------------------------------------------------------------------------------
-get_appname_override(_, #state{use_msg_appname = false}) ->
+get_appname_key(true)                      -> application;
+get_appname_key(false)                     -> undefined;
+get_appname_key(Value) when is_atom(Value) -> Value.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+get_appname_override(_, #state{appname_key = undefined}) ->
     [];
-get_appname_override(Msg, #state{use_msg_appname = true}) ->
-    try apply(lager_msg, metadata, [Msg]) of
+get_appname_override(Msg, #state{appname_key = Key}) ->
+    try lager_msg:metadata(Msg) of
         Metadata ->
-            case proplists:get_value(application, Metadata) of
+            case proplists:get_value(Key, Metadata) of
                 undefined -> [];
                 Result    -> [{appname, Result}]
             end
@@ -238,4 +242,4 @@ get_appname_override(Msg, #state{use_msg_appname = true}) ->
 %% @private
 %%------------------------------------------------------------------------------
 format_msg(Msg, #state{formatter = Formatter, format_cfg = FormatterConfig}) ->
-    apply(Formatter, format, [Msg, FormatterConfig]).
+    Formatter:format(Msg, FormatterConfig).

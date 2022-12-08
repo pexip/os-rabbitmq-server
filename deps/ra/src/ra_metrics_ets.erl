@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 %% @hidden
 -module(ra_metrics_ets).
@@ -19,8 +19,6 @@
 
 -record(state, {}).
 
--include("ra.hrl").
-
 %%% here to own metrics ETS tables
 
 %%%===================================================================
@@ -35,9 +33,20 @@ start_link() ->
 %%%===================================================================
 
 init([]) ->
-    _ = ets:new(ra_log_metrics, [named_table, set, public,
-                                 {write_concurrency, true},
-                                 {read_concurrency, true}]),
+    TableFlags =  [named_table,
+                   {read_concurrency, true},
+                   {write_concurrency, true},
+                   public],
+    _ = ets:new(ra_log_metrics, [set | TableFlags]),
+    _ = ra_counters:init(),
+    _ = ra_leaderboard:init(),
+
+    %% Table for ra processes to record their current snapshot index so that
+    %% other processes such as the segment writer can use this value to skip
+    %% stale records and avoid flushing unnecessary data to disk.
+    %% This is written from the ra process so will need write_concurrency.
+    %% {RaUId, ra_index()}
+    _ = ets:new(ra_log_snapshot_state, [set | TableFlags]),
     {ok, #state{}}.
 
 handle_call(_, _From, State) ->

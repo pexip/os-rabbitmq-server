@@ -1,3 +1,111 @@
+rabbitmq-server (3.10.8-1.1pexip1) pexip-bullseye-openssl3; urgency=medium
+
+  * Migrate to bookworm
+  * debian/rabbitmq-server.postinst: resync with Debian
+
+ -- John-Mark Bell <jmb@pexip.com>  Thu, 08 Dec 2022 13:17:58 +0000
+
+rabbitmq-server (3.10.8-1.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * No source change upload to rebuild with debhelper 13.10.
+
+ -- Michael Biebl <biebl@debian.org>  Sat, 15 Oct 2022 12:42:19 +0200
+
+rabbitmq-server (3.10.8-1) unstable; urgency=medium
+
+  * New upstream release:
+    - Fix FTBFS with Erlang 25.
+  * lets-use-python3-not-python-binary.patch: removed 2 hunks commited
+    upstream.
+  * Add OOMScoreAdjust=-500 to the .service file.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 28 Sep 2022 15:40:58 +0200
+
+rabbitmq-server (3.9.13-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Do not install rabbitmq-server-ha.ocf: it's removed upstream.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 23 Feb 2022 09:12:34 +0100
+
+rabbitmq-server (3.9.8-6) unstable; urgency=medium
+
+  * Use grep -q when checking for Erglang cookie.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 27 Jan 2022 23:32:11 +0100
+
+rabbitmq-server (3.9.8-5) unstable; urgency=medium
+
+  * Detect if /var/lib/rabbitmq/.erlang.cookie is an Erlang generated cookie,
+    regenerate and restart rabbitmq it in such case.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 27 Jan 2022 14:14:56 +0100
+
+rabbitmq-server (3.9.8-4) unstable; urgency=medium
+
+  * Use umask when creating the .erlang.cookie to avoid race condition where
+    the file could be read.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 24 Jan 2022 13:24:50 +0100
+
+rabbitmq-server (3.9.8-3) unstable; urgency=medium
+
+  * Use OpenSSL to generate the default .erlang.cookie.
+  * Set rabbitmq-server.service to depend on epmd.socket and not epmd@.socket.
+  * Add a debian/README.Debian to explain how to secure a RabbitMQ cluster, as
+    it's been pointed out that upstream doc isn't good enough to explain what
+    is necessar for it (Closes: #924768).
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 14 Jan 2022 10:05:34 +0100
+
+rabbitmq-server (3.9.8-2) unstable; urgency=medium
+
+  * Finished removing the $LANG wrapper (Closes: #947872).
+  * Do not mv /etc/rabbitmq/rabbitmq.conf /etc/rabbitmq/rabbitmq-env.conf
+    anymore (Closes: #943699).
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 28 Dec 2021 19:08:01 +0100
+
+rabbitmq-server (3.9.8-1) unstable; urgency=medium
+
+  * New upstream release.
+  * d/control: Bump Standards-Version to 4.6.0, no changes.
+
+ -- James Page <james.page@ubuntu.com>  Tue, 02 Nov 2021 16:52:40 +0000
+
+rabbitmq-server (3.9.4-1.2) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Add a superficial autopkgtest.
+    It just tests that the service is active after installation. This is not
+    great test coverage, but it will at least stop new erlang versions from
+    migrating before rabbitmq-server is fixed to work with it.
+  * debian/changelog: add missing Closes: tag in the previous upload.
+    I have just closed the actual bug via a separate control email.
+
+ -- Antonio Terceiro <terceiro@debian.org>  Sat, 25 Sep 2021 06:38:37 -0300
+
+rabbitmq-server (3.9.4-1.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Depends: fix typo in erlang version that makes rabbitmq-server
+    uninstallable (s/1:24.4/1:24.0/) (Closes: #993138)
+
+ -- Antonio Terceiro <terceiro@debian.org>  Fri, 27 Aug 2021 15:30:41 -0300
+
+rabbitmq-server (3.9.4-1) unstable; urgency=medium
+
+  * New upstream release:
+    - Works with Erlang 24 (Closes: #992609).
+  * Remove debian/patches/Upstream_PR2965_fixing_rabbitmqctl_parsing applied
+    upstream.
+  * Remove hunk from lets-use-python3-not-python-binary.patch as one upstream
+    file is gone.
+  * (build-)depends on erlang >= 1:24.0 and elixir >= 1.12.2.
+
+ -- Thomas Goirand <zigo@debian.org>  Sun, 22 Aug 2021 17:32:09 +0200
+
 rabbitmq-server (3.8.9-3pexip4) pexip-bullseye; urgency=medium
 
   * Bullseye rebuild for ARM64 inclusion

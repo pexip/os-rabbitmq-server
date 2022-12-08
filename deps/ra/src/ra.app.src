@@ -1,10 +1,11 @@
 {application,ra,
              [{description,"Raft library"},
-              {vsn,"1.1.6"},
+              {vsn,"2.2.0"},
               {licenses,["Apache","MPL"]},
               {links,[{"github","https://github.com/rabbitmq/ra"}]},
               {modules,[]},
               {registered,[ra_sup]},
-              {applications,[kernel,stdlib,sasl,crypto,aten,gen_batch_server]},
+              {applications,[kernel,stdlib,sasl,crypto,aten,gen_batch_server,
+                             seshat]},
               {mod,{ra_app,[]}},
               {env,[]}]}.

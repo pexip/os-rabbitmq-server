@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(amqp10_framing).
@@ -172,13 +172,8 @@ encode(X) ->
 encode_bin(X) ->
     amqp10_binary_generator:generate(encode(X)).
 
-
 decode_bin(X) ->
-    [decode(PerfDesc) || PerfDesc <- decode_bin0(X)].
-
-decode_bin0(<<>>) -> [];
-decode_bin0(X)    -> {PerfDesc, Rest} = amqp10_binary_parser:parse(X),
-                     [PerfDesc | decode_bin0(Rest)].
+    [decode(PerfDesc) || PerfDesc <- amqp10_binary_parser:parse_all(X)].
 
 symbol_for(X) ->
     amqp10_framing0:symbol_for(X).

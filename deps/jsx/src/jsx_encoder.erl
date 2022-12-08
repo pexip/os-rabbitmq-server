@@ -25,31 +25,25 @@
 
 -export([encoder/3, encode/1, encode/2]).
 
--spec encoder(Handler::module(), State::any(), Config::list()) -> jsx:encoder().
+-spec encoder(Handler::module(), State::any(), Config::jsx_config:options()) -> jsx:encoder().
 
 encoder(Handler, State, Config) ->
     Parser = jsx:parser(Handler, State, Config),
     fun(Term) -> Parser(encode(Term) ++ [end_json]) end.
 
 
--spec encode(Term::any()) -> any().
+-spec encode(Term::any()) -> [any(), ...].
 
 encode(Term) -> encode(Term, ?MODULE).
 
 
--spec encode(Term::any(), EntryPoint::module()) -> any().
+-spec encode(Term::any(), EntryPoint::module()) -> [any(), ...].
 
--ifndef(maps_support).
-encode(Term, EntryPoint) -> encode_(Term, EntryPoint).
--endif.
-
--ifdef(maps_support).
 encode(Map, _EntryPoint) when is_map(Map), map_size(Map) < 1 ->
     [start_object, end_object];
 encode(Term, EntryPoint) when is_map(Term) ->
     [start_object] ++ unpack(Term, EntryPoint);
 encode(Term, EntryPoint) -> encode_(Term, EntryPoint).
--endif.
 
 encode_([], _EntryPoint) -> [start_array, end_array];
 encode_([{}], _EntryPoint) -> [start_object, end_object];
@@ -75,16 +69,11 @@ unhitch([V|Rest], EntryPoint) ->
     EntryPoint:encode(V, EntryPoint) ++ unhitch(Rest, EntryPoint);
 unhitch([], _) -> [end_array].
 
-
--ifdef(maps_support).
 unpack(Map, EntryPoint) -> unpack(Map, maps:keys(Map), EntryPoint).
 
 unpack(Map, [K|Rest], EntryPoint) when is_integer(K); is_binary(K); is_atom(K) ->
     [K] ++ EntryPoint:encode(maps:get(K, Map), EntryPoint) ++ unpack(Map, Rest, EntryPoint);
 unpack(_, [], _) -> [end_object].
--endif.
-
-
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_shovel_status).
@@ -10,15 +10,17 @@
 
 -export([start_link/0]).
 
--export([report/3, remove/1, status/0, lookup/1]).
+-export([report/3, remove/1, status/0, lookup/1, cluster_status/0, cluster_status_with_nodes/0]).
+-export([inject_node_info/2, find_matching_shovel/3]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
 -define(ETS_NAME, ?MODULE).
+-define(CHECK_FREQUENCY, 60000).
 
--record(state, {}).
+-record(state, {timer}).
 -record(entry, {name, type, info, timestamp}).
 
 start_link() ->
@@ -33,13 +35,30 @@ remove(Name) ->
 status() ->
     gen_server:call(?SERVER, status, infinity).
 
+cluster_status() ->
+    Nodes = rabbit_nodes:all_running(),
+    lists:usort(rabbit_misc:append_rpc_all_nodes(Nodes, ?MODULE, status, [])).
+
+cluster_status_with_nodes() ->
+    Nodes = rabbit_nodes:all_running(),
+    lists:foldl(
+        fun(Node, Acc) ->
+            case rabbit_misc:rpc_call(Node, ?MODULE, status, []) of
+                {badrpc, _} ->
+                    Acc;
+                Xs0 when is_list(Xs0) ->
+                    Xs = inject_node_info(Node, Xs0),
+                    Acc ++ Xs
+            end
+        end, [], Nodes).
+
 lookup(Name) ->
     gen_server:call(?SERVER, {lookup, Name}, infinity).
 
 init([]) ->
     ?ETS_NAME = ets:new(?ETS_NAME,
                         [named_table, {keypos, #entry.name}, private]),
-    {ok, #state{}}.
+    {ok, ensure_timer(#state{})}.
 
 handle_call(status, _From, State) ->
     Entries = ets:tab2list(?ETS_NAME),
@@ -69,14 +88,38 @@ handle_cast({remove, Name}, State) ->
     rabbit_event:notify(shovel_worker_removed, split_name(Name)),
     {noreply, State}.
 
+handle_info(check, State) ->
+    rabbit_shovel_dyn_worker_sup_sup:cleanup_specs(),
+    {noreply, ensure_timer(State)};
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, State) ->
+    _ = rabbit_misc:stop_timer(State, #state.timer),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+inject_node_info(Node, Shovels) ->
+    lists:map(
+        fun({Name, Type, {State, Opts}, Timestamp}) ->
+            Opts1 = Opts ++ [{node, Node}],
+            {Name, Type, {State, Opts1}, Timestamp}
+        end, Shovels).
+
+find_matching_shovel(VHost, Name, Shovels) ->
+    case lists:filter(
+        fun ({{V, S}, _Kind, _Status, _}) ->
+            VHost =:= V andalso Name =:= S
+        end, Shovels) of
+            []  -> undefined;
+        [S | _] -> S
+    end.
+
+%%
+%% Implementation
+%%
 
 split_status({running, MoreInfo})         -> [{status, running} | MoreInfo];
 split_status({terminated, Reason})        -> [{status, terminated},
@@ -86,3 +129,7 @@ split_status(Status) when is_atom(Status) -> [{status, Status}].
 split_name({VHost, Name})           -> [{name,  Name},
                                         {vhost, VHost}];
 split_name(Name) when is_atom(Name) -> [{name, Name}].
+
+ensure_timer(State0) ->
+    State1 = rabbit_misc:stop_timer(State0, #state.timer),
+    rabbit_misc:ensure_timer(State1, #state.timer, ?CHECK_FREQUENCY, check).

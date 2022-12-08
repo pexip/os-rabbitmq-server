@@ -2,15 +2,15 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 %% @hidden
 -module(ra_log_ets).
 -behaviour(gen_server).
 
 -export([start_link/1,
-         give_away/1,
-         delete_tables/1]).
+         give_away/2,
+         delete_tables/2]).
 
 -export([init/1,
          handle_call/3,
@@ -21,7 +21,7 @@
 
 -include("ra.hrl").
 
--record(state, {}).
+-record(state, {names :: ra_system:names()}).
 
 %%% ra_log_ets - owns mem_table ETS tables
 
@@ -29,44 +29,34 @@
 %%% API functions
 %%%===================================================================
 
-start_link(DataDir) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [DataDir], []).
+start_link(#{names := #{log_ets := Name}} = Cfg) ->
+    gen_server:start_link({local, Name}, ?MODULE, [Cfg], []).
 
--spec give_away(ets:tid()) -> true.
-give_away(Tid) ->
-    ets:give_away(Tid, whereis(?MODULE), undefined).
+-spec give_away(ra_system:names(), ets:tid()) -> true.
+give_away(#{log_ets := Name}, Tid) ->
+    ets:give_away(Tid, whereis(Name), undefined).
 
--spec delete_tables([ets:tid()]) -> ok.
-delete_tables(Tids) ->
-    gen_server:cast(?MODULE, {delete_tables, Tids}).
+-spec delete_tables(ra_system:names(), [ets:tid()]) -> ok.
+delete_tables(#{log_ets := Name}, Tids) ->
+    gen_server:cast(Name, {delete_tables, Tids}).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-init([DataDir]) ->
+init([#{data_dir := DataDir,
+        names := #{open_mem_tbls := OpenTbl,
+                   closed_mem_tbls := ClosedTbl} = Names}]) ->
     process_flag(trap_exit, true),
     TableFlags =  [named_table,
-                   {read_concurrency, true},
                    {write_concurrency, true},
                    public],
     % create mem table lookup table to be used to map ra cluster name
     % to table identifiers to query.
-    _ = ets:new(ra_log_open_mem_tables, [set | TableFlags]),
-    _ = ets:new(ra_log_closed_mem_tables, [bag | TableFlags]),
-
-    _ = ra_counters:init(),
-    _ = ra_leaderboard:init(),
-
-    %% Table for ra processes to record their current snapshot index so that
-    %% other processes such as the segment writer can use this value to skip
-    %% stale records and avoid flushing unnecessary data to disk.
-    %% This is written from the ra process so will need write_concurrency.
-    %% {RaUId, ra_index()}
-    _ = ets:new(ra_log_snapshot_state, [set | TableFlags]),
-
-    ok = ra_directory:init(DataDir),
-    {ok, #state{}}.
+    _ = ets:new(OpenTbl, [set | TableFlags]),
+    _ = ets:new(ClosedTbl, [bag | TableFlags]),
+    ok = ra_directory:init(DataDir, Names),
+    {ok, #state{names = Names}}.
 
 handle_call(_Request, _From, State) ->
     Reply = ok,
@@ -77,12 +67,15 @@ handle_cast({delete_tables, Tids}, State) ->
     %% we need to be defensive here.
     %% it is better to leak a table than to crash them all
     [begin
-         try ets:delete(Tid) of
-             true -> ok
+         try timer:tc(fun () -> ets_delete(Tid) end) of
+             {Time, true} ->
+                 ?DEBUG("ra_log_ets: ets:delete/1 took ~bms to delete ~w",
+                        [Time div 1000, Tid]),
+                 ok
          catch
              _:Err ->
                  ?WARN("ra_log_ets: failed to delete ets table ~w with ~w "
-                       "This table may need to be cleaned up manually~n",
+                       "This table may need to be cleaned up manually",
                        [Tid, Err]),
                  ok
          end
@@ -94,19 +87,13 @@ handle_cast(_Msg, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
-    ok = ra_directory:deinit(),
+ets_delete(Tid) ->
+    _ = ets:delete(Tid),
+    true.
+
+terminate(_Reason, #state{names = Names}) ->
+    ok = ra_directory:deinit(Names),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-
-%%%===================================================================
-%%% Internal functions
-%%%===================================================================
-
-
-
-
-
-

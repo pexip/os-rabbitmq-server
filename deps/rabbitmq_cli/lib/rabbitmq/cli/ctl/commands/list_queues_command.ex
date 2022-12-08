@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.ListQueuesCommand do
   require RabbitMQ.CLI.Ctl.InfoKeys
@@ -21,7 +21,9 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ListQueuesCommand do
             messages_persistent message_bytes message_bytes_ready
             message_bytes_unacknowledged message_bytes_ram message_bytes_persistent
             head_message_timestamp disk_reads disk_writes consumers
-            consumer_utilisation memory slave_pids synchronised_slave_pids state type)a
+            consumer_utilisation consumer_capacity
+            memory slave_pids synchronised_slave_pids state type
+            leader members online)a
 
   def description(), do: "Lists queues and their properties"
   def usage(), do: "list_queues [--vhost <vhost>] [--online] [--offline] [--local] [--no-table-headers] [<column>, ...]"

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 %% @hidden
 -module(ra_lib).
@@ -39,8 +39,17 @@
          retry/2,
          retry/3,
          write_file/2,
-         lists_chunk/2
+         lists_chunk/2,
+         lists_detect_sort/1,
+         is_dir/1,
+         is_file/1,
+         ensure_dir/1,
+         consult/1,
+         maps_foreach/2,
+         maps_merge_with/3
         ]).
+
+-include_lib("kernel/include/file.hrl").
 
 ceiling(X) when X < 0 ->
     trunc(X);
@@ -66,7 +75,7 @@ dump(Term) ->
     dump("Dump", Term).
 
 dump(Prefix, Term) ->
-    io:format("~p: ~p~n", [Prefix, Term]),
+    io:format("~p: ~p", [Prefix, Term]),
     Term.
 
 id(X) -> X.
@@ -145,9 +154,9 @@ zpad_extract_num(Fn) ->
     list_to_integer(NumStr).
 
 recursive_delete(Dir) ->
-    case filelib:is_dir(Dir) of
+    case is_dir(Dir) of
         true ->
-            case file:list_dir(Dir) of
+            case prim_file:list_dir(Dir) of
                 {ok, Files} ->
                     Fun =
                     fun(F) -> recursive_delete(filename:join([Dir, F])) end,
@@ -175,9 +184,9 @@ delete(File, Type) ->
     end.
 
 do_delete(File, regular) ->
-    file:delete(File);
+    prim_file:delete(File);
 do_delete(Dir, directory) ->
-    file:del_dir(Dir).
+    prim_file:del_dir(Dir).
 
 -spec throw_error(string(), list()) -> no_return().
 throw_error(Format, Args) ->
@@ -193,7 +202,6 @@ throw_error(Format, Args) ->
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         "abcdefghijklmnopqrstuvwxyz"
         "0123456789_-=").
--define(UID_CHARS, "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890").
 -define(UID_LENGTH, 12).
 
 -spec make_uid() -> binary().
@@ -213,10 +221,14 @@ make_uid(Prefix0) ->
 -spec make_dir(file:name_all()) ->
     ok | {error, file:posix() | badarg}.
 make_dir(Dir) ->
-    handle_ensure_dir(filelib:ensure_dir(Dir), Dir).
+    case is_dir(Dir) of
+        true -> ok;
+        false ->
+            handle_ensure_dir(ensure_dir(Dir), Dir)
+    end.
 
 handle_ensure_dir(ok, Dir) ->
-    handle_make_dir(file:make_dir(Dir));
+    handle_make_dir(prim_file:make_dir(Dir));
 handle_ensure_dir(Error, _Dir) ->
     Error.
 
@@ -337,6 +349,139 @@ lists_take(_N, [], Acc) ->
 lists_take(N, [H | T], Acc) ->
     lists_take(N-1, T, [H | Acc]).
 
+lists_detect_sort([]) ->
+    undefined;
+lists_detect_sort([_]) ->
+    undefined;
+lists_detect_sort([A | [A | _] = Rem]) ->
+    %% direction not determined yet
+    lists_detect_sort(Rem);
+lists_detect_sort([A, B | Rem]) when A > B ->
+    do_descending(B, Rem);
+lists_detect_sort([A, B | Rem]) when A < B ->
+    do_ascending(B, Rem).
+
+do_descending(_A, []) ->
+    descending;
+do_descending(A, [B | Rem])
+  when B =< A ->
+    do_descending(B, Rem);
+do_descending(_A, _) ->
+    unsorted.
+
+do_ascending(_A, []) ->
+    ascending;
+do_ascending(A, [B | Rem])
+  when B >= A ->
+    do_ascending(B, Rem);
+do_ascending(_A, _) ->
+    unsorted.
+
+is_dir(Dir) ->
+    case prim_file:read_file_info(Dir) of
+        {ok, #file_info{type=directory}} ->
+            true;
+        _ ->
+            false
+    end.
+
+is_file(File) ->
+    case prim_file:read_file_info(File) of
+        {ok, #file_info{type = directory}} ->
+            true;
+        {ok, #file_info{type = regular}} ->
+            true;
+        _ ->
+            false
+    end.
+
+
+-spec consult(file:filename()) ->
+    {ok, term()} | {error, term()}.
+consult(Path) ->
+    case prim_file:read_file(Path) of
+        {ok, Data} ->
+            Str = erlang:binary_to_list(Data),
+            tokens(Str);
+        Err ->
+            Err
+    end.
+
+tokens(Str) ->
+    case erl_scan:string(Str) of
+        {ok, Tokens, _EndLoc} ->
+            erl_parse:parse_term(Tokens);
+        {error, Err, _ErrLoc} ->
+            {error, Err}
+    end.
+
+
+%% raw copy of ensure_dir
+ensure_dir("/") ->
+    ok;
+ensure_dir(F) ->
+    Dir = filename:dirname(F),
+    case is_dir(Dir) of
+        true ->
+            ok;
+        false when Dir =:= F ->
+            %% Protect against infinite loop
+            {error, einval};
+        false ->
+            _ = ensure_dir(Dir),
+            case prim_file:make_dir(Dir) of
+                {error, eexist} = EExist ->
+                    case is_dir(Dir) of
+                        true ->
+                            ok;
+                        false ->
+                            EExist
+                    end;
+                Err ->
+                    Err
+            end
+    end.
+
+%% because OTP 23 support
+maps_foreach(Fun, {K, V, I}) ->
+    Fun(K, V),
+    maps_foreach(Fun, maps:next(I));
+maps_foreach(_Fun, none) ->
+    ok;
+maps_foreach(Fun, Map) when is_map(Map) ->
+    maps_foreach(Fun, maps:next(maps:iterator(Map))).
+
+%% copied from OTP to provide 23 compat, can be removed when we drop
+%% support for 23
+maps_merge_with(Combiner, Map1, Map2) when is_map(Map1),
+                                           is_map(Map2),
+                                           is_function(Combiner, 3) ->
+    case map_size(Map1) > map_size(Map2) of
+        true ->
+            Iterator = maps:iterator(Map2),
+            merge_with_1(maps:next(Iterator),
+                         Map1,
+                         Map2,
+                         Combiner);
+        false ->
+            Iterator = maps:iterator(Map1),
+            merge_with_1(maps:next(Iterator),
+                         Map2,
+                         Map1,
+                         fun(K, V1, V2) -> Combiner(K, V2, V1) end)
+    end.
+
+merge_with_1({K, V2, Iterator}, Map1, Map2, Combiner) ->
+    case Map1 of
+        #{ K := V1 } ->
+            NewMap1 = Map1#{ K := Combiner(K, V1, V2) },
+            merge_with_1(maps:next(Iterator), NewMap1, Map2, Combiner);
+        #{ } ->
+            merge_with_1(maps:next(Iterator), maps:put(K, V2, Map1), Map2, Combiner)
+    end;
+merge_with_1(none, Result, _, _) ->
+    Result.
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
@@ -382,6 +527,21 @@ validate_base64uri_test() ->
 
 zeropad_test() ->
     "0000000000000037" = zpad_hex(55),
+    ok.
+
+lists_detect_sort_test() ->
+    ?assertEqual(undefined, lists_detect_sort([])),
+    ?assertEqual(undefined, lists_detect_sort([1])),
+    ?assertEqual(undefined, lists_detect_sort([1, 1])),
+    ?assertEqual(ascending, lists_detect_sort([1, 1, 2])),
+    ?assertEqual(unsorted, lists_detect_sort([1, 2, 1])),
+    ?assertEqual(unsorted, lists_detect_sort([2, 1, 2])),
+    ?assertEqual(descending, lists_detect_sort([2, 1])),
+    ?assertEqual(descending, lists_detect_sort([2, 2, 1])),
+    ?assertEqual(ascending, lists_detect_sort([1, 1, 2])),
+    ?assertEqual(ascending, lists_detect_sort([1, 2, 3, 4, 6, 6])),
+    ?assertEqual(unsorted, lists_detect_sort([1, 2, 3, 4, 6, 5])),
+
     ok.
 
 -endif.

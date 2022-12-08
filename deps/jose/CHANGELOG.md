@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.11.1 (2020-12-23)
+
+* Fixes
+  * Fix compatibility with older OTP versions
+  * Fix AES detection on OTP 23
+  * Fix AES GCM bugs on OTP 23
+
+## 1.11.0 (2020-11-24)
+
+* Fixes
+  * Add compatability layer to fix deprecated `crypto` functions.
+  * Use `:extra_applications` instead of `:applications` (bumps Elixir requirement to `~> 1.4`).
+  * Conditionally compile `Poison` modules used for testing.
+
 ## 1.10.1 (2020-01-08)
 
 * Fixes

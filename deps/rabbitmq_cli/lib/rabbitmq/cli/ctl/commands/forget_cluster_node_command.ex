@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2016-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2016-2022 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.ForgetClusterNodeCommand do
   alias RabbitMQ.CLI.Core.{DocGuide, Distribution, Validators}
@@ -52,6 +52,12 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ForgetClusterNodeCommand do
         {:error, "RabbitMQ on node #{node_to_remove} must be stopped with 'rabbitmqctl -n #{node_to_remove} stop_app' before it can be removed"};
       {:error, _}  = error -> error;
       {:badrpc, _} = error -> error;
+      :ok ->
+        case :rabbit_misc.rpc_call(node_name, :rabbit_quorum_queue, :shrink_all, [atom_name]) do
+          {:error, _} ->
+            {:error, "RabbitMQ failed to shrink some of the quorum queues on node #{node_to_remove}"};
+          _ -> :ok
+        end
       other                -> other
     end
   end
@@ -79,6 +85,9 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ForgetClusterNodeCommand do
 
   def description(), do: "Removes a node from the cluster"
 
+  def banner([node_to_remove], %{offline: true}) do
+    "Removing node #{node_to_remove} from the cluster. Warning: quorum queues cannot be shrunk in offline mode"
+  end
   def banner([node_to_remove], _) do
     "Removing node #{node_to_remove} from the cluster"
   end

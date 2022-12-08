@@ -1,20 +1,11 @@
 .\" vim:ft=nroff:
-.\" The contents of this file are subject to the Mozilla Public License
-.\" Version 1.1 (the "License"); you may not use this file except in
-.\" compliance with the License. You may obtain a copy of the License
-.\" at https://www.mozilla.org/MPL/
+.\" This Source Code Form is subject to the terms of the Mozilla Public
+.\" License, v. 2.0. If a copy of the MPL was not distributed with this
+.\" file, You can obtain one at https://mozilla.org/MPL/2.0/.
 .\"
-.\" Software distributed under the License is distributed on an "AS IS"
-.\" basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-.\" the License for the specific language governing rights and
-.\" limitations under the License.
+.\" Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 .\"
-.\" The Original Code is RabbitMQ.
-.\"
-.\" The Initial Developer of the Original Code is Pivotal Software, Inc.
-.\" Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
-.\"
-.Dd September 28, 2019
+.Dd June 19, 2021
 .Dt RABBITMQCTL 8
 .Os "RabbitMQ Server"
 .Sh NAME
@@ -37,7 +28,13 @@
 RabbitMQ is an open source multi-protocol messaging broker.
 .Pp
 .Nm
-is a command line tool for managing a RabbitMQ server node.
+is the main command line tool for managing a RabbitMQ server node,
+together with
+.Cm rabbitmq-diagnostics
+,
+.Cm rabbitmq-upgrade
+, and others.
+.Pp
 It performs all actions by connecting to the target RabbitMQ node
 on a dedicated CLI tool communication port and authenticating
 using a shared secret (known as the cookie file).
@@ -159,20 +156,14 @@ For example, to reset the RabbitMQ node:
 .Pp
 Instructs the RabbitMQ node to perform internal log rotation.
 .Pp
-Log rotation is performed according to lager settings specified in
-configuration file.
+Log rotation is performed according to the logging settings specified in the configuration file.
+The rotation operation is asynchronous, there is no guarantee that it has completed when this command returns.
 .Pp
-Note that there is no need to call this command in case of external log
-rotation (e.g. from logrotate(8)), because lager detects renames and
-automatically reopens log files.
+Note that there is no need to call this command in case of external log rotation (e.g. from logrotate(8)).
 .Pp
-For example, this command starts internal log rotation
-process:
+For example, to initial log rotation:
 .sp
 .Dl rabbitmqctl rotate_logs
-.Pp
-Rotation is performed asynchronously, so there is no guarantee that it
-will be completed when this command returns.
 .\" ------------------------------------------------------------------
 .It Cm shutdown
 .Pp
@@ -347,7 +338,7 @@ will be lost.
 If the last node to go down is permanently lost then you should use
 .Cm forget_cluster_node Fl -offline
 in preference to this command, as it will ensure that mirrored queues
-which were mastered on the lost node get promoted.
+which had their leader replica on the lost node get promoted.
 .Pp
 For example, this will force the node not to wait for other nodes next
 time it is started:
@@ -729,7 +720,7 @@ is an administrator:
 .sp
 .Dl rabbitmqctl set_user_tags janeway administrator
 .Pp
-This has no effect when the user logs in via AMQP, but can be used to
+This has no effect when the user authenticates using a messaging protocol, but can be used to
 permit the user to manage users, virtual hosts and permissions when
 the user logs in via some other means (for example with the management
 plugin).
@@ -855,7 +846,7 @@ virtual hosts to which the user named
 .Qq janeway
 has been granted access, and the topic permissions the user has in these virtual hosts:
 .sp
-.Dl rabbitmqctl list_topic_user_permissions janeway
+.Dl rabbitmqctl list_user_topic_permissions janeway
 .\" ------------------------------------------------------------------
 .It Cm list_vhosts Op Ar vhostinfoitem ...
 .Pp
@@ -873,6 +864,14 @@ can take any value from the list that follows:
 The name of the virtual host with non-ASCII characters escaped as in C.
 .It Cm tracing
 Whether tracing is enabled for this virtual host.
+.It Cm default_queue_type
+Default queue type for this vhost.
+.It Cm description
+Virtual host description.
+.It Cm tags
+Virtual host tags.
+.It Cm cluster_state
+Virtual host state: nodedown, running, stopped.
 .El
 .Pp
 If no
@@ -1298,11 +1297,11 @@ of the following mutually exclusive options:
 .Bl -tag -width Ds
 .It Fl -offline
 List only those durable queues that are not currently available (more
-specifically, their master node isn't).
+specifically, their leader node isn't).
 .It Fl -online
-List queues that are currently available (their master node is).
+List queues that are currently available (their leader node is).
 .It Fl -local
-List only those queues whose master process is located on the current
+List only those queues whose leader replica is located on the current
 node.
 .El
 .Pp
@@ -1401,7 +1400,7 @@ To learn more, see the
 .Lk https://www.rabbitmq.com/ha.html "RabbitMQ Mirroring guide"
 .It Cm synchronised_slave_pids
 If the queue is mirrored, this gives the IDs of the mirrors (follower replicas) which
-are synchronised with the master (leader). To learn more, see the
+are in sync with the leader replica. To learn more, see the
 .Lk https://www.rabbitmq.com/ha.html "RabbitMQ Mirroring guide"
 .It Cm state
 The state of the queue.
@@ -1433,22 +1432,10 @@ each queue of the virtual host named
 .Pp
 Tests queues to respond within timeout. Lists those which did not respond
 .Pp
-For example, this command lists only those unresponsive queues whose master process
-is located on the current node.
+For example, this command lists only those unresponsive queues whose leader replica
+is hosted on the target node.
 .Sp
 .Dl rabbitmqctl list_unresponsive_queues --local name
-.\" ------------------------------------------------------------------
-.It Cm node_health_check
-.Pp
-DEPRECATED. Performs intrusive, opinionated health checks on a fully booted node.
-To learn more, see the
-.Lk https://www.rabbitmq.com/monitoring.html#health-checks "Health Checks documentation"
-.Pp
-Verifies the RabbitMQ application is running and alarms are not set,
-then checks that every queue and channel on the node can emit basic stats.
-.sp
-Example:
-.Dl rabbitmqctl node_health_check -n rabbit@hostname
 .\" ------------------------------------------------------------------
 .It Cm ping
 .Pp
@@ -1581,13 +1568,13 @@ but the key-value pair isn't tied to a virtual host.
 .It Ar name
 The name of the global runtime parameter being set.
 .It Ar value
-The value for the global runtime parameter, as a JSON term.
+The value for the global runtime parameter, as a JSON document.
 In most shells you are very likely to need to quote this.
 .El
 .Pp
 For example, this command sets the global runtime parameter
 .Qq mqtt_default_vhosts
-to the JSON term {"O=client,CN=guest":"/"}:
+to the JSON document {"O=client,CN=guest":"/"}:
 .sp
 .Dl rabbitmqctl set_global_parameter mqtt_default_vhosts '{"O=client,CN=guest":"/"}'
 .\" ------------------------------------------------------------------
@@ -1600,7 +1587,7 @@ The name of the component for which the parameter is being set.
 .It Ar name
 The name of the parameter being set.
 .It Ar value
-The value for the parameter, as a JSON term.
+The value for the parameter, as a JSON document.
 In most shells you are very likely to need to quote this.
 .El
 .Pp
@@ -1651,7 +1638,7 @@ The name of the policy.
 The regular expression, which when matches on a given resources causes
 the policy to apply.
 .It Ar definition
-The definition of the policy, as a JSON term.
+The definition of the policy, as a JSON document.
 In most shells you are very likely to need to quote this.
 .It Ar priority
 The priority of the policy as an integer.
@@ -1716,19 +1703,25 @@ not be visible to
 .Nm .
 .Bl -tag -width Ds
 .\" ------------------------------------------------------------------
-.It Cm add_vhost Ar vhost
+.It Cm add_vhost Ar vhost Op Fl -description Ar desc Fl -tags Ar tags Fl -default-queue-type Ar default-q-type
 .Bl -tag -width Ds
 .It Ar vhost
 The name of the virtual host entry to create.
+.It Ar desc
+Arbitrary virtual host description, e.g. its purpose, for operator's convenience.
+.It Ar tags
+A comma-separated list of virtual host tags for operator's convenient
+.It Ar default-q-type
+If clients do not specify queue type explicitly, this type will be used. One of: quorum, stream.
 .El
 .Pp
 Creates a virtual host.
 .Pp
 For example, this command instructs the RabbitMQ broker to create a new
 virtual host called
-.Qq test :
+.Qq project9_dev_18 :
 .Pp
-.Dl rabbitmqctl add_vhost test
+.Dl rabbitmqctl add_vhost project9_dev_18 --description 'Dev environment no. 18' --tags "dev,project9"
 .\" ------------------------------------------------------------------
 .It Cm clear_vhost_limits Op Fl p Ar vhost
 .Pp
@@ -1786,7 +1779,7 @@ virtual host called
 Sets virtual host limits.
 .Bl -tag -width Ds
 .It Ar definition
-The definition of the limits, as a JSON term.
+The definition of the limits, as a JSON document.
 In most shells you are very likely to need to quote this.
 .Pp
 Recognised limits are:
@@ -1822,6 +1815,79 @@ This command disables client connections in vhost
 .Qq qa_env :
 .sp
 .Dl rabbitmqctl set_vhost_limits -p qa_env '{"max-connections": 0}'
+.\" ------------------------------------------------------------------
+.It Cm set_user_limits Oc Ar username Oc Ar definition
+.Pp
+Sets user limits.
+.Bl -tag -width Ds
+.It Ar username
+The name of the user to apply limits to
+.It Ar definition
+The definition of the limits, as a JSON document.
+In most shells you are very likely to need to quote this.
+.Pp
+Recognised limits are:
+.Bl -bullet -compact
+.It
+max-connections
+.It
+max-channels
+.El
+.Pp
+Use a negative value to specify "no limit".
+.El
+.Pp
+For example, this command limits the max number of concurrent
+connections a user is allowed to open
+.Qq limited_user
+to 64:
+.sp
+.Dl rabbitmqctl set_user_limits limited_user '{"max-connections": 64}'
+.Pp
+This command limits the max number of channels a user is allowed to open
+on a connection
+.Qq limited_user
+to 16:
+.sp
+.Dl rabbitmqctl set_user_limits limited_user '{"max-channels": 16}'
+.Pp
+This command clears the max number of connections limit for user
+.Qq limited_user :
+.sp
+.Dl rabbitmqctl clear_user_limits limited_user 'max-connections'
+.Pp
+This command disables client connections for user
+.Qq limited_user :
+.sp
+.Dl rabbitmqctl set_user_limits limited_user '{"max-connections": 0}'
+.\" ------------------------------------------------------------------
+.It Cm clear_user_limits Oc Ar username Oc Ar limit
+.Pp
+Clears user limits.
+.Bl -tag -width Ds
+.It Ar username
+The name of the user to clear limits of
+.It Ar limit
+The name of the limit or "all" to clear all limits at once.
+.El
+.Pp
+Recognised limits are:
+.Bl -bullet -compact
+.It
+max-connections
+.It
+max-channels
+.El
+.Pp
+For example, this command clears max connection limits of user
+.Qq limited_user :
+.sp
+.Dl rabbitmqctl clear_user_limits limited_user 'max-connections'
+.Pp
+This command clears all limits of user
+.Qq limited_user :
+.sp
+.Dl rabbitmqctl clear_user_limits limited_user all
 .\" ------------------------------------------------------------------
 .It Cm trace_off Op Fl p Ar vhost
 .Bl -tag -width Ds
@@ -1916,7 +1982,7 @@ Values lower than 1.0 can be dangerous and should be used carefully.
 Sets log level in the running node
 .Pp
 Supported
-.Ar type
+.Ar log_level
 values are:
 .Bl -bullet -compact
 .It
@@ -1928,12 +1994,14 @@ warning
 .It
 error
 .It
+critical
+.It
 none
 .El
 .Pp
 Example:
 .Sp
-.Dl rabbitmqctl log_level debug
+.Dl rabbitmqctl set_log_level debug
 .\" ------------------------------------------------------------------
 .It Cm set_vm_memory_high_watermark Ar fraction
 .Bl -tag -width Ds
@@ -1978,6 +2046,10 @@ Enables a feature flag on the target node.
 Example:
 .Sp
 .Dl rabbitmqctl enable_feature_flag quorum_queue
+.Pp
+You can also enable all feature flags by specifying "all":
+.Sp
+.Dl rabbitmqctl enable_feature_flag "all"
 .\" ------------------------------------------------------------------
 .It Cm list_feature_flags Op Ar column ...
 .Pp
@@ -2435,6 +2507,7 @@ Reset stats database for all nodes in the cluster.
 .Xr rabbitmq-plugins 8 ,
 .Xr rabbitmq-server 8 ,
 .Xr rabbitmq-queues 8 ,
+.Xr rabbitmq-streams 8 ,
 .Xr rabbitmq-upgrade 8 ,
 .Xr rabbitmq-service 8 ,
 .Xr rabbitmq-env.conf 5 ,

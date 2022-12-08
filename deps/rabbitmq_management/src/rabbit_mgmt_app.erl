@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_app).
@@ -24,8 +24,7 @@
 
 -rabbit_boot_step({rabbit_management_load_definitions,
                    [{description, "Imports definition file at management.load_definitions"},
-                    {mfa,         {rabbit_mgmt_load_definitions, boot, []}},
-                    {enables,     empty_db_check}]}).
+                    {mfa,         {rabbit_mgmt_load_definitions, boot, []}}]}).
 
 start(_Type, _StartArgs) ->
     case application:get_env(rabbitmq_management_agent, disable_metrics_collector, false) of
@@ -48,12 +47,13 @@ stop(_State) ->
 %% about-to-disable apps from our new dispatcher.
 reset_dispatcher(IgnoreApps) ->
     unregister_all_contexts(),
-    start_configured_listener(IgnoreApps, false).
+    start_configured_listeners(IgnoreApps, false).
 
--spec start_configured_listener([atom()], boolean()) -> ok.
-start_configured_listener(IgnoreApps, NeedLogStartup) ->
-    [ start_listener(Listener, IgnoreApps, NeedLogStartup)
-      || Listener <- get_listeners_config() ].
+-spec start_configured_listeners([atom()], boolean()) -> ok.
+start_configured_listeners(IgnoreApps, NeedLogStartup) ->
+    [start_listener(Listener, IgnoreApps, NeedLogStartup)
+      || Listener <- get_listeners_config()],
+    ok.
 
 get_listeners_config() ->
     Listeners = case {has_configured_legacy_listener(),
@@ -117,31 +117,44 @@ has_configured_listener(Key) ->
     end.
 
 get_legacy_listener() ->
-    {ok, Listener} = application:get_env(rabbitmq_management, listener),
-    Listener.
+    {ok, Listener0} = application:get_env(rabbitmq_management, listener),
+    {ok, Listener1} = ensure_port(tcp, Listener0),
+    Listener1.
 
 get_tls_listener() ->
     {ok, Listener0} = application:get_env(rabbitmq_management, ssl_config),
+    {ok, Listener1} = ensure_port(tls, Listener0),
+    Port = proplists:get_value(port, Listener1),
      case proplists:get_value(cowboy_opts, Listener0) of
         undefined ->
-             [{ssl, true}, {ssl_opts, Listener0}];
+             [
+                 {port, Port},
+                 {ssl, true},
+                 {ssl_opts, Listener0}
+             ];
         CowboyOpts ->
-            Listener1 = lists:keydelete(cowboy_opts, 1, Listener0),
-            [{ssl, true}, {ssl_opts, Listener1}, {cowboy_opts, CowboyOpts}]
+            WithoutCowboyOpts = lists:keydelete(cowboy_opts, 1, Listener0),
+            [
+                {port, Port},
+                {ssl, true},
+                {ssl_opts, WithoutCowboyOpts},
+                {cowboy_opts, CowboyOpts}
+            ]
      end.
 
 get_tcp_listener() ->
-    application:get_env(rabbitmq_management, tcp_config, []).
+    Listener0 = application:get_env(rabbitmq_management, tcp_config, []),
+    {ok, Listener1} = ensure_port(tcp, Listener0),
+    Listener1.
 
-start_listener(Listener0, IgnoreApps, NeedLogStartup) ->
-    {Type, ContextName} = case is_tls(Listener0) of
+start_listener(Listener, IgnoreApps, NeedLogStartup) ->
+    {Type, ContextName} = case is_tls(Listener) of
         true  -> {tls, ?TLS_CONTEXT};
         false -> {tcp, ?TCP_CONTEXT}
     end,
-    {ok, Listener1} = ensure_port(Type, Listener0),
-    {ok, _} = register_context(ContextName, Listener1, IgnoreApps),
+    {ok, _} = register_context(ContextName, Listener, IgnoreApps),
     case NeedLogStartup of
-        true  -> log_startup(Type, Listener1);
+        true  -> log_startup(Type, Listener);
         false -> ok
     end,
     ok.
@@ -188,5 +201,5 @@ start() ->
     %% Modern TCP listener uses management.tcp.*.
     %% Legacy TCP (or TLS) listener uses management.listener.*.
     %% Modern TLS listener uses management.ssl.*
-    start_configured_listener([], true),
+    start_configured_listeners([], true),
     rabbit_mgmt_sup_sup:start_link().

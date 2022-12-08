@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_tracing_files).
@@ -37,7 +37,7 @@ full_path(Name0) ->
 %%--------------------------------------------------------------------
 
 file_info(Name) ->
-    Size = case file:read_file_info(full_path(Name)) of
+    Size = case file:read_file_info(full_path(Name), [raw]) of
                {ok, Info} ->
                    Info#file_info.size;
                {error, Error} ->

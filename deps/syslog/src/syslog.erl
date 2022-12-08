@@ -1,6 +1,6 @@
 %%%=============================================================================
 %%% Copyright 2011, Travelping GmbH <info@travelping.com>
-%%% Copyright 2013-2017, Tobias Schlager <schlagert@github.com>
+%%% Copyright 2013-2021, Tobias Schlager <schlagert@github.com>
 %%%
 %%% Permission to use, copy, modify, and/or distribute this software for any
 %%% purpose with or without fee is hereby granted, provided that the above
@@ -21,6 +21,10 @@
 %%%
 %%% The logging functions have the same name than the `error_logger' functions
 %%% making switching from one to another easy.
+%%%
+%%% There is no performance or safety penalty for using the official OTP 21
+%%% `logger' API instead of the `syslog' API. It is even highly recommended to
+%%% use the new OTP-built-in API.
 %%% @end
 %%%=============================================================================
 -module(syslog).
@@ -56,7 +60,7 @@
                     local5 | local6 | local7.
 
 -type severity() :: emergency | alert | critical | error | warning | notice |
-                    informational | debug | crash.
+                    info | informational | debug | crash.
 
 -type proc_name() :: atom() | pid() | string().
 
@@ -196,7 +200,11 @@ msg(Severity, Pid, SD, Fmt, Args) ->
 
 %%------------------------------------------------------------------------------
 %% @doc
-%% Change the log level to the given value.
+%% Change the log level to the given value. This function will also attempt to
+%% set the log level of the available {@link syslog_lager_backend}s, if any.
+%%
+%% This function will not change the level of `logger' handlers (OTP 21). To
+%% change the log level in OTP 21 and above, use the official `logger' API.
 %% @end
 %%------------------------------------------------------------------------------
 -spec set_log_level(severity()) -> ok | {error, term()}.
@@ -219,21 +227,28 @@ set_log_mode(Mode) -> syslog_logger:set_log_mode(Mode).
 %% @private
 %%------------------------------------------------------------------------------
 start(_StartType, _StartArgs) ->
-    ok = syslog_lib:ensure_error_logger(),
-    DisableTty = syslog_lib:get_property(disable_tty, true),
-    ok = iff(DisableTty, fun() -> error_logger:tty(false) end),
-    case supervisor:start_link(?MODULE, []) of
+    HasErrorLogger = syslog_lib:has_error_logger(),
+    case supervisor:start_link(?MODULE, [HasErrorLogger]) of
         {ok, Pid} ->
-            {ok, Pid};
+            case HasErrorLogger of
+                false -> %% OTP-21 and above
+                    ok = syslog_logger_h:add_handler(),
+                    {ok, Pid, {HasErrorLogger, false}};
+                true -> %% pre-OTP-21 or backward compatible mode
+                    DisableTty = syslog_lib:get_property(disable_tty, true),
+                    ok = iff(DisableTty, fun() -> error_logger:tty(false) end),
+                    {ok, Pid, {HasErrorLogger, DisableTty}}
+            end;
         Error ->
-            ok = iff(DisableTty, fun() -> error_logger:tty(true) end),
             Error
     end.
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-stop(_State) -> ok.
+stop({HasErrorLogger, TtyDisabled}) ->
+    iff(TtyDisabled, fun() -> error_logger:tty(true) end),
+    iff(not HasErrorLogger, fun() -> syslog_logger_h:remove_handler() end).
 
 %%%=============================================================================
 %%% supervisor callbacks
@@ -242,9 +257,9 @@ stop(_State) -> ok.
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-init([]) ->
-    Specs = [server(syslog_logger), server(syslog_monitor)],
-    {ok, {{one_for_one, 5, 10}, Specs}}.
+init([HasErrorLogger]) ->
+    {ok, {{one_for_one, 5, 10}, [server(syslog_logger, []),
+                                 server(syslog_monitor, [HasErrorLogger])]}}.
 
 %%%=============================================================================
 %%% internal functions
@@ -253,12 +268,7 @@ init([]) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-server(M) -> spec(M, [M]).
-
-%%------------------------------------------------------------------------------
-%% @private
-%%------------------------------------------------------------------------------
-spec(M, Ms) -> {M, {M, start_link, []}, transient, brutal_kill, worker, Ms}.
+server(M, As) -> {M, {M, start_link, As}, permanent, brutal_kill, worker, [M]}.
 
 %%------------------------------------------------------------------------------
 %% @private

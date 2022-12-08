@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_amqqueue_process).
@@ -110,6 +110,7 @@
          single_active_consumer_tag,
          consumers,
          consumer_utilisation,
+         consumer_capacity,
          memory,
          slave_pids,
          synchronised_slave_pids,
@@ -254,7 +255,7 @@ recovery_barrier(BarrierPid) ->
 
 -spec init_with_backing_queue_state
         (amqqueue:amqqueue(), atom(), tuple(), any(),
-         [rabbit_types:delivery()], pmon:pmon(), maps:map()) ->
+         [rabbit_types:delivery()], pmon:pmon(), map()) ->
             #q{}.
 
 init_with_backing_queue_state(Q, BQ, BQS,
@@ -422,21 +423,12 @@ process_args_policy(State = #q{q                   = Q,
          {<<"max-length">>,              fun res_min/2, fun init_max_length/2},
          {<<"max-length-bytes">>,        fun res_min/2, fun init_max_bytes/2},
          {<<"overflow">>,                fun res_arg/2, fun init_overflow/2},
-         {<<"queue-mode">>,              fun res_arg/2, fun init_queue_mode/2}],
+         {<<"queue-mode">>,              fun res_arg/2, fun init_queue_mode/2},
+         {<<"queue-version">>,           fun res_arg/2, fun init_queue_version/2}],
       drop_expired_msgs(
          lists:foldl(fun({Name, Resolve, Fun}, StateN) ->
-                             Fun(args_policy_lookup(Name, Resolve, Q), StateN)
+                             Fun(rabbit_queue_type_util:args_policy_lookup(Name, Resolve, Q), StateN)
                      end, State#q{args_policy_version = N + 1}, ArgsTable)).
-
-args_policy_lookup(Name, Resolve, Q) ->
-    Args = amqqueue:get_arguments(Q),
-    AName = <<"x-", Name/binary>>,
-    case {rabbit_policy:get(Name, Q), rabbit_misc:table_lookup(Args, AName)} of
-        {undefined, undefined}       -> undefined;
-        {undefined, {_Type, Val}}    -> Val;
-        {Val,       undefined}       -> Val;
-        {PolVal,    {_Type, ArgVal}} -> Resolve(PolVal, ArgVal)
-    end.
 
 res_arg(_PolVal, ArgVal) -> ArgVal.
 res_min(PolVal, ArgVal)  -> erlang:min(PolVal, ArgVal).
@@ -490,6 +482,19 @@ init_queue_mode(Mode, State = #q {backing_queue = BQ,
     BQS1 = BQ:set_queue_mode(binary_to_existing_atom(Mode, utf8), BQS),
     State#q{backing_queue_state = BQS1}.
 
+init_queue_version(Version0, State = #q {backing_queue = BQ,
+                                         backing_queue_state = BQS}) ->
+    %% When the version is undefined we use the default version 1.
+    %% We want to BQ:set_queue_version in all cases because a v2
+    %% policy might have been deleted, for example, and we want
+    %% the queue to go back to v1.
+    Version = case Version0 of
+        undefined -> rabbit_misc:get_env(rabbit, classic_queue_default_version, 1);
+        _ -> Version0
+    end,
+    BQS1 = BQ:set_queue_version(Version, BQS),
+    State#q{backing_queue_state = BQS1}.
+
 reply(Reply, NewState) ->
     {NewState1, Timeout} = next_state(NewState),
     {reply, Reply, ensure_stats_timer(ensure_rate_timer(NewState1)), Timeout}.
@@ -498,12 +503,13 @@ noreply(NewState) ->
     {NewState1, Timeout} = next_state(NewState),
     {noreply, ensure_stats_timer(ensure_rate_timer(NewState1)), Timeout}.
 
-next_state(State = #q{backing_queue       = BQ,
+next_state(State = #q{q = Q,
+                      backing_queue       = BQ,
                       backing_queue_state = BQS,
                       msg_id_to_channel   = MTC}) ->
     assert_invariant(State),
     {MsgIds, BQS1} = BQ:drain_confirmed(BQS),
-    MTC1 = confirm_messages(MsgIds, MTC),
+    MTC1 = confirm_messages(MsgIds, MTC, amqqueue:get_name(Q)),
     State1 = State#q{backing_queue_state = BQS1, msg_id_to_channel = MTC1},
     case BQ:needs_timeout(BQS1) of
         false -> {stop_sync_timer(State1),   hibernate     };
@@ -578,17 +584,17 @@ assert_invariant(State = #q{consumers = Consumers, single_active_consumer_on = f
 
 is_empty(#q{backing_queue = BQ, backing_queue_state = BQS}) -> BQ:is_empty(BQS).
 
-maybe_send_drained(WasEmpty, State) ->
+maybe_send_drained(WasEmpty, #q{q = Q} = State) ->
     case (not WasEmpty) andalso is_empty(State) of
         true  -> notify_decorators(State),
-                 rabbit_queue_consumers:send_drained();
+                 rabbit_queue_consumers:send_drained(amqqueue:get_name(Q));
         false -> ok
     end,
     State.
 
-confirm_messages([], MTC) ->
+confirm_messages([], MTC, _QName) ->
     MTC;
-confirm_messages(MsgIds, MTC) ->
+confirm_messages(MsgIds, MTC, QName) ->
     {CMs, MTC1} =
         lists:foldl(
           fun(MsgId, {CMs, MTC0}) ->
@@ -608,7 +614,7 @@ confirm_messages(MsgIds, MTC) ->
           end, {#{}, MTC}, MsgIds),
     maps:fold(
         fun(Pid, MsgSeqNos, _) ->
-            rabbit_misc:confirm_to_sender(Pid, MsgSeqNos)
+            confirm_to_sender(Pid, QName, MsgSeqNos)
         end,
         ok,
         CMs),
@@ -629,8 +635,9 @@ send_or_record_confirm(#delivery{confirm    = true,
     {eventually, State#q{msg_id_to_channel = MTC1}};
 send_or_record_confirm(#delivery{confirm    = true,
                                  sender     = SenderPid,
-                                 msg_seq_no = MsgSeqNo}, State) ->
-    rabbit_misc:confirm_to_sender(SenderPid, [MsgSeqNo]),
+                                 msg_seq_no = MsgSeqNo},
+                       #q{q = Q} = State) ->
+    confirm_to_sender(SenderPid, amqqueue:get_name(Q), [MsgSeqNo]),
     {immediately, State}.
 
 %% This feature was used by `rabbit_amqqueue_process` and
@@ -648,9 +655,9 @@ send_mandatory(#delivery{mandatory  = true,
 discard(#delivery{confirm = Confirm,
                   sender  = SenderPid,
                   flow    = Flow,
-                  message = #basic_message{id = MsgId}}, BQ, BQS, MTC) ->
+                  message = #basic_message{id = MsgId}}, BQ, BQS, MTC, QName) ->
     MTC1 = case Confirm of
-               true  -> confirm_messages([MsgId], MTC);
+               true  -> confirm_messages([MsgId], MTC, QName);
                false -> MTC
            end,
     BQS1 = BQ:discard(MsgId, SenderPid, Flow, BQS),
@@ -679,7 +686,8 @@ run_message_queue(ActiveConsumersChanged, State) ->
 attempt_delivery(Delivery = #delivery{sender  = SenderPid,
                                       flow    = Flow,
                                       message = Message},
-                 Props, Delivered, State = #q{backing_queue       = BQ,
+                 Props, Delivered, State = #q{q                   = Q,
+                                              backing_queue       = BQ,
                                               backing_queue_state = BQS,
                                               msg_id_to_channel   = MTC}) ->
     case rabbit_queue_consumers:deliver(
@@ -689,7 +697,7 @@ attempt_delivery(Delivery = #delivery{sender  = SenderPid,
                                 Message, Props, SenderPid, Flow, BQS),
                           {{Message, Delivered, AckTag}, {BQS1, MTC}};
                (false) -> {{Message, Delivered, undefined},
-                           discard(Delivery, BQ, BQS, MTC)}
+                           discard(Delivery, BQ, BQS, MTC, amqqueue:get_name(Q))}
            end, qname(State), State#q.consumers, State#q.single_active_consumer_on, State#q.active_consumer) of
         {delivered, ActiveConsumersChanged, {BQS1, MTC1}, Consumers} ->
             {delivered,   maybe_notify_decorators(
@@ -720,10 +728,14 @@ maybe_deliver_or_enqueue(Delivery = #delivery{message = Message},
             with_dlx(
               DLX,
               fun (X) ->
+                      rabbit_global_counters:messages_dead_lettered(maxlen, rabbit_classic_queue,
+                                                                    at_most_once, 1),
                       QName = qname(State),
                       rabbit_dead_letter:publish(Message, maxlen, X, RK, QName)
               end,
-              fun () -> ok end),
+              fun () -> rabbit_global_counters:messages_dead_lettered(maxlen, rabbit_classic_queue,
+                                                                      disabled, 1)
+              end),
             %% Drop publish and nack to publisher
             send_reject_publish(Delivery, Delivered, State);
         _ ->
@@ -745,7 +757,7 @@ deliver_or_enqueue(Delivery = #delivery{message = Message,
                                         sender  = SenderPid,
                                         flow    = Flow},
                    Delivered,
-                   State = #q{backing_queue = BQ}) ->
+                   State = #q{q = Q, backing_queue = BQ}) ->
     {Confirm, State1} = send_or_record_confirm(Delivery, State),
     Props = message_properties(Message, Confirm, State1),
     case attempt_delivery(Delivery, Props, Delivered, State1) of
@@ -755,7 +767,9 @@ deliver_or_enqueue(Delivery = #delivery{message = Message,
         {undelivered, State2 = #q{ttl = 0, dlx = undefined,
                                   backing_queue_state = BQS,
                                   msg_id_to_channel   = MTC}} ->
-            {BQS1, MTC1} = discard(Delivery, BQ, BQS, MTC),
+            rabbit_global_counters:messages_dead_lettered(expired, rabbit_classic_queue,
+                                                          disabled, 1),
+            {BQS1, MTC1} = discard(Delivery, BQ, BQS, MTC, amqqueue:get_name(Q)),
             State2#q{backing_queue_state = BQS1, msg_id_to_channel = MTC1};
         {undelivered, State2 = #q{backing_queue_state = BQS}} ->
 
@@ -796,6 +810,9 @@ maybe_drop_head(AlreadyDropped, State = #q{backing_queue       = BQ,
                               State#q.dlx,
                               fun (X) -> dead_letter_maxlen_msg(X, State) end,
                               fun () ->
+                                      rabbit_global_counters:messages_dead_lettered(maxlen,
+                                                                                    rabbit_classic_queue,
+                                                                                    disabled, 1),
                                       {_, BQS1} = BQ:drop(false, BQS),
                                       State#q{backing_queue_state = BQS1}
                               end));
@@ -809,10 +826,12 @@ send_reject_publish(#delivery{confirm = true,
                               msg_seq_no = MsgSeqNo,
                               message = #basic_message{id = MsgId}},
                       _Delivered,
-                      State = #q{ backing_queue = BQ,
+                      State = #q{ q = Q,
+                                  backing_queue = BQ,
                                   backing_queue_state = BQS,
                                   msg_id_to_channel   = MTC}) ->
-    gen_server2:cast(SenderPid, {reject_publish, MsgSeqNo, self()}),
+    ok = rabbit_classic_queue:send_rejection(SenderPid,
+                                             amqqueue:get_name(Q), MsgSeqNo),
 
     MTC1 = maps:remove(MsgId, MTC),
     BQS1 = BQ:discard(MsgId, SenderPid, Flow, BQS),
@@ -890,7 +909,7 @@ handle_ch_down(DownPid, State = #q{consumers                 = Consumers,
     %% A rabbit_channel process died. Here credit_flow will take care
     %% of cleaning up the rabbit_amqqueue_process process dictionary
     %% with regards to the credit we were tracking for the channel
-    %% process. See handle_cast({deliver, Deliver}, State) in this
+    %% process. See handle_cast({deliver, Deliver, ...}, State) in this
     %% module. In that cast function we process deliveries from the
     %% channel, which means we credit_flow:ack/1 said
     %% messages. credit_flow:ack'ing messages means we are increasing
@@ -1002,11 +1021,18 @@ drop_expired_msgs(State) ->
 drop_expired_msgs(Now, State = #q{backing_queue_state = BQS,
                                   backing_queue       = BQ }) ->
     ExpirePred = fun (#message_properties{expiry = Exp}) -> Now >= Exp end,
+    ExpirePredIncrement = fun(Properties) ->
+                                  ExpirePred(Properties) andalso
+                                  rabbit_global_counters:messages_dead_lettered(expired,
+                                                                                rabbit_classic_queue,
+                                                                                disabled,
+                                                                                1) =:= ok
+                          end,
     {Props, State1} =
         with_dlx(
           State#q.dlx,
           fun (X) -> dead_letter_expired_msgs(ExpirePred, X, State) end,
-          fun () -> {Next, BQS1} = BQ:dropwhile(ExpirePred, BQS),
+          fun () -> {Next, BQS1} = BQ:dropwhile(ExpirePredIncrement, BQS),
                     {Next, State#q{backing_queue_state = BQS1}} end),
     ensure_ttl_timer(case Props of
                          undefined                         -> undefined;
@@ -1048,6 +1074,8 @@ dead_letter_msgs(Fun, Reason, X, State = #q{dlx_routing_key     = RK,
     QName = qname(State),
     {Res, Acks1, BQS1} =
         Fun(fun (Msg, AckTag, Acks) ->
+                    rabbit_global_counters:messages_dead_lettered(Reason, rabbit_classic_queue,
+                                                                  at_most_once, 1),
                     rabbit_dead_letter:publish(Msg, Reason, X, RK, QName),
                     [AckTag | Acks]
             end, [], BQS),
@@ -1123,35 +1151,49 @@ i(messages, State) ->
                                           messages_unacknowledged]]);
 i(consumers, _) ->
     rabbit_queue_consumers:count();
-i(consumer_utilisation, #q{consumers = Consumers}) ->
+i(consumer_utilisation, State) ->
+    i(consumer_capacity, State);
+i(consumer_capacity, #q{consumers = Consumers}) ->
     case rabbit_queue_consumers:count() of
-        0 -> '';
-        _ -> rabbit_queue_consumers:utilisation(Consumers)
+        0 -> 0;
+        _ -> rabbit_queue_consumers:capacity(Consumers)
     end;
 i(memory, _) ->
     {memory, M} = process_info(self(), memory),
     M;
 i(slave_pids, #q{q = Q0}) ->
     Name = amqqueue:get_name(Q0),
-    {ok, Q} = rabbit_amqqueue:lookup(Name),
-    case rabbit_mirror_queue_misc:is_mirrored(Q) of
-        false -> '';
-        true  -> amqqueue:get_slave_pids(Q)
+    case rabbit_amqqueue:lookup(Name) of
+        {ok, Q} ->
+            case rabbit_mirror_queue_misc:is_mirrored(Q) of
+                false -> '';
+                true  -> amqqueue:get_slave_pids(Q)
+            end;
+        {error, not_found} ->
+            ''
     end;
 i(synchronised_slave_pids, #q{q = Q0}) ->
     Name = amqqueue:get_name(Q0),
-    {ok, Q} = rabbit_amqqueue:lookup(Name),
-    case rabbit_mirror_queue_misc:is_mirrored(Q) of
-        false -> '';
-        true  -> amqqueue:get_sync_slave_pids(Q)
+    case rabbit_amqqueue:lookup(Name) of
+        {ok, Q} ->
+            case rabbit_mirror_queue_misc:is_mirrored(Q) of
+                false -> '';
+                true  -> amqqueue:get_sync_slave_pids(Q)
+            end;
+        {error, not_found} ->
+            ''
     end;
 i(recoverable_slaves, #q{q = Q0}) ->
     Name = amqqueue:get_name(Q0),
     Durable = amqqueue:is_durable(Q0),
-    {ok, Q} = rabbit_amqqueue:lookup(Name),
-    case Durable andalso rabbit_mirror_queue_misc:is_mirrored(Q) of
-        false -> '';
-        true  -> amqqueue:get_recoverable_slaves(Q)
+    case rabbit_amqqueue:lookup(Name) of
+        {ok, Q} ->
+            case Durable andalso rabbit_mirror_queue_misc:is_mirrored(Q) of
+                false -> '';
+                true  -> amqqueue:get_recoverable_slaves(Q)
+            end;
+        {error, not_found} ->
+            ''
     end;
 i(state, #q{status = running}) -> credit_flow:state();
 i(state, #q{status = State})   -> State;
@@ -1172,13 +1214,15 @@ emit_stats(State) ->
 
 emit_stats(State, Extra) ->
     ExtraKs = [K || {K, _} <- Extra],
-    [{messages_ready, MR}, {messages_unacknowledged, MU}, {messages, M},
-     {reductions, R}, {name, Name} | Infos] = All
-	= [{K, V} || {K, V} <- infos(statistics_keys(), State),
-		     not lists:member(K, ExtraKs)],
+    [{messages_ready, MR},
+     {messages_unacknowledged, MU},
+     {messages, M},
+     {reductions, R},
+     {name, Name} | Infos]
+    = [{K, V} || {K, V} <- infos(statistics_keys(), State),
+                 not lists:member(K, ExtraKs)],
     rabbit_core_metrics:queue_stats(Name, Extra ++ Infos),
-    rabbit_core_metrics:queue_stats(Name, MR, MU, M, R),
-    rabbit_event:notify(queue_stats, Extra ++ All).
+    rabbit_core_metrics:queue_stats(Name, MR, MU, M, R).
 
 emit_consumer_created(ChPid, CTag, Exclusive, AckRequired, QName,
                       PrefetchCount, Args, Ref, ActingUser) ->
@@ -1273,7 +1317,7 @@ handle_call({init, Recover}, From, State) ->
     end;
 
 handle_call(info, _From, State) ->
-    reply(infos(info_keys(), State), State);
+    reply({ok, infos(info_keys(), State)}, State);
 
 handle_call({info, Items}, _From, State) ->
     try
@@ -1318,7 +1362,8 @@ handle_call({basic_get, ChPid, NoAck, LimiterPid}, _From,
 
 handle_call({basic_consume, NoAck, ChPid, LimiterPid, LimiterActive,
              PrefetchCount, ConsumerTag, ExclusiveConsume, Args, OkMsg, ActingUser},
-            _From, State = #q{consumers             = Consumers,
+            _From, State = #q{q = Q,
+                              consumers = Consumers,
                               active_consumer = Holder,
                               single_active_consumer_on = SingleActiveConsumerOn}) ->
     ConsumerRegistration = case SingleActiveConsumerOn of
@@ -1327,11 +1372,12 @@ handle_call({basic_consume, NoAck, ChPid, LimiterPid, LimiterActive,
                 true  ->
                     {error, reply({error, exclusive_consume_unavailable}, State)};
                 false ->
-                  Consumers1 = rabbit_queue_consumers:add(
-                    ChPid, ConsumerTag, NoAck,
-                    LimiterPid, LimiterActive,
-                    PrefetchCount, Args, is_empty(State),
-                    ActingUser, Consumers),
+                    Consumers1 = rabbit_queue_consumers:add(
+                                   amqqueue:get_name(Q),
+                                   ChPid, ConsumerTag, NoAck,
+                                   LimiterPid, LimiterActive,
+                                   PrefetchCount, Args, is_empty(State),
+                                   ActingUser, Consumers),
 
                   case Holder of
                       none ->
@@ -1349,6 +1395,7 @@ handle_call({basic_consume, NoAck, ChPid, LimiterPid, LimiterActive,
               in_use -> {error, reply({error, exclusive_consume_unavailable}, State)};
               ok     ->
                     Consumers1 = rabbit_queue_consumers:add(
+                                   amqqueue:get_name(Q),
                                    ChPid, ConsumerTag, NoAck,
                                    LimiterPid, LimiterActive,
                                    PrefetchCount, Args, is_empty(State),
@@ -1527,9 +1574,9 @@ handle_cast({run_backing_queue, Mod, Fun},
     noreply(State#q{backing_queue_state = BQ:invoke(Mod, Fun, BQS)});
 
 handle_cast({deliver,
-                Delivery = #delivery{sender = Sender,
-                                     flow   = Flow},
-                SlaveWhenPublished},
+             Delivery = #delivery{sender = Sender,
+                                  flow   = Flow},
+             SlaveWhenPublished},
             State = #q{senders = Senders}) ->
     Senders1 = case Flow of
     %% In both credit_flow:ack/1 we are acking messages to the channel
@@ -1547,7 +1594,7 @@ handle_cast({deliver,
     noreply(maybe_deliver_or_enqueue(Delivery, SlaveWhenPublished, State1));
 %% [0] The second ack is since the channel thought we were a mirror at
 %% the time it published this message, so it used two credits (see
-%% rabbit_amqqueue:deliver/2).
+%% rabbit_queue_type:deliver/2).
 
 handle_cast({ack, AckTags, ChPid}, State) ->
     noreply(ack(AckTags, ChPid, State));
@@ -1563,7 +1610,9 @@ handle_cast({reject, false, AckTags, ChPid}, State) ->
                                                dead_letter_rejected_msgs(
                                                  AckTags, X, State1)
                                        end) end,
-              fun () -> ack(AckTags, ChPid, State) end));
+              fun () -> rabbit_global_counters:messages_dead_lettered(rejected, rabbit_classic_queue,
+                                                                      disabled, length(AckTags)),
+                        ack(AckTags, ChPid, State) end));
 
 handle_cast({delete_exclusive, ConnPid}, State) ->
     log_delete_exclusive(ConnPid, State),
@@ -1582,6 +1631,10 @@ handle_cast({notify_sent, ChPid, Credit}, State) ->
 
 handle_cast({activate_limit, ChPid}, State) ->
     noreply(possibly_unblock(rabbit_queue_consumers:activate_limit_fun(),
+                             ChPid, State));
+
+handle_cast({deactivate_limit, ChPid}, State) ->
+    noreply(possibly_unblock(rabbit_queue_consumers:deactivate_limit_fun(),
                              ChPid, State));
 
 handle_cast({set_ram_duration_target, Duration},
@@ -1606,11 +1659,13 @@ handle_cast(update_mirroring, State = #q{q = Q,
 handle_cast({credit, ChPid, CTag, Credit, Drain},
             State = #q{consumers           = Consumers,
                        backing_queue       = BQ,
-                       backing_queue_state = BQS}) ->
+                       backing_queue_state = BQS,
+                       q = Q}) ->
     Len = BQ:len(BQS),
-    rabbit_channel:send_credit_reply(ChPid, Len),
+    rabbit_classic_queue:send_credit_reply(ChPid, amqqueue:get_name(Q), Len),
     noreply(
-      case rabbit_queue_consumers:credit(Len == 0, Credit, Drain, ChPid, CTag,
+      case rabbit_queue_consumers:credit(amqqueue:get_name(Q),
+                                         Len == 0, Credit, Drain, ChPid, CTag,
                                          Consumers) of
           unchanged               -> State;
           {unblocked, Consumers1} -> State1 = State#q{consumers = Consumers1},
@@ -1621,23 +1676,16 @@ handle_cast({credit, ChPid, CTag, Credit, Drain},
 % This event is necessary for the stats timer to be initialized with
 % the correct values once the management agent has started
 handle_cast({force_event_refresh, Ref},
-            State = #q{consumers       = Consumers,
-                       active_consumer = Holder}) ->
+            State = #q{consumers = Consumers}) ->
     rabbit_event:notify(queue_created, infos(?CREATION_EVENT_KEYS, State), Ref),
     QName = qname(State),
     AllConsumers = rabbit_queue_consumers:all(Consumers),
-    case Holder of
-        none ->
-            [emit_consumer_created(
-               Ch, CTag, false, AckRequired, QName, Prefetch,
-               Args, Ref, ActingUser) ||
-                {Ch, CTag, AckRequired, Prefetch, _, _, Args, ActingUser}
-                    <- AllConsumers];
-        {Ch, CTag} ->
-            [{Ch, CTag, AckRequired, Prefetch, _, _, Args, ActingUser}] = AllConsumers,
-            emit_consumer_created(
-              Ch, CTag, true, AckRequired, QName, Prefetch, Args, Ref, ActingUser)
-    end,
+    rabbit_log:debug("Queue ~s forced to re-emit events, consumers: ~p", [rabbit_misc:rs(QName), AllConsumers]),
+    [emit_consumer_created(
+       Ch, CTag, ActiveOrExclusive, AckRequired, QName, Prefetch,
+       Args, Ref, ActingUser) ||
+        {Ch, CTag, AckRequired, Prefetch, ActiveOrExclusive, _, Args, ActingUser}
+            <- AllConsumers],
     noreply(rabbit_event:init_stats_timer(State, #q.stats_timer));
 
 handle_cast(notify_decorators, State) ->
@@ -1754,8 +1802,7 @@ handle_pre_hibernate(State = #q{backing_queue = BQ,
       State, #q.stats_timer,
       fun () -> emit_stats(State,
                            [{idle_since,
-                             os:system_time(milli_seconds)},
-                            {consumer_utilisation, ''}])
+                             os:system_time(milli_seconds)}])
                 end),
     State1 = rabbit_event:stop_stats_timer(State#q{backing_queue_state = BQS3},
                                            #q.stats_timer),
@@ -1846,3 +1893,8 @@ update_ha_mode(State) ->
     {ok, Q} = rabbit_amqqueue:lookup(qname(State)),
     ok = rabbit_mirror_queue_misc:update_mirrors(Q),
     State.
+
+confirm_to_sender(Pid, QName, MsgSeqNos) ->
+    rabbit_classic_queue:confirm_to_sender(Pid, QName, MsgSeqNos).
+
+

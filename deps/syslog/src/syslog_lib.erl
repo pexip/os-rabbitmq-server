@@ -23,6 +23,7 @@
 %% API
 -export([get_hostname/1,
          get_name/0,
+         get_name_metdata_key/0,
          get_property/2,
          get_property/3,
          get_pid/1,
@@ -31,12 +32,16 @@
          truncate/2,
          format_rfc3164_date/1,
          format_rfc5424_date/1,
-         ensure_error_logger/0,
+         get_structured_data/3,
+         has_error_logger/0,
          to_type/2]).
 
 -define(GET_ENV(Property), application:get_env(syslog, Property)).
 
 -include_lib("kernel/include/inet.hrl").
+
+%% calendar:system_time_to_universal_time/2
+-dialyzer({no_missing_calls, get_utc_datetime/1}).
 
 %%%=============================================================================
 %%% API
@@ -89,8 +94,28 @@ get_hostname(long, HostPart) when is_list(HostPart) ->
 -spec get_name() -> binary().
 get_name() ->
     case ?GET_ENV(app_name) of
-        {ok, Name} -> to_type(binary, Name);
-        undefined  -> get_name_from_node(node())
+        {ok, Name} ->
+            to_type(binary, Name);
+        undefined ->
+            case ?GET_ENV(appname) of
+                {ok, Name} -> to_type(binary, Name);
+                undefined  -> get_name_from_node(node())
+            end
+    end.
+
+%%------------------------------------------------------------------------------
+%% @doc
+%% Returns the key that should be used to lookup a message metadata value to
+%% place in the `APP-NAME' field. If a message metadata field contains such a
+%% mapping this will have higher precendence over names configured/returned by
+%% {@link get_name/0}. `undefined' is used as the invalid/unconfigured value.
+%% @end
+%%------------------------------------------------------------------------------
+-spec get_name_metdata_key() -> atom() | undefined.
+get_name_metdata_key() ->
+    case ?GET_ENV(appname_from_metadata) of
+        {ok, Value} when is_atom(Value) -> Value;
+        _                               -> undefined
     end.
 
 %%------------------------------------------------------------------------------
@@ -135,10 +160,16 @@ get_pid(N) ->
 
 %%------------------------------------------------------------------------------
 %% @doc
-%% Returns a syslog datetime object (UTC) with microsecond resolution.
+%% Returns a syslog datetime object (UTC) with microsecond resolution from
+%% either an Erlang timestamp or the system time in microseconds.
 %% @end
 %%------------------------------------------------------------------------------
--spec get_utc_datetime(erlang:timestamp()) -> syslog:datetime().
+-spec get_utc_datetime(erlang:timestamp() | pos_integer()) -> syslog:datetime().
+get_utc_datetime(SystemTime) when is_integer(SystemTime), SystemTime > 0 ->
+    MilliSecs = SystemTime div 1000,
+    MicroSecs = SystemTime rem 1000000,
+    Datetime = calendar:system_time_to_universal_time(MilliSecs, millisecond),
+    {Datetime, MicroSecs};
 get_utc_datetime({MegaSecs, Secs, MicroSecs}) ->
     Datetime = calendar:now_to_universal_time({MegaSecs, Secs, 0}),
     {Datetime, MicroSecs}.
@@ -201,22 +232,31 @@ format_rfc3164_date_({{_, Mo, D}, {H, Mi, S}}) ->
 
 %%------------------------------------------------------------------------------
 %% @doc
-%% Start the `error_logger' process if not running and block the calling process
-%% until the `error_logger' is started and registered by name.
+%% Returns structured data from a list or map of metadata (e.g. metadata
+%% provided in `lager' messages or `logger' events).
 %% @end
 %%------------------------------------------------------------------------------
--spec ensure_error_logger() -> ok | {error, term()}.
-ensure_error_logger() ->
+-spec get_structured_data(map() | list(), syslog:sd_id(), [atom()]) ->
+                                 [syslog:sd_element()].
+get_structured_data(Metadata, SDId, MDKeys) when is_map(Metadata) ->
+    get_structured_data(maps:to_list(Metadata), SDId, MDKeys);
+get_structured_data(Metadata, SDId, MDKeys) when is_list(Metadata) ->
+    case [D || D = {K, _} <- Metadata, lists:member(K, MDKeys)] of
+        []       -> [];
+        SDParams -> [{SDId, SDParams}]
+    end.
+
+%%------------------------------------------------------------------------------
+%% @doc
+%% Determine whether `error_logger' is available (e.g. we are running a pre
+%% OTP-21 release) or not.
+%% @end
+%%------------------------------------------------------------------------------
+-spec has_error_logger() -> boolean().
+has_error_logger() ->
     case whereis(error_logger) of
-        P when is_pid(P) ->
-            ok;
-        undefined ->
-            %% See error_logger:add_report_handler/3
-            wait_for_error_logger(
-              logger:add_handler(
-                error_logger,
-                error_logger,
-                #{level => info, filter_default => log}))
+        P when is_pid(P) -> true;
+        undefined        -> false
     end.
 
 %%------------------------------------------------------------------------------
@@ -238,18 +278,6 @@ to_type(Type, V) when is_binary(V)     -> to_type(Type, binary_to_list(V)).
 %%%=============================================================================
 %%% internal functions
 %%%=============================================================================
-
-%%------------------------------------------------------------------------------
-%% @private
-%%------------------------------------------------------------------------------
-wait_for_error_logger(ok) ->
-    try gen_event:which_handlers(error_logger) of
-        L when is_list(L) -> ok
-    catch
-        exit:noproc -> wait_for_error_logger(timer:sleep(100))
-    end;
-wait_for_error_logger(Error) ->
-    Error.
 
 %%------------------------------------------------------------------------------
 %% @private

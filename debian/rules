@@ -42,8 +42,6 @@ override_dh_auto_install:
 
 	install -p -D -m 0755 scripts/rabbitmq-server.ocf \
 		$(DEB_DESTDIR)$(PREFIX)/lib/ocf/resource.d/rabbitmq/rabbitmq-server
-	install -p -D -m 0755 scripts/rabbitmq-server-ha.ocf \
-		$(DEB_DESTDIR)$(PREFIX)/lib/ocf/resource.d/rabbitmq/rabbitmq-server-ha
 
 	# Unlocalify
 #	mkdir -p $(DEB_DESTDIR)$(PREFIX)/lib/rabbitmq/bin
@@ -63,12 +61,6 @@ override_dh_install:
 override_dh_auto_clean:
 	rm -f plugins-src/rabbitmq-server plugins/README
 	#dh_auto_clean
-
-#override_dh_link:
-#	dh_link
-#	mv $(CURDIR)/debian/rabbitmq-server/usr/sbin/rabbitmqctl $(CURDIR)/debian/rabbitmq-server/usr/sbin/rabbitmqctl-real
-#	cp $(CURDIR)/debian/rabbitmq-debian-wrapper $(CURDIR)/debian/rabbitmq-server/usr/sbin/rabbitmqctl
-#	ln -s rabbitmqctl $(CURDIR)/debian/rabbitmq-server/usr/lib/rabbitmq/bin/rabbitmqctl-real
 
 override_dh_python3:
 	dh_python3 --shebang=/usr/bin/python3
