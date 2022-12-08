@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_overview).
@@ -49,8 +49,9 @@ to_json(ReqData, Context = #context{user = User = #user{tags = Tags}}) ->
                  {cluster_name,              rabbit_nodes:cluster_name()},
                  {erlang_version,            erlang_version()},
                  {erlang_full_version,       erlang_full_version()},
-                 {disable_stats,             rabbit_mgmt_util:disable_stats(ReqData)},
-                 {enable_queue_totals,       rabbit_mgmt_util:enable_queue_totals(ReqData)}],
+                 {release_series_support_status, rabbit_release_series:readable_support_status()},
+                 {disable_stats,                 rabbit_mgmt_util:disable_stats(ReqData)},
+                 {enable_queue_totals,           rabbit_mgmt_util:enable_queue_totals(ReqData)}],
     try
         case rabbit_mgmt_util:disable_stats(ReqData) of
             false ->

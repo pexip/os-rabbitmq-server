@@ -2,20 +2,21 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_basic).
--include("rabbit.hrl").
--include("rabbit_framing.hrl").
+-include_lib("rabbit_common/include/rabbit.hrl").
+-include_lib("rabbit_common/include/rabbit_framing.hrl").
 
 -export([publish/4, publish/5, publish/1,
-         message/3, message/4, properties/1, prepend_table_header/3,
+         message/3, message_no_id/3, message/4, properties/1, prepend_table_header/3,
          extract_headers/1, extract_timestamp/1, map_headers/2, delivery/4,
          header_routes/1, parse_expiration/1, header/2, header/3]).
 -export([build_content/2, from_content/1, msg_size/1,
          maybe_gc_large_msg/1, maybe_gc_large_msg/2]).
--export([add_header/4]).
+-export([add_header/4,
+         peek_fmt_message/1]).
 
 %%----------------------------------------------------------------------------
 
@@ -68,7 +69,8 @@ publish(Delivery = #delivery{
 
 publish(X, Delivery) ->
     Qs = rabbit_amqqueue:lookup(rabbit_exchange:route(X, Delivery)),
-    rabbit_amqqueue:deliver(Qs, Delivery).
+    _ = rabbit_queue_type:deliver(Qs, Delivery, stateless),
+    ok.
 
 -spec delivery
         (boolean(), boolean(), rabbit_types:message(), undefined | integer()) ->
@@ -128,19 +130,17 @@ strip_header(#content{properties = Props = #'P_basic'{headers = Headers}}
         (rabbit_exchange:name(), rabbit_router:routing_key(),
          rabbit_types:decoded_content()) ->
             rabbit_types:ok_or_error2(rabbit_types:message(), any()).
+message(XName, RoutingKey, Content) ->
+    make_message(XName, RoutingKey, Content, rabbit_guid:gen()).
 
-message(XName, RoutingKey, #content{properties = Props} = DecodedContent) ->
-    try
-        {ok, #basic_message{
-           exchange_name = XName,
-           content       = strip_header(DecodedContent, ?DELETED_HEADER),
-           id            = rabbit_guid:gen(),
-           is_persistent = is_message_persistent(DecodedContent),
-           routing_keys  = [RoutingKey |
-                            header_routes(Props#'P_basic'.headers)]}}
-    catch
-        {error, _Reason} = Error -> Error
-    end.
+%% only used by channel to avoid unnecessarily generating a guid when
+%% queue types do not need them
+-spec message_no_id
+        (rabbit_exchange:name(), rabbit_router:routing_key(),
+         rabbit_types:decoded_content()) ->
+            rabbit_types:ok_or_error2(rabbit_types:message(), any()).
+ message_no_id(XName, RoutingKey, Content) ->
+    make_message(XName, RoutingKey, Content, <<>>).
 
 -spec message
         (rabbit_exchange:name(), rabbit_router:routing_key(), properties_input(),
@@ -319,3 +319,48 @@ add_header(Name, Type, Value, #basic_message{content = Content0} = Msg) ->
                         rabbit_misc:set_table_value(Headers, Name, Type, Value)
                 end, Content0),
     Msg#basic_message{content = Content}.
+
+peek_fmt_message(#basic_message{exchange_name = Ex,
+                                routing_keys = RKeys,
+                                content =
+                                #content{payload_fragments_rev = Payl0,
+                                         properties = Props}}) ->
+    Fields = [atom_to_binary(F, utf8) || F <- record_info(fields, 'P_basic')],
+    T = lists:zip(Fields, tl(tuple_to_list(Props))),
+    lists:foldl(
+      fun ({<<"headers">>, Hdrs}, Acc) ->
+              case Hdrs of
+                  [] ->
+                      Acc;
+                  _ ->
+                      Acc ++ [{header_key(H), V} || {H, _T, V} <- Hdrs]
+              end;
+          ({_, undefined}, Acc) ->
+              Acc;
+          (KV, Acc) ->
+              [KV | Acc]
+      end, [], [{<<"payload (max 64 bytes)">>,
+                 %% restric payload to 64 bytes
+                 binary_prefix_64(iolist_to_binary(lists:reverse(Payl0)), 64)},
+                {<<"exchange">>, Ex#resource.name},
+                {<<"routing_keys">>, RKeys} | T]).
+
+header_key(A) ->
+    <<"header.", A/binary>>.
+
+binary_prefix_64(Bin, Len) ->
+    binary:part(Bin, 0, min(byte_size(Bin), Len)).
+
+make_message(XName, RoutingKey, #content{properties = Props} = DecodedContent, Guid) ->
+    try
+        {ok, #basic_message{
+           exchange_name = XName,
+           content       = strip_header(DecodedContent, ?DELETED_HEADER),
+           id            = Guid,
+           is_persistent = is_message_persistent(DecodedContent),
+           routing_keys  = [RoutingKey |
+                            header_routes(Props#'P_basic'.headers)]}}
+    catch
+        {error, _Reason} = Error -> Error
+    end.
+

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2011-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_login).
@@ -41,7 +41,7 @@ is_authorized(ReqData0, Context) ->
     case rabbit_mgmt_util:is_authorized_user(ReqData, Context, Username, Password) of
         {true, ReqData1, Context1} ->
             Value = base64:encode(<<Username/binary,":",Password/binary>>),
-            {true, cowboy_req:set_resp_cookie("auth", Value, ReqData1), Context1};
+            {true, cowboy_req:set_resp_cookie(<<"auth">>, Value, ReqData1), Context1};
         Other ->
             Other
     end.

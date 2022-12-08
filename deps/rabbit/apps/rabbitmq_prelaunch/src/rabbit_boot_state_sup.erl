@@ -1,17 +1,9 @@
 %%%-------------------------------------------------------------------
-%% The contents of this file are subject to the Mozilla Public License
-%% Version 1.1 (the "License"); you may not use this file except in
-%% compliance with the License. You may obtain a copy of the License
-%% at https://www.mozilla.org/MPL/
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and
-%% limitations under the License.
-%%
-%% The Original Code is RabbitMQ.
-%%
-%% Copyright (c) 2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2020-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_boot_state_sup).
@@ -26,13 +18,17 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    SystemdSpec = #{id => rabbit_boot_state_systemd,
+    SystemdSpec = #{id => systemd,
                     start => {rabbit_boot_state_systemd, start_link, []},
                     restart => transient},
+    XtermTitlebarSpec = #{id => xterm_titlebar,
+                          start => {rabbit_boot_state_xterm_titlebar,
+                                    start_link, []},
+                          restart => transient},
     {ok, {#{strategy => one_for_one,
             intensity => 1,
             period => 5},
-          [SystemdSpec]}}.
+          [SystemdSpec, XtermTitlebarSpec]}}.
 
 -spec notify_boot_state_listeners(rabbit_boot_state:boot_state()) -> ok.
 notify_boot_state_listeners(BootState) ->

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_cert_info).
@@ -11,14 +11,23 @@
 
 -export([issuer/1,
          subject/1,
+         subject_alternative_names/1,
          validity/1,
-         subject_items/2]).
+         subject_items/2,
+         extensions/1
+]).
+
+-export([sanitize_other_name/1]).
 
 %%--------------------------------------------------------------------------
 
 -export_type([certificate/0]).
 
--type certificate() :: binary().
+-type certificate() :: public_key:der_encoded().
+
+%% x.509 certificate extensions usually look like key/value pairs but can
+%% be just about any value
+-type certificate_extension_value() :: any().
 
 %%--------------------------------------------------------------------------
 %% High-level functions used by reader
@@ -55,6 +64,23 @@ subject_items(Cert, Type) ->
                       find_by_type(Type, Subject)
               end, Cert).
 
+-spec extensions(certificate()) -> [#'Extension'{}].
+extensions(Cert) ->
+    cert_info(fun(#'OTPCertificate' {
+                     tbsCertificate = #'OTPTBSCertificate' {
+                       extensions = Extensions }}) ->
+                      Extensions
+              end, Cert).
+
+-spec subject_alternative_names(certificate()) -> [certificate_extension_value()].
+subject_alternative_names(Cert) ->
+    Extensions = extensions(Cert),
+    try lists:keyfind(?'id-ce-subjectAltName', #'Extension'.extnID, Extensions) of
+        false                         -> [];
+        #'Extension'{extnValue = Val} -> Val
+    catch _:_ -> []
+    end.
+
 %% Return a string describing the certificate's validity.
 -spec validity(certificate()) -> string().
 
@@ -82,6 +108,15 @@ find_by_type(Type, {rdnSequence, RDNs}) ->
 %%--------------------------------------------------------------------------
 %% Formatting functions
 %%--------------------------------------------------------------------------
+
+sanitize_other_name(Bin) when is_binary(Bin) ->
+    %% We make a wild assumption about the types here
+    %% but ASN.1 decoding functions in OTP only offer so much and SAN values
+    %% are expected to be "string-like" by RabbitMQ
+    case 'OTP-PUB-KEY':decode('DirectoryString', Bin) of
+        {ok, {_, Val}} -> Val;
+        Other          -> Other
+    end.
 
 %% Format and rdnSequence as a RFC4514 subject string.
 format_rdn_sequence({rdnSequence, Seq}) ->

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% @private
@@ -33,7 +33,12 @@ start_link(Sock, Connection, ChMgr, AState, ConnName) ->
       ?MODULE, [Sock, Connection, ConnName, ChMgr, AState], []).
 
 post_init(Reader) ->
-    gen_server:call(Reader, post_init).
+    try
+      gen_server:call(Reader, post_init)
+    catch
+      exit:{timeout, Timeout} ->
+        {error, {timeout, Timeout}}
+    end.
 
 %%---------------------------------------------------------------------------
 %% gen_server callbacks

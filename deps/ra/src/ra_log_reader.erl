@@ -2,14 +2,15 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(ra_log_reader).
 
 -compile(inline_list_funcs).
 
 -export([
-         init/4,
+         init/6,
+         init/8,
          close/1,
          update_segments/2,
          handle_log_update/2,
@@ -17,21 +18,27 @@
          num_open_segments/1,
          update_first_index/2,
          read/3,
-         fetch_term/2
+         read/4,
+         sparse_read/3,
+         fetch_term/2,
+         delete_closed_mem_table_object/2,
+         closed_mem_tables/1,
+         open_mem_table_lookup/1
          ]).
 
 -include("ra.hrl").
 
 -define(STATE, ?MODULE).
 
-%% TODO: these could be captured in a record
--define(METRICS_OPEN_MEM_TBL_POS, 3).
--define(METRICS_CLOSED_MEM_TBL_POS, 4).
--define(METRICS_SEGMENT_POS, 5).
-
+-type access_pattern() :: sequential | random.
 %% holds static or rarely changing fields
 -record(cfg, {uid :: ra_uid(),
-              directory :: file:filename()}).
+              counter :: undefined | counters:counters_ref(),
+              directory :: file:filename(),
+              open_mem_tbls ::  atom(),
+              closed_mem_tbls :: atom(),
+              access_pattern = random :: access_pattern()
+             }).
 
 -type segment_ref() :: {From :: ra_index(), To :: ra_index(),
                         File :: string()}.
@@ -43,16 +50,33 @@
 
 -opaque state() :: #?STATE{}.
 
+
 -export_type([
               state/0
               ]).
 
 %% PUBLIC
 
--spec init(ra_uid(), ra_index(), non_neg_integer(), [segment_ref()]) -> state().
-init(UId, FirstIdx, MaxOpen, SegRefs) ->
+-spec init(ra_uid(), file:filename(), ra_index(), non_neg_integer(),
+           [segment_ref()], ra_system:names()) -> state().
+init(UId, Dir, FirstIdx, MaxOpen, SegRefs, Names) ->
+    init(UId, Dir, FirstIdx, MaxOpen, random, SegRefs, Names, undefined).
+
+-spec init(ra_uid(), file:filename(), ra_index(), non_neg_integer(),
+           access_pattern(),
+           [segment_ref()], ra_system:names(),
+           undefined | counters:counters_ref()) -> state().
+init(UId, Dir, FirstIdx, MaxOpen, AccessPattern, SegRefs,
+     #{open_mem_tbls := OpnMemTbls,
+       closed_mem_tbls := ClsdMemTbls}, Counter)
+  when is_binary(UId) ->
     #?STATE{cfg = #cfg{uid = UId,
-                       directory = ra_env:server_data_dir(UId)},
+                       counter = Counter,
+                       directory = Dir,
+                       open_mem_tbls = OpnMemTbls,
+                       closed_mem_tbls = ClsdMemTbls,
+                       access_pattern = AccessPattern
+                      },
             open_segments = ra_flru:new(MaxOpen, fun flru_handler/1),
             first_index = FirstIdx,
             segment_refs = SegRefs}.
@@ -98,7 +122,7 @@ handle_log_update({ra_log_update, From, FstIdx, SegRefs},
     {state(), [segment_ref()]}.
 update_first_index(Idx, #?STATE{segment_refs = SegRefs0,
                                 open_segments = OpenSegs0} = State) ->
-    case lists:partition(fun({_, To, _}) when To > Idx -> true;
+    case lists:partition(fun({_, To, _}) when To >= Idx -> true;
                             (_) -> false
                          end, SegRefs0) of
         {_, []} ->
@@ -113,7 +137,7 @@ update_first_index(Idx, #?STATE{segment_refs = SegRefs0,
                                            end
                                    end, OpenSegs0, ObsoleteKeys),
             {State#?STATE{open_segments = OpenSegs,
-                          first_index = Idx,
+                          first_index = Idx + 1,
                           segment_refs = Active},
              Obsolete}
     end.
@@ -127,48 +151,84 @@ num_open_segments(#?STATE{open_segments = Open}) ->
      ra_flru:size(Open).
 
 -spec read(ra_index(), ra_index(), state()) ->
-    {[log_entry()], Metrics :: list(), state()}.
-read(From, To, State) when From =< To ->
-    retry_read(2, From, To, State);
-read(_From, _To, State) ->
-    {[], [], State}.
+    {[log_entry()], NumRead :: non_neg_integer(), state()}.
+read(From, To, State) ->
+    read(From, To, State, []).
 
-retry_read(0, From, To, State) ->
+-spec read(ra_index(), ra_index(), state(), [log_entry()]) ->
+    {[log_entry()], NumRead :: non_neg_integer(), state()}.
+read(From, To, State, Entries) when From =< To ->
+    retry_read(2, From, To, Entries, State);
+read(_From, _To, State, Entries) ->
+    {Entries, 0, State}.
+
+-spec sparse_read(state(), [ra_index()], [log_entry()]) ->
+    {[log_entry()], state()}.
+sparse_read(#?STATE{cfg = #cfg{} = Cfg} = State, Indexes0, Entries0) ->
+    case open_mem_tbl_sparse_read(Cfg, Indexes0, Entries0) of
+        {Entries1, OpenC, []} ->
+            ok = incr_counter(Cfg, ?C_RA_LOG_READ_OPEN_MEM_TBL, OpenC),
+            {Entries1, State};
+        {Entries1, OpenC, Rem1} ->
+            ok = incr_counter(Cfg, ?C_RA_LOG_READ_OPEN_MEM_TBL, OpenC),
+            case closed_mem_tbl_sparse_read(Cfg, Rem1, Entries1) of
+                {Entries2, ClosedC, []} ->
+                    ok = incr_counter(Cfg, ?C_RA_LOG_READ_CLOSED_MEM_TBL, ClosedC),
+                    {Entries2, State};
+                {Entries2, ClosedC, Rem2} ->
+                    ok = incr_counter(Cfg, ?C_RA_LOG_READ_CLOSED_MEM_TBL, ClosedC),
+                    {Open, _, SegC, Entries} = (catch segment_sparse_read(State, Rem2, Entries2)),
+                    ok = incr_counter(Cfg, ?C_RA_LOG_READ_SEGMENT, SegC),
+                    {Entries, State#?MODULE{open_segments = Open}}
+            end
+    end.
+
+retry_read(0, From, To, _Entries0, State) ->
     exit({ra_log_reader_reader_retry_exhausted, From, To, State});
-retry_read(N, From, To, #?STATE{cfg = #cfg{uid = UId}} = State) ->
-    % 2. Check ra_log_open_mem_tables
-    % 3. Check ra_log_closed_mem_tables in turn
+retry_read(N, From, To, Entries0,
+           #?STATE{cfg = #cfg{uid = UId,
+                              open_mem_tbls = OpenTbl,
+                              closed_mem_tbls = ClosedTbl} = Cfg} = State) ->
+    % 2. Check open mem table
+    % 3. Check closed mem tables in turn
     % 4. Check on disk segments in turn
-    case open_mem_tbl_take(UId, {From, To}, [], []) of
-        {Entries1, MetricOps, undefined} ->
-            {Entries1, MetricOps, State};
-        {Entries1, MetricOps1, Rem1} ->
-            case catch closed_mem_tbl_take(UId, Rem1, MetricOps1, Entries1) of
-                {Entries2, MetricOps, undefined} ->
-                    {Entries2, MetricOps, State};
-                {Entries2, MetricOps2, {S, E} = Rem2} ->
+    case open_mem_tbl_take(OpenTbl, UId, {From, To}, Entries0) of
+        {Entries1, {_, C} = Counter0, undefined} ->
+            ok = incr_counter(Cfg, Counter0),
+            {Entries1, C, State};
+        {Entries1, {_, C0} = Counter0, Rem1} ->
+            ok = incr_counter(Cfg, Counter0),
+            case catch closed_mem_tbl_take(ClosedTbl, UId, Rem1, Entries1) of
+                {Entries2, {_, C1} = Counter1, undefined} ->
+                    ok = incr_counter(Cfg, Counter1),
+                    {Entries2, C0 + C1, State};
+                {Entries2, {_, C1} = Counter1, {S, E} = Rem2} ->
+                    ok = incr_counter(Cfg, Counter1),
                     case catch segment_take(State, Rem2, Entries2) of
                         {Open, undefined, Entries} ->
-                            MOp = {?METRICS_SEGMENT_POS, E - S + 1},
-                            {Entries, [MOp | MetricOps2],
-                             State#?MODULE{open_segments = Open}}
+                            C = (E - S + 1) + C0 + C1,
+                            incr_counter(Cfg, {?C_RA_LOG_READ_SEGMENT, E - S + 1}),
+                            {Entries, C, State#?MODULE{open_segments = Open}}
                     end;
                 {ets_miss, _Index} ->
-                    %% this would happend if a mem table was deleted after
+                    %% this would happen if a mem table was deleted after
                     %% an external reader had read the range
-                    retry_read(N-1, From, To, State)
+                    retry_read(N-1, From, To, Entries0, State)
             end
     end.
 
 
 -spec fetch_term(ra_index(), state()) -> {ra_index(), state()}.
-fetch_term(Idx, #?STATE{cfg = #cfg{uid = UId}} = State0) ->
-    case ets:lookup(ra_log_open_mem_tables, UId) of
+fetch_term(Idx, #?STATE{cfg = #cfg{uid = UId,
+                                   open_mem_tbls = OpenTbl,
+                                   closed_mem_tbls = ClosedTbl} = Cfg} = State0) ->
+    incr_counter(Cfg, {?C_RA_LOG_FETCH_TERM, 1}),
+    case ets:lookup(OpenTbl, UId) of
         [{_, From, To, Tid}] when Idx >= From andalso Idx =< To ->
             Term = ets:lookup_element(Tid, Idx, 2),
             {Term, State0};
         _ ->
-            case closed_mem_table_term_query(Idx, UId) of
+            case closed_mem_table_term_query(ClosedTbl, Idx, UId) of
                 undefined ->
                     segment_term_query(Idx, State0);
                 Term ->
@@ -176,15 +236,33 @@ fetch_term(Idx, #?STATE{cfg = #cfg{uid = UId}} = State0) ->
             end
     end.
 
+-spec delete_closed_mem_table_object(state(), term()) -> true.
+delete_closed_mem_table_object(#?STATE{cfg =
+                                       #cfg{closed_mem_tbls = Tbl}}, Id) ->
+    true = ets:delete_object(Tbl, Id).
+
+-spec closed_mem_tables(state()) -> list().
+closed_mem_tables(#?STATE{cfg = #cfg{uid = UId,
+                                     closed_mem_tbls = Tbl}}) ->
+    closed_mem_tables(Tbl, UId).
+
+-spec open_mem_table_lookup(state()) -> list().
+open_mem_table_lookup(#?STATE{cfg = #cfg{uid = UId,
+                                         open_mem_tbls = Tbl}}) ->
+    ets:lookup(Tbl, UId).
+
+
 %% LOCAL
 
 segment_term_query(Idx, #?MODULE{segment_refs = SegRefs,
-                                 cfg = #cfg{directory = Dir},
+                                 cfg = Cfg,
                                  open_segments = OpenSegs} = State) ->
-    {Result, Open} = segment_term_query0(Idx, SegRefs, OpenSegs, Dir),
+    {Result, Open} = segment_term_query0(Idx, SegRefs, OpenSegs, Cfg),
     {Result, State#?MODULE{open_segments = Open}}.
 
-segment_term_query0(Idx, [{From, To, Filename} | _], Open0, Dir)
+segment_term_query0(Idx, [{From, To, Filename} | _], Open0,
+                    #cfg{directory = Dir,
+                         access_pattern = AccessPattern})
   when Idx >= From andalso Idx =< To ->
     case ra_flru:fetch(Filename, Open0) of
         {ok, Seg, Open} ->
@@ -192,36 +270,64 @@ segment_term_query0(Idx, [{From, To, Filename} | _], Open0, Dir)
             {Term, Open};
         error ->
             AbsFn = filename:join(Dir, Filename),
-            {ok, Seg} = ra_log_segment:open(AbsFn, #{mode => read}),
+            {ok, Seg} = ra_log_segment:open(AbsFn, #{mode => read,
+                                                     access_pattern => AccessPattern}),
             Term = ra_log_segment:term_query(Seg, Idx),
             {Term, ra_flru:insert(Filename, Seg, Open0)}
     end;
-segment_term_query0(Idx, [_ | Tail], Open, Dir) ->
-    segment_term_query0(Idx, Tail, Open, Dir);
+segment_term_query0(Idx, [_ | Tail], Open, Cfg) ->
+    segment_term_query0(Idx, Tail, Open, Cfg);
 segment_term_query0(_Idx, [], Open, _) ->
     {undefined, Open}.
 
-open_mem_tbl_take(Id, {Start0, End}, MetricOps, Acc0) ->
-    case ets:lookup(ra_log_open_mem_tables, Id) of
+open_mem_tbl_sparse_read(#cfg{uid = UId, open_mem_tbls = OpenTbl},
+                         Indexes, Acc0) ->
+    case ets:lookup(OpenTbl, UId) of
+        [{_, TStart, TEnd, Tid}] ->
+            mem_tbl_sparse_read(Indexes, TStart, TEnd, Tid, 0, Acc0);
+        [] ->
+            {Acc0, 0, Indexes}
+    end.
+
+closed_mem_tbl_sparse_read(#cfg{uid = UId,
+                                closed_mem_tbls = ClosedTbl}, Indexes, Acc0) ->
+    case closed_mem_tables(ClosedTbl, UId) of
+        [] ->
+            {Acc0, 0, Indexes};
+        Tables ->
+            lists:foldl(fun({_, _, TblSt, TblEnd, Tid}, {Ac, Num, Idxs}) ->
+                                mem_tbl_sparse_read(Idxs, TblSt, TblEnd, Tid, Num, Ac)
+                        end, {Acc0, 0, Indexes}, Tables)
+    end.
+
+mem_tbl_sparse_read([I | Rem], TblStart, TblEnd, Tid, C, Entries0)
+  when I >= TblStart andalso I =< TblEnd ->
+    [Entry] = ets:lookup(Tid, I),
+    mem_tbl_sparse_read(Rem, TblStart, TblEnd, Tid, C + 1, [Entry | Entries0]);
+mem_tbl_sparse_read(Rem, _TblStart, _TblEnd, _Tid, C, Entries0) ->
+    {Entries0, C, Rem}.
+
+open_mem_tbl_take(OpenTbl, Id, {Start0, End}, Acc0) ->
+    case ets:lookup(OpenTbl, Id) of
         [{_, TStart, TEnd, Tid}] ->
             {Entries, Count, Rem} = mem_tbl_take({Start0, End}, TStart, TEnd,
                                                  Tid, 0, Acc0),
-            {Entries, [{?METRICS_OPEN_MEM_TBL_POS, Count} | MetricOps], Rem};
+            {Entries, {?C_RA_LOG_READ_OPEN_MEM_TBL, Count}, Rem};
         [] ->
-            {Acc0, MetricOps, {Start0, End}}
+            {Acc0, {?C_RA_LOG_READ_OPEN_MEM_TBL, 0}, {Start0, End}}
     end.
 
-closed_mem_tbl_take(Id, {Start0, End}, MetricOps, Acc0) ->
-    case closed_mem_tables(Id) of
+closed_mem_tbl_take(ClosedTbl, Id, {Start0, End}, Acc0) ->
+    case closed_mem_tables(ClosedTbl, Id) of
         [] ->
-            {Acc0, MetricOps, {Start0, End}};
+            {Acc0, {?C_RA_LOG_READ_CLOSED_MEM_TBL, 0}, {Start0, End}};
         Tables ->
             {Entries, Count, Rem} =
             lists:foldl(fun({_, _, TblSt, TblEnd, Tid}, {Ac, Count, Range}) ->
                                 mem_tbl_take(Range, TblSt, TblEnd,
                                              Tid, Count, Ac)
                         end, {Acc0, 0, {Start0, End}}, Tables),
-            {Entries, [{?METRICS_CLOSED_MEM_TBL_POS, Count} | MetricOps], Rem}
+            {Entries, {?C_RA_LOG_READ_CLOSED_MEM_TBL, Count}, Rem}
     end.
 
 mem_tbl_take(undefined, _TblStart, _TblEnd, _Tid, Count, Acc0) ->
@@ -270,7 +376,7 @@ segment_take(#?STATE{segment_refs = [],
     {Open, undefined, Entries0};
 segment_take(#?STATE{segment_refs = [{_From, SEnd, _Fn} | _] = SegRefs,
                      open_segments = OpenSegs,
-                     cfg = #cfg{directory = Dir}},
+                     cfg = Cfg},
              {RStart, REnd}, Entries0) ->
     Range = {RStart, min(SEnd, REnd)},
     lists:foldl(
@@ -282,21 +388,7 @@ segment_take(#?STATE{segment_refs = [{_From, SEnd, _Fn} | _] = SegRefs,
               Acc;
          ({From, To, Fn}, {Open0, {Start0, End}, E0})
            when To >= End ->
-              {Seg, Open} =
-                  case ra_flru:fetch(Fn, Open0) of
-                      {ok, S, Open1} ->
-                          {S, Open1};
-                      error ->
-                          AbsFn = filename:join(Dir, Fn),
-                          case ra_log_segment:open(AbsFn, #{mode => read}) of
-                              {ok, S} ->
-                                  {S, ra_flru:insert(Fn, S, Open0)};
-                              {error, Err} ->
-                                  exit({ra_log_failed_to_open_segment, Err,
-                                        AbsFn})
-                          end
-                  end,
-
+              {Seg, Open} = get_segment(Cfg, Open0, Fn),
               % actual start point cannot be prior to first segment
               % index
               Start = max(Start0, From),
@@ -312,12 +404,68 @@ segment_take(#?STATE{segment_refs = [{_From, SEnd, _Fn} | _] = SegRefs,
               {Open, Rem, Entries}
       end, {OpenSegs, Range, Entries0}, SegRefs).
 
+segment_sparse_read(#?STATE{open_segments = Open}, [], Entries0) ->
+    {Open, [], 0, Entries0};
+segment_sparse_read(#?STATE{segment_refs = SegRefs,
+                            open_segments = OpenSegs,
+                            cfg = Cfg}, Indexes, Entries0) ->
+    lists:foldl(
+      fun(_, {_, [], _, _} = Acc) ->
+              %% we're done reading
+              throw(Acc);
+         ({From, To, Fn}, {Open0, [NextIdx | _] = Idxs, C, En0})
+           when NextIdx >= From andalso NextIdx =< To ->
+              {Seg, Open} = get_segment(Cfg, Open0, Fn),
+              {ReadIdxs, RemIdxs} =
+                  sparse_read_split(fun (I) ->
+                                            I >= From andalso I =< To
+                                    end, Idxs, []),
+              {_Cache, ReadSparseCount, Entries} =
+                  ra_log_segment:read_sparse(Seg, ReadIdxs,
+                                             fun binary_to_term/1, []),
+              {Open, RemIdxs, C +  ReadSparseCount,
+               lists:reverse(Entries, En0)};
+         (_Segref, Acc) ->
+              Acc
+      end, {OpenSegs, Indexes, 0, Entries0}, SegRefs).
+
 flru_handler({_, Seg}) ->
     _ = ra_log_segment:close(Seg),
     ok.
 
-closed_mem_tables(Id) ->
-    case ets:lookup(ra_log_closed_mem_tables, Id) of
+%% like lists:splitwith but without reversing the accumulator
+sparse_read_split(Fun, [E | Rem] = All, Acc) ->
+    case Fun(E) of
+        true ->
+            sparse_read_split(Fun, Rem, [E | Acc]);
+        false ->
+            {Acc, All}
+    end;
+sparse_read_split(_Fun, [], Acc) ->
+    {Acc, []}.
+
+
+get_segment(#cfg{directory = Dir,
+                 access_pattern = AccessPattern}, Open0, Fn) ->
+    case ra_flru:fetch(Fn, Open0) of
+        {ok, S, Open1} ->
+            {S, Open1};
+        error ->
+            AbsFn = filename:join(Dir, Fn),
+            case ra_log_segment:open(AbsFn,
+                                     #{mode => read,
+                                       access_pattern => AccessPattern})
+            of
+                {ok, S} ->
+                    {S, ra_flru:insert(Fn, S, Open0)};
+                {error, Err} ->
+                    exit({ra_log_failed_to_open_segment, Err,
+                          AbsFn})
+            end
+    end.
+
+closed_mem_tables(Tbl, Id) ->
+    case ets:lookup(Tbl, Id) of
         [] ->
             [];
         Tables ->
@@ -326,8 +474,8 @@ closed_mem_tables(Id) ->
                        end, Tables)
     end.
 
-closed_mem_table_term_query(Idx, Id) ->
-    case closed_mem_tables(Id) of
+closed_mem_table_term_query(Tbl, Idx, Id) ->
+    case closed_mem_tables(Tbl, Id) of
         [] ->
             undefined;
         Tables ->
@@ -355,49 +503,59 @@ compact_seg_refs(SegRefs) ->
                 end
         end, [], SegRefs)).
 
+incr_counter(#cfg{counter = Cnt}, Ix, N) when Cnt =/= undefined ->
+    counters:add(Cnt, Ix, N);
+incr_counter(#cfg{counter = undefined}, _, _) ->
+    ok.
+
+incr_counter(#cfg{counter = Cnt}, {Ix, N}) when Cnt =/= undefined ->
+    counters:add(Cnt, Ix, N);
+incr_counter(#cfg{counter = undefined}, _) ->
+    ok.
+
 -ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
 
 open_mem_tbl_take_test() ->
-    _ = ets:new(ra_log_open_mem_tables, [named_table]),
+    OTbl = ra_log_open_mem_tables,
+    _ = ets:new(OTbl, [named_table]),
     Tid = ets:new(test_id, []),
-    true = ets:insert(ra_log_open_mem_tables, {test_id, 3, 7, Tid}),
+    true = ets:insert(OTbl, {test_id, 3, 7, Tid}),
     Entries = [{3, 2, "3"}, {4, 2, "4"},
                {5, 2, "5"}, {6, 2, "6"},
                {7, 2, "7"}],
     % seed the mem table
     [ets:insert(Tid, E) || E <- Entries],
 
-    {Entries, _, undefined} = open_mem_tbl_take(test_id, {3, 7}, [], []),
+    {Entries, _, undefined} = open_mem_tbl_take(OTbl, test_id, {3, 7}, []),
     EntriesPlus8 = Entries ++ [{8, 2, "8"}],
-    {EntriesPlus8, _, {1, 2}} = open_mem_tbl_take(test_id, {1, 7}, [],
+    {EntriesPlus8, _, {1, 2}} = open_mem_tbl_take(OTbl, test_id, {1, 7},
                                                   [{8, 2, "8"}]),
-    {[{6, 2, "6"}], _, undefined} = open_mem_tbl_take(test_id, {6, 6}, [], []),
-    {[], _, {1, 2}} = open_mem_tbl_take(test_id, {1, 2}, [], []),
+    {[{6, 2, "6"}], _, undefined} = open_mem_tbl_take(OTbl, test_id, {6, 6}, []),
+    {[], _, {1, 2}} = open_mem_tbl_take(OTbl, test_id, {1, 2}, []),
 
     ets:delete(Tid),
-    ets:delete(ra_log_open_mem_tables),
+    ets:delete(OTbl),
 
     ok.
 
 closed_mem_tbl_take_test() ->
-    _ = ets:new(ra_log_closed_mem_tables, [named_table, bag]),
+    CTbl = ra_log_closed_mem_tables,
+    _ = ets:new(CTbl, [named_table, bag]),
     Tid1 = ets:new(test_id, []),
     Tid2 = ets:new(test_id, []),
     M1 = erlang:unique_integer([monotonic, positive]),
     M2 = erlang:unique_integer([monotonic, positive]),
-    true = ets:insert(ra_log_closed_mem_tables, {test_id, M1, 5, 7, Tid1}),
-    true = ets:insert(ra_log_closed_mem_tables, {test_id, M2, 8, 10, Tid2}),
+    true = ets:insert(CTbl, {test_id, M1, 5, 7, Tid1}),
+    true = ets:insert(CTbl, {test_id, M2, 8, 10, Tid2}),
     Entries1 = [{5, 2, "5"}, {6, 2, "6"}, {7, 2, "7"}],
     Entries2 = [{8, 2, "8"}, {9, 2, "9"}, {10, 2, "10"}],
     % seed the mem tables
     [ets:insert(Tid1, E) || E <- Entries1],
     [ets:insert(Tid2, E) || E <- Entries2],
 
-    {Entries1, _, undefined} = closed_mem_tbl_take(test_id, {5, 7}, [], []),
-    {Entries2, _, undefined} = closed_mem_tbl_take(test_id, {8, 10}, [], []),
-    {[{9, 2, "9"}], _, undefined} = closed_mem_tbl_take(test_id, {9, 9},
-                                                        [], []),
+    {Entries1, _, undefined} = closed_mem_tbl_take(CTbl, test_id, {5, 7}, []),
+    {Entries2, _, undefined} = closed_mem_tbl_take(CTbl, test_id, {8, 10}, []),
+    {[{9, 2, "9"}], _, undefined} = closed_mem_tbl_take(CTbl, test_id, {9, 9}, []),
     ok.
 
 compact_seg_refs_test() ->
@@ -405,4 +563,5 @@ compact_seg_refs_test() ->
     Refs = [{10, 100, "2"}, {10, 75, "2"}, {10, 50, "2"}, {1, 9, "1"}],
     [{10, 100, "2"}, {1, 9, "1"}] = compact_seg_refs(Refs),
     ok.
+
 -endif.

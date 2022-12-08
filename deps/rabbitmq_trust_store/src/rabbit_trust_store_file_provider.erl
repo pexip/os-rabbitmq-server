@@ -1,3 +1,10 @@
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
+%%
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%%
+
 -module(rabbit_trust_store_file_provider).
 
 -include_lib("kernel/include/file.hrl").
@@ -40,7 +47,7 @@ extract_cert(Path, FileName) ->
     scan_then_parse(Absolute).
 
 scan_then_parse(Filename) when is_list(Filename) ->
-    {ok, Bin} = file:read_file(Filename),
+    {ok, Bin} = rabbit_misc:raw_read_file(Filename),
     [{'Certificate', Data, not_encrypted}] = public_key:pem_decode(Bin),
     Data.
 
@@ -57,11 +64,11 @@ list_certs_0(Path) ->
         FileNames).
 
 modification_time(Path) ->
-    {ok, Info} = file:read_file_info(Path, [{time, posix}]),
+    {ok, Info} = file:read_file_info(Path, [raw, {time, posix}]),
     Info#file_info.mtime.
 
 file_content_hash(Path) ->
-    {ok, Data} = file:read_file(Path),
+    {ok, Data} = rabbit_misc:raw_read_file(Path),
     erlang:phash2(Data).
 
 directory_path(Config) ->

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_binding).
@@ -76,21 +76,22 @@ new(Src, RoutingKey, Dst, Arguments) ->
 
 %% Global table recovery
 
--spec recover([rabbit_exchange:name()], [rabbit_amqqueue:name()]) ->
-                        'ok'.
-
 recover() ->
-    rabbit_misc:table_filter(
-        fun (Route) ->
-            mnesia:read({rabbit_semi_durable_route, Route}) =:= []
-        end,
-        fun (Route,  true) ->
-            ok = mnesia:write(rabbit_semi_durable_route, Route, write);
-            (_Route, false) ->
-                ok
-        end, rabbit_durable_route).
+    rabbit_misc:execute_mnesia_transaction(
+        fun () ->
+            mnesia:lock({table, rabbit_durable_route}, read),
+            mnesia:lock({table, rabbit_semi_durable_route}, write),
+            Routes = rabbit_misc:dirty_read_all(rabbit_durable_route),
+            Fun = fun(Route) ->
+                mnesia:dirty_write(rabbit_semi_durable_route, Route)
+            end,
+        lists:foreach(Fun, Routes)
+    end).
 
 %% Virtual host-specific recovery
+
+-spec recover([rabbit_exchange:name()], [rabbit_amqqueue:name()]) ->
+                        'ok'.
 recover(XNames, QNames) ->
     XNameSet = sets:from_list(XNames),
     QNameSet = sets:from_list(QNames),
@@ -138,10 +139,7 @@ exists(#binding{source = ?DEFAULT_EXCHANGE(_),
                 destination = #resource{kind = queue, name = QName} = Queue,
                 key = QName,
                 args = []}) ->
-    case rabbit_amqqueue:lookup(Queue) of
-        {ok, _} -> true;
-        {error, not_found} -> false
-    end;
+    rabbit_amqqueue:exists(Queue);
 exists(Binding) ->
     binding_action(
       Binding, fun (_Src, _Dst, B) ->

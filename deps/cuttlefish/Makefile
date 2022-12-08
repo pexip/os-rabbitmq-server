@@ -7,12 +7,9 @@ ERLANG_ARCH = 64
 export ERLANG_ARCH
 ERLC_OPTS = +debug_info
 export ERLC_OPTS
-ERLC_OPTS += +'{parse_transform, lager_transform}'
 
 DEPS += getopt
-dep_getopt = hex 1.0.1 getopt
-DEPS += lager
-dep_lager = hex 3.8.0 lager
+dep_getopt = hex 1.0.2 getopt
 
 
 rebar_dep: preprocess pre-deps deps pre-app app

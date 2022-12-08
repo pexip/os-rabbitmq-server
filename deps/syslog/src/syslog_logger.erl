@@ -59,7 +59,7 @@
 -define(DEST_PORT, 514).
 -define(FACILITY, ?SYSLOG_FACILITY).
 -define(PROTOCOL, rfc3164).
--define(TRANSFORM, none).
+-define(TRANSFORM, long).
 -define(TRANSPORT, udp).
 -define(TIMEOUT, 1000).
 -define(MULTILINE, false).
@@ -122,7 +122,7 @@ start_link() ->
 %%------------------------------------------------------------------------------
 -spec log(syslog:severity(),
           syslog:proc_name(),
-          erlang:timestamp(),
+          erlang:timestamp() | pos_integer(),
           [syslog:sd_element()],
           io:format() | iolist(),
           [term()] | no_format) -> ok.
@@ -137,7 +137,7 @@ log(Severity, Pid, Timestamp, SD, Fmt, Args) ->
 %%------------------------------------------------------------------------------
 -spec log(syslog:severity(),
           syslog:proc_name(),
-          erlang:timestamp(),
+          erlang:timestamp() | pos_integer(),
           [syslog:sd_element()],
           io:format() | iolist(),
           [term()] | no_format,
@@ -153,7 +153,7 @@ log(Severity, Pid, Timestamp, SD, Fmt, Args, Overrides) ->
 %%------------------------------------------------------------------------------
 -spec async_log(syslog:severity(),
                 syslog:proc_name(),
-                erlang:timestamp(),
+                erlang:timestamp() | pos_integer(),
                 [syslog:sd_element()],
                 io:format() | iolist(),
                 [term()] | no_format) -> ok.
@@ -169,7 +169,7 @@ async_log(Severity, Pid, Timestamp, SD, Fmt, Args) ->
 %%------------------------------------------------------------------------------
 -spec async_log(syslog:severity(),
                 syslog:proc_name(),
-                erlang:timestamp(),
+                erlang:timestamp() | pos_integer(),
                 [syslog:sd_element()],
                 io:format() | iolist(),
                 [term()] | no_format,
@@ -236,8 +236,8 @@ set_log_function(Function) ->
 %% @private
 %%------------------------------------------------------------------------------
 init([]) ->
-    %% avoid excessive garbage collection
-    catch process_flag(message_queue_data, off_heap),
+    %% avoid excessive garbage collection, use apply for dialyzer
+    catch apply(erlang, process_flag, [message_queue_data, off_heap]),
     State = #state{
                protocol = syslog_lib:get_property(protocol, ?PROTOCOL),
                dest_host = syslog_lib:get_property(dest_host, ?DEST_HOST, ip_addr),
@@ -391,10 +391,8 @@ do_log(Severity, Pid, Timestamp, StructuredData, Msg, Opts) ->
     MSG = unicode:characters_to_binary(Msg),
     Fun = do_log_fun(PRI, HDR, StructuredData, Opts),
     case Opts#opts.multiline of
-        true ->
-            Fun(MSG);
-        false ->
-            lists:foreach(Fun, binary:split(MSG, ?SEPARATORS, [global]))
+        true  -> Fun(MSG);
+        false -> lists:foreach(Fun, binary:split(MSG, ?SEPARATORS, [global]))
     end.
 
 %%------------------------------------------------------------------------------
@@ -510,6 +508,7 @@ map_severity(critical)      -> ?SYSLOG_CRITICAL;
 map_severity(error)         -> ?SYSLOG_ERROR;
 map_severity(warning)       -> ?SYSLOG_WARNING;
 map_severity(notice)        -> ?SYSLOG_NOTICE;
+map_severity(info)          -> ?SYSLOG_INFO;
 map_severity(informational) -> ?SYSLOG_INFO;
 map_severity(debug)         -> ?SYSLOG_DEBUG.
 

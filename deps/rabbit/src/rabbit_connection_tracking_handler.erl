@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_connection_tracking_handler).
@@ -21,8 +21,7 @@
 %% for compatibility with previous versions of CLI tools
 -export([close_connections/3]).
 
--include_lib("rabbit.hrl").
--import(rabbit_misc, [pget/2]).
+-include_lib("rabbit_common/include/rabbit.hrl").
 
 -rabbit_boot_step({?MODULE,
                    [{description, "connection tracking event handler"},
@@ -30,15 +29,8 @@
                                    [rabbit_event, ?MODULE, []]}},
                     {cleanup,     {gen_event, delete_handler,
                                    [rabbit_event, ?MODULE, []]}},
-                    {requires,    [rabbit_connection_tracking]},
+                    {requires,    [connection_tracking]},
                     {enables,     recovery}]}).
-
--rabbit_boot_step({rabbit_connection_tracking,
-                   [{description, "statistics event manager"},
-                    {mfa,         {rabbit_sup, start_restartable_child,
-                                   [rabbit_connection_tracking]}},
-                    {requires,    [rabbit_event, rabbit_node_monitor]},
-                    {enables,     ?MODULE}]}).
 
 %%
 %% API
@@ -48,26 +40,26 @@ init([]) ->
     {ok, []}.
 
 handle_event(#event{type = connection_created, props = Details}, State) ->
-    gen_server:cast(rabbit_connection_tracking, {connection_created, Details}),
+    ok = rabbit_connection_tracking:update_tracked({connection_created, Details}),
     {ok, State};
 handle_event(#event{type = connection_closed, props = Details}, State) ->
-    gen_server:cast(rabbit_connection_tracking, {connection_closed, Details}),
+    ok = rabbit_connection_tracking:update_tracked({connection_closed, Details}),
     {ok, State};
 handle_event(#event{type = vhost_deleted, props = Details}, State) ->
-    gen_server:cast(rabbit_connection_tracking, {vhost_deleted, Details}),
+    ok = rabbit_connection_tracking:update_tracked({vhost_deleted, Details}),
     {ok, State};
 %% Note: under normal circumstances this will be called immediately
 %% after the vhost_deleted above. Therefore we should be careful about
 %% what we log and be more defensive.
 handle_event(#event{type = vhost_down, props = Details}, State) ->
-    gen_server:cast(rabbit_connection_tracking, {vhost_down, Details}),
+    ok = rabbit_connection_tracking:update_tracked({vhost_down, Details}),
     {ok, State};
 handle_event(#event{type = user_deleted, props = Details}, State) ->
-    gen_server:cast(rabbit_connection_tracking, {user_deleted, Details}),
+    ok = rabbit_connection_tracking:update_tracked({user_deleted, Details}),
     {ok, State};
 %% A node had been deleted from the cluster.
 handle_event(#event{type = node_deleted, props = Details}, State) ->
-    gen_server:cast(rabbit_connection_tracking, {node_deleted, Details}),
+    ok = rabbit_connection_tracking:update_tracked({node_deleted, Details}),
     {ok, State};
 handle_event(_Event, State) ->
     {ok, State}.

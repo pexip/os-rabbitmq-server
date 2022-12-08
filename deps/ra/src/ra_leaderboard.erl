@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(ra_leaderboard).
 
@@ -20,17 +20,17 @@ init() ->
     _ = ets:new(?MODULE, [set, named_table, public]),
     ok.
 
--spec record(term(), ra:server_id(), [ra:server_id()]) -> ok.
+-spec record(ra:cluster_name(), ra:server_id(), [ra:server_id()]) -> ok.
 record(ClusterName, Leader, Members) ->
     true = ets:insert(?MODULE, {ClusterName, Leader, Members}),
     ok.
 
--spec clear(term()) -> ok.
+-spec clear(ra:cluster_name()) -> ok.
 clear(ClusterName) ->
     true = ets:delete(?MODULE, ClusterName),
     ok.
 
--spec lookup_leader(term()) -> ra:server_id() | undefined.
+-spec lookup_leader(ra:cluster_name()) -> ra:server_id() | undefined.
 lookup_leader(ClusterName) ->
     case lookup(ClusterName) of
         {_, Leader, _} ->
@@ -39,7 +39,7 @@ lookup_leader(ClusterName) ->
             undefined
     end.
 
--spec lookup_members(term()) -> [ra:server_id()] | undefined.
+-spec lookup_members(ra:cluster_name()) -> [ra:server_id()] | undefined.
 lookup_members(ClusterName) ->
     case lookup(ClusterName) of
         {_, _, Members} ->

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(amqp10_client_frame_reader).
 
@@ -96,26 +96,39 @@ init([Sup, ConnConfig]) when is_map(ConnConfig) ->
                      undefined -> Addresses0;
                      Address   -> Addresses0 ++ [Address]
                  end,
-    Result = lists:foldl(fun (Address,  {error, _}) ->
-                                gen_tcp:connect(Address, Port, ?RABBIT_TCP_OPTS);
-                             (_Address, {ok, Socket}) ->
-                                 {ok, Socket}
-                         end,
-                         {error, undefined}, Addresses),
-    case Result of
-        {ok, Socket0} ->
-            Socket = case ConnConfig of
-                         #{tls_opts := {secure_port, Opts}} ->
-                             {ok, SslSock} = ssl:connect(Socket0, Opts),
-                             {ssl, SslSock};
-                         _ -> {tcp, Socket0}
-                     end,
+    case connect_any(Addresses, Port, ConnConfig) of
+        {error, Reason} ->
+            {stop, Reason};
+        Socket ->
             State = #state{connection_sup = Sup, socket = Socket,
                            connection_config = ConnConfig},
-            {ok, expecting_connection_pid, State};
-        {error, Reason} ->
-            {stop, Reason}
+            {ok, expecting_connection_pid, State}
     end.
+
+connect(Address, Port, #{tls_opts := {secure_port, Opts}}) ->
+    case ssl:connect(Address, Port, ?RABBIT_TCP_OPTS ++ Opts) of
+      {ok, S} ->
+          {ssl, S};
+      Err ->
+        Err
+    end;
+connect(Address, Port, _) ->
+    case gen_tcp:connect(Address, Port, ?RABBIT_TCP_OPTS) of
+      {ok, S} ->
+          {tcp, S};
+    Err ->
+        Err
+    end.
+
+connect_any([Address], Port, ConnConfig) ->
+  connect(Address, Port, ConnConfig);
+connect_any([Address | Addresses], Port, ConnConfig) ->
+  case connect(Address, Port, ConnConfig) of
+    {error, _} ->
+      connect_any(Addresses, Port, ConnConfig);
+    R ->
+      R
+  end.
 
 handle_event(cast, {set_connection, ConnectionPid}, expecting_connection_pid,
              State=#state{socket = Socket}) ->
@@ -138,7 +151,7 @@ handle_event(cast, {unregister_session, _Session, OutgoingChannel, IncomingChann
                          incoming_channels = IncomingChannels1},
     {keep_state, State1};
 handle_event(cast, close, _StateName, State = #state{socket = Socket}) ->
-    close_socket(Socket),
+    _ = close_socket(Socket),
     {stop, normal, State#state{socket = undefined}};
 
 handle_event({call, From}, _Action, _State, _Data) ->
@@ -158,16 +171,16 @@ handle_event(info, {Tcp, _, Packet}, StateName, #state{buffer = Buffer} = State)
 
 handle_event(info, {TcpError, _, Reason}, StateName, State)
   when TcpError == tcp_error orelse TcpError == ssl_error ->
-    error_logger:warning_msg("AMQP 1.0 connection socket errored, connection state: '~s', reason: '~p'~n",
-                             [StateName, Reason]),
+    logger:warning("AMQP 1.0 connection socket errored, connection state: '~s', reason: '~p'",
+                    [StateName, Reason]),
     State1 = State#state{socket = undefined,
                          buffer = <<>>,
                          frame_state = undefined},
     {stop, {error, Reason}, State1};
 handle_event(info, {TcpClosed, _}, StateName, State)
   when TcpClosed == tcp_closed orelse TcpClosed == ssl_closed ->
-    error_logger:warning_msg("AMQP 1.0 connection socket was closed, connection state: '~s'~n",
-                             [StateName]),
+    logger:warning("AMQP 1.0 connection socket was closed, connection state: '~s'",
+                    [StateName]),
     State1 = State#state{socket = undefined,
                          buffer = <<>>,
                          frame_state = undefined},
@@ -279,7 +292,7 @@ defer_heartbeat_timer(State) -> State.
 route_frame(Channel, FrameType, {Performative, Payload} = Frame, State0) ->
     {DestinationPid, State} = find_destination(Channel, FrameType, Performative,
                                                State0),
-    ?DBG("FRAME -> ~p ~p~n ~p~n", [Channel, DestinationPid, Performative]),
+    ?DBG("FRAME -> ~p ~p~n ~p", [Channel, DestinationPid, Performative]),
     case Payload of
         <<>> -> ok = gen_statem:cast(DestinationPid, Performative);
         _ -> ok = gen_statem:cast(DestinationPid, Frame)

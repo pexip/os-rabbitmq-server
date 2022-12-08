@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2020-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -include("resource.hrl").
@@ -17,15 +17,6 @@
                     tags,
                     impl}).
 
-%% Implementation for the internal auth backend
--record(internal_user, {
-    username,
-    password_hash,
-    tags,
-    %% password hashing implementation module,
-    %% typically rabbit_password_hashing_* but can
-    %% come from a plugin
-    hashing_algorithm}).
 -record(permission, {configure, write, read}).
 -record(user_vhost, {username, virtual_host}).
 -record(user_permission, {user_vhost, permission}).
@@ -121,7 +112,7 @@
 -record(basic_message,
         {exchange_name,     %% The exchange where the message was received
          routing_keys = [], %% Routing keys used during publish
-         content,           %% The message content
+         content,           %% The message #content record
          id,                %% A `rabbit_guid:gen()` generated id
          is_persistent}).   %% Whether the message was published as persistent
 
@@ -158,17 +149,26 @@
 
 %% used to track connections across virtual hosts
 %% so that limits can be enforced
--record(tracked_connection_per_vhost,
-    {vhost, connection_count}).
+-record(tracked_connection_per_vhost, {
+    vhost,
+    connection_count}).
+
+%% Used to track connections per user
+%% so that limits can be enforced
+-record(tracked_connection_per_user, {
+    user,
+    connection_count
+    }).
 
 %% Used to track detailed information
 %% about connections.
 -record(tracked_connection, {
-          %% {Node, Name}
+          %% {Node, ConnectionName}
           id,
           node,
           vhost,
           name,
+          %% Main connection process pid
           pid,
           protocol,
           %% network or direct
@@ -182,6 +182,25 @@
           connected_at
          }).
 
+%% Used to track channels per user
+%% so that limits can be enforced
+-record(tracked_channel_per_user, {
+    user,
+    channel_count
+    }).
+
+%% Used to track detailed information
+%% about channels.
+-record(tracked_channel, {
+            %% {Node, ChannelName}
+            id,
+            node,
+            vhost,
+            name,
+            pid,
+            username,
+            connection}).
+
 %% Indicates maintenance state of a node
 -record(node_maintenance_state, {
           node,
@@ -190,7 +209,7 @@
         }).
 %%----------------------------------------------------------------------------
 
--define(COPYRIGHT_MESSAGE, "Copyright (c) 2007-2020 VMware, Inc. or its affiliates.").
+-define(COPYRIGHT_MESSAGE, "Copyright (c) 2007-2022 VMware, Inc. or its affiliates.").
 -define(INFORMATION_MESSAGE, "Licensed under the MPL 2.0. Website: https://rabbitmq.com").
 
 %% EMPTY_FRAME_SIZE, 8 = 1 + 2 + 4 + 1
@@ -206,9 +225,11 @@
 -define(SUPERVISOR_WAIT,
         rabbit_misc:get_env(rabbit, supervisor_shutdown_timeout, infinity)).
 -define(WORKER_WAIT,
-        rabbit_misc:get_env(rabbit, worker_shutdown_timeout, 30000)).
+        rabbit_misc:get_env(rabbit, worker_shutdown_timeout, 300000)).
 -define(MSG_STORE_WORKER_WAIT,
         rabbit_misc:get_env(rabbit, msg_store_shutdown_timeout, 600000)).
+-define(CLASSIC_QUEUE_WORKER_WAIT,
+        rabbit_misc:get_env(rabbit, classic_queue_shutdown_timeout, 600000)).
 
 -define(HIBERNATE_AFTER_MIN,        1000).
 -define(DESIRED_HIBERNATE,         10000).
@@ -243,3 +264,14 @@
 %% Store metadata in the trace files when message tracing is enabled.
 -define(LG_INFO(Info), is_pid(whereis(lg)) andalso (lg ! Info)).
 -define(LG_PROCESS_TYPE(Type), ?LG_INFO(#{process_type => Type})).
+
+%% Execution timeout of connection and channel tracking operations
+-define(TRACKING_EXECUTION_TIMEOUT,
+        rabbit_misc:get_env(rabbit, tracking_execution_timeout, 5000)).
+
+%% 3.6, 3.7, early 3.8
+-define(LEGACY_INDEX_SEGMENT_ENTRY_COUNT, 16384).
+
+%% Max value for stream max segment size
+-define(MAX_STREAM_MAX_SEGMENT_SIZE, 3_000_000_000).
+

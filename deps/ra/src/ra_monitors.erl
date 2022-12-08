@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(ra_monitors).
 
@@ -29,7 +29,6 @@
 
 -spec init() -> state().
 init() ->
-    ok = net_kernel:monitor_nodes(true),
     #{}.
 
 -spec add(pid() | node(), component(), state()) -> state().
@@ -57,9 +56,10 @@ add(Node, Component, Monitors) when is_atom(Node) ->
     end.
 
 emit_current_node_state(Node) ->
+    Nodes = [node() | nodes()],
     %% fake event for newly registered component
     %% so that it discovers the current node state
-    case lists:member(Node, nodes()) of
+    case lists:member(Node, Nodes) of
         true ->
             self() ! {nodeup, Node, []},
             ok;

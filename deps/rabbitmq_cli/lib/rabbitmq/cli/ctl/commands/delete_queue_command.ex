@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.DeleteQueueCommand do
   alias RabbitMQ.CLI.Core.DocGuide
@@ -80,7 +80,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.DeleteQueueCommand do
   end
 
   def output({:ok, qlen}, _options) do
-    {:ok, "Queue was successfully deleted with #{qlen} messages"}
+    {:ok, "Queue was successfully deleted with #{qlen} ready messages"}
   end
 
   ## Use default output for all non-special case outputs

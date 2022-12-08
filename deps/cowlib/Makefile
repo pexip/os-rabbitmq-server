@@ -2,7 +2,7 @@
 
 PROJECT = cowlib
 PROJECT_DESCRIPTION = Support library for manipulating Web protocols.
-PROJECT_VERSION = 2.7.0
+PROJECT_VERSION = 2.9.1
 
 # Options.
 
@@ -18,18 +18,25 @@ DIALYZER_OPTS = -Werror_handling -Wunmatched_returns
 
 LOCAL_DEPS = crypto
 
-TEST_DEPS = $(if $(CI_ERLANG_MK),ci.erlang.mk) horse proper
+DOC_DEPS = asciideck
+
+TEST_DEPS = $(if $(CI_ERLANG_MK),ci.erlang.mk) base32 horse proper jsx \
+	structured-header-tests uritemplate-tests
+dep_base32 = git https://github.com/dnsimple/base32_erlang master
 dep_horse = git https://github.com/ninenines/horse.git master
+dep_jsx = git https://github.com/talentdeficit/jsx v2.10.0
+dep_structured-header-tests = git https://github.com/httpwg/structured-header-tests e614583397e7f65e0082c0fff3929f32a298b9f2
+dep_uritemplate-tests = git https://github.com/uri-templates/uritemplate-test master
 
 # CI configuration.
 
 dep_ci.erlang.mk = git https://github.com/ninenines/ci.erlang.mk master
 DEP_EARLY_PLUGINS = ci.erlang.mk
 
-AUTO_CI_OTP ?= OTP-19+
+AUTO_CI_OTP ?= OTP-21+
 AUTO_CI_HIPE ?= OTP-LATEST
 # AUTO_CI_ERLLVM ?= OTP-LATEST
-AUTO_CI_WINDOWS ?= OTP-19+
+AUTO_CI_WINDOWS ?= OTP-21+
 
 # Standard targets.
 
@@ -74,3 +81,18 @@ endif
 
 perfs: test-build
 	$(gen_verbose) erl -noshell -pa ebin -eval 'horse:app_perf($(PROJECT)), erlang:halt().'
+
+# Prepare for the release.
+
+prepare_tag:
+	$(verbose) echo -n "Most recent tag:            "
+	$(verbose) git tag | tail -n1
+	$(verbose) git verify-tag `git tag | tail -n1`
+	$(verbose) echo -n "MAKEFILE: "
+	$(verbose) grep -m1 PROJECT_VERSION Makefile
+	$(verbose) echo -n "APP:                 "
+	$(verbose) grep -m1 vsn ebin/$(PROJECT).app | sed 's/	//g'
+	$(verbose) echo
+	$(verbose) echo "Dependencies:"
+	$(verbose) grep ^DEPS Makefile || echo "DEPS ="
+	$(verbose) grep ^dep_ Makefile || true

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_table).
@@ -22,6 +22,7 @@
 %%----------------------------------------------------------------------------
 
 -type retry() :: boolean().
+-type mnesia_table() :: atom().
 
 %%----------------------------------------------------------------------------
 %% Main interface
@@ -36,7 +37,7 @@ create() ->
     ensure_secondary_indexes(),
     ok.
 
--spec create(mnesia:table(), list()) -> rabbit_types:ok_or_error(any()).
+-spec create(mnesia_table(), list()) -> rabbit_types:ok_or_error(any()).
 
 create(TableName, TableDefinition) ->
     TableDefinition1 = proplists:delete(match, TableDefinition),
@@ -49,7 +50,7 @@ create(TableName, TableDefinition) ->
             throw({error, {table_creation_failed, TableName, TableDefinition1, Reason}})
     end.
 
--spec exists(mnesia:table()) -> boolean().
+-spec exists(mnesia_table()) -> boolean().
 exists(Table) ->
     lists:member(Table, mnesia:system_info(tables)).
 
@@ -64,7 +65,7 @@ ensure_secondary_index(Table, Field) ->
     {aborted, {already_exists, Table, _}} -> ok
   end.
 
--spec ensure_table_copy(mnesia:table(), node()) -> ok | {error, any()}.
+-spec ensure_table_copy(mnesia_table(), node()) -> ok | {error, any()}.
 ensure_table_copy(TableName, Node) ->
     rabbit_log:debug("Will add a local schema database copy for table '~s'", [TableName]),
     case mnesia:add_table_copy(TableName, Node, disc_copies) of
@@ -100,16 +101,16 @@ wait(TableNames, Retry) ->
 wait(TableNames, Timeout, Retries) ->
     %% We might be in ctl here for offline ops, in which case we can't
     %% get_env() for the rabbit app.
-    rabbit_log:info("Waiting for Mnesia tables for ~p ms, ~p retries left~n",
+    rabbit_log:info("Waiting for Mnesia tables for ~p ms, ~p retries left",
                     [Timeout, Retries - 1]),
     Result = case mnesia:wait_for_tables(TableNames, Timeout) of
                  ok ->
                      ok;
                  {timeout, BadTabs} ->
-                     AllNodes = rabbit_mnesia:cluster_nodes(all),
+                     AllNodes = rabbit_nodes:all(),
                      {error, {timeout_waiting_for_tables, AllNodes, BadTabs}};
                  {error, Reason} ->
-                     AllNodes = rabbit_mnesia:cluster_nodes(all),
+                     AllNodes = rabbit_nodes:all(),
                      {error, {failed_waiting_for_tables, AllNodes, Reason}}
              end,
     case {Retries, Result} of
@@ -119,7 +120,7 @@ wait(TableNames, Timeout, Retries) ->
         {1, {error, _} = Error} ->
             throw(Error);
         {_, {error, Error}} ->
-            rabbit_log:warning("Error while waiting for Mnesia tables: ~p~n", [Error]),
+            rabbit_log:warning("Error while waiting for Mnesia tables: ~p", [Error]),
             wait(TableNames, Timeout, Retries - 1)
     end.
 
@@ -295,9 +296,9 @@ definitions(ram) ->
 definitions() ->
     [{rabbit_user,
       [{record_name, internal_user},
-       {attributes, record_info(fields, internal_user)},
+       {attributes, internal_user:fields()},
        {disc_copies, [node()]},
-       {match, #internal_user{_='_'}}]},
+       {match, internal_user:pattern_match_all()}]},
      {rabbit_user_permission,
       [{record_name, user_permission},
        {attributes, record_info(fields, user_permission)},

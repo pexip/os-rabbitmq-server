@@ -1,16 +1,7 @@
-## The contents of this file are subject to the Mozilla Public License
-## Version 1.1 (the "License"); you may not use this file except in
-## compliance with the License. You may obtain a copy of the License
-## at https://www.mozilla.org/MPL/
+## This Source Code Form is subject to the terms of the Mozilla Public
+## License, v. 2.0. If a copy of the MPL was not distributed with this
+## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Software distributed under the License is distributed on an "AS IS"
-## basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-## the License for the specific language governing rights and
-## limitations under the License.
-##
-## The Original Code is RabbitMQ.
-##
-## The Initial Developer of the Original Code is GoPivotal, Inc.
 ## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQCtl.MixfileBase do
@@ -19,15 +10,43 @@ defmodule RabbitMQCtl.MixfileBase do
   def project do
     [
       app: :rabbitmqctl,
-      version: "3.8.0-dev",
-      elixir: ">= 1.8.0 and < 1.11.0",
+      version: "3.10.0-dev",
+      elixir: ">= 1.10.4 and < 1.15.0",
       build_embedded: Mix.env == :prod,
       start_permanent: Mix.env == :prod,
       escript: [main_module: RabbitMQCtl,
                 emu_args: "-hidden",
                 path: "escript/rabbitmqctl"],
       deps: deps(),
-      aliases: aliases()
+      aliases: aliases(),
+      xref: [
+        exclude: [
+          CSV,
+          CSV.Encode,
+          JSON,
+          :mnesia,
+          :msacc,
+          :observer_cli,
+          :public_key,
+          :pubkey_cert,
+          :rabbit,
+          :rabbit_control_misc,
+          :rabbit_data_coercion,
+          :rabbit_env,
+          :rabbit_event,
+          :rabbit_file,
+          :rabbit_net,
+          :rabbit_log,
+          :rabbit_misc,
+          :rabbit_mnesia,
+          :rabbit_mnesia_rename,
+          :rabbit_nodes_common,
+          :rabbit_pbe,
+          :rabbit_plugins,
+          :rabbit_resource_monitor_misc,
+          :stdout_formatter
+        ]
+      ]
    ]
   end
 
@@ -40,7 +59,10 @@ defmodule RabbitMQCtl.MixfileBase do
                     rabbitmqctl: :ctl,
                     'rabbitmq-diagnostics': :diagnostics,
                     'rabbitmq-queues': :queues,
-                    'rabbitmq-upgrade': :upgrade]]
+                    'rabbitmq-streams': :streams,
+                    'rabbitmq-upgrade': :upgrade,
+                    'rabbitmq-tanzu': :tanzu
+     ]]
     ]
     |> add_modules(Mix.env)
   end
@@ -97,12 +119,12 @@ defmodule RabbitMQCtl.MixfileBase do
   # don't have the equivalent for other methods.
   defp deps() do
     elixir_deps = [
-      {:json, "~> 1.2.0"},
-      {:csv, "~> 2.3.0"},
+      {:json, "~> 1.4.1"},
+      {:csv, "~> 2.4.0"},
       {:stdout_formatter, "~> 0.2.3"},
-      {:observer_cli, "~> 1.5.0"},
+      {:observer_cli, "~> 1.7.3"},
 
-      {:amqp, "~> 1.2.0", only: :test},
+      {:amqp, "~> 2.1.0", only: :test},
       {:dialyxir, "~> 0.5", only: :test, runtime: false},
       {:temp, "~> 0.4", only: :test},
       {:x509, "~> 0.7", only: :test}
@@ -112,8 +134,8 @@ defmodule RabbitMQCtl.MixfileBase do
       nil ->
         # rabbitmq_cli is built as a standalone Elixir application.
         [
-          {:rabbit_common, "~> 3.7.0"},
-          {:amqp_client, "~> 3.7.0", only: :test}
+          {:rabbit_common, "~> 3.8.0"},
+          {:amqp_client, "~> 3.8.0", only: :test}
         ]
       deps_dir ->
         # rabbitmq_cli is built as part of RabbitMQ.
@@ -127,31 +149,20 @@ defmodule RabbitMQCtl.MixfileBase do
           end
         end
 
-        # We disable compilation for rabbit_common and amqp_client
-        # because Erlang.mk already built them.
+        make_cmd = System.get_env("MAKE", "make")
+        is_bazel = System.get_env("IS_BAZEL") != nil
+
         [
           {
             :rabbit_common,
             path: Path.join(deps_dir, "rabbit_common"),
-            compile: false,
-            override: true
-          },
-          {
-            :goldrush,
-            path: Path.join(deps_dir, "goldrush"),
-            compile: false,
-            override: true
-          },
-          {
-            :lager,
-            path: Path.join(deps_dir, "lager"),
-            compile: false,
+            compile: (if is_bazel, do: false, else: make_cmd),
             override: true
           },
           {
             :amqp_client,
             path: Path.join(deps_dir, "amqp_client"),
-            compile: false,
+            compile: (if is_bazel, do: false, else: make_cmd),
             override: true,
             only: :test
           },

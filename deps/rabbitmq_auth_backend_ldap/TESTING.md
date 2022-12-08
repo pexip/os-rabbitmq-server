@@ -18,6 +18,8 @@ The testsuite needs the following modules to be available:
 
 As with all other RabbitMQ subprojects,
 
-    make tests
+``` sh
+make tests
+```
 
 will run all test suites.

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(rabbit_event).
@@ -59,17 +59,10 @@
 %%----------------------------------------------------------------------------
 
 start_link() ->
-    %% gen_event:start_link/2 is not available before OTP 20
-    %% RabbitMQ 3.7 supports OTP >= 19.3
-    case erlang:function_exported(gen_event, start_link, 2) of
-        true ->
-            gen_event:start_link(
-              {local, ?MODULE},
-              [{spawn_opt, [{fullsweep_after, 0}]}]
-            );
-        false ->
-            gen_event:start_link({local, ?MODULE})
-    end.
+    gen_event:start_link(
+      {local, ?MODULE},
+      [{spawn_opt, [{fullsweep_after, 0}]}]
+     ).
 
 %% The idea is, for each stat-emitting object:
 %%
@@ -92,6 +85,8 @@ start_link() ->
 %%
 %% internal_emit_stats:
 %%   notify(stats)
+%% Nowadays, instead of sending a message to rabbit_event via notify(stats),
+%% some stat-emitting objects update ETS tables directly via module rabbit_core_metrics.
 
 init_stats_timer(C, P) ->
     %% If the rabbit app is not loaded - use default none:5000

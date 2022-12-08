@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 %% @private
@@ -60,9 +60,17 @@ start_infrastructure_fun(Sup, Conn, network) ->
                   {main_reader, {amqp_main_reader, start_link,
                                  [Sock, Conn, ChMgr, AState, ConnName]},
                    transient, ?WORKER_WAIT, worker, [amqp_main_reader]}),
-            rabbit_net:controlling_process(Sock, Reader),
-            amqp_main_reader:post_init(Reader),
-            {ok, ChMgr, Writer}
+            case rabbit_net:controlling_process(Sock, Reader) of
+              ok ->
+                case amqp_main_reader:post_init(Reader) of
+                  ok ->
+                    {ok, ChMgr, Writer};
+                  {error, Reason} ->
+                    {error, Reason}
+                end;
+              {error, Reason} ->
+                {error, Reason}
+            end
     end;
 start_infrastructure_fun(Sup, Conn, direct) ->
     fun (ConnName) ->

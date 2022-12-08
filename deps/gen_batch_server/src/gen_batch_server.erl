@@ -69,14 +69,19 @@
 
 -callback init(Args :: term()) ->
     {ok, State} |
+    {ok, State, {continue, term()}} |
     {stop, Reason :: term()}
       when State :: term().
 
 -callback handle_batch([op()], State) ->
     {ok, State} |
+    {ok, State, {continue, term()}} |
     {ok, [action()], State} |
+    {ok, [action()], State, {continue, term()}} |
     {stop, Reason :: term()}
       when State :: term().
+
+-callback handle_continue(Continue :: term(), State :: term()) -> term().
 
 -callback terminate(Reason :: term(), State :: term()) -> term().
 
@@ -84,7 +89,8 @@
 
 %% TODO: code_change
 
--optional_callbacks([format_status/1,
+-optional_callbacks([handle_continue/2,
+                     format_status/1,
                      terminate/2]).
 
 
@@ -95,7 +101,7 @@
 -spec start_link(Mod, Args) -> Result when
      Mod :: module(),
      Args :: term(),
-     Result ::  {ok,pid()} | {error, {already_started, pid()}}.
+     Result ::  {ok,pid()} | {error, Reason :: term()}.
 start_link(Mod, Args) ->
     gen:start(?MODULE, link, Mod, {[], Args}, []).
 
@@ -106,7 +112,7 @@ start_link(Mod, Args) ->
              undefined,
      Mod :: module(),
      Args :: term(),
-     Result ::  {ok,pid()} | {error, {already_started, pid()}}.
+     Result ::  {ok,pid()} | {error, Reason :: term()}.
 start_link(Name, Mod, Args) ->
     gen_start(Name, Mod, Args, []).
 
@@ -118,7 +124,7 @@ start_link(Name, Mod, Args) ->
      Mod :: module(),
      Args :: term(),
      Options :: list(),
-     Result ::  {ok,pid()} | {error, {already_started, pid()}}.
+     Result ::  {ok,pid()} | {error, Reason :: term()}.
 start_link(Name, Mod, Args, Opts0) ->
     gen_start(Name, Mod, Args, Opts0).
 
@@ -134,20 +140,27 @@ init_it(Starter, Parent, Name0, Mod, {GBOpts, Args}, Options) ->
     MinBatchSize = proplists:get_value(min_batch_size, GBOpts,
                                        ?MIN_MAX_BATCH_SIZE),
     ReverseBatch = proplists:get_value(reversed_batch, GBOpts, false),
+    Conf = #config{module = Mod,
+                   parent = Parent,
+                   name = Name,
+                   batch_size = MinBatchSize,
+                   min_batch_size = MinBatchSize,
+                   max_batch_size = MaxBatchSize,
+                   hibernate_after = HibernateAfter,
+                   reversed_batch = ReverseBatch},
     case catch Mod:init(Args) of
-        {ok, State0} ->
+        {ok, Inner0} ->
             proc_lib:init_ack(Starter, {ok, self()}),
-            Conf = #config{module = Mod,
-                           parent = Parent,
-                           name = Name,
-                           batch_size = MinBatchSize,
-                           min_batch_size = MinBatchSize,
-                           max_batch_size = MaxBatchSize,
-                           hibernate_after = HibernateAfter,
-                           reversed_batch = ReverseBatch},
             State = #state{config = Conf,
-                           state = State0,
+                           state = Inner0,
                            debug = Debug},
+            loop_wait(State, Parent);
+        {ok, Inner0, {continue, Continue}} ->
+            proc_lib:init_ack(Starter, {ok, self()}),
+            State0 = #state{config = Conf,
+                            state = Inner0,
+                            debug = Debug},
+            State = handle_continue(Continue, State0),
             loop_wait(State, Parent);
         {stop, Reason} ->
             %% For consistency, we must make sure that the
@@ -254,14 +267,17 @@ loop_wait(#state{config = #config{hibernate_after = Hib}} = State00, Parent) ->
                      State00
              end,
     receive
-        {system, From, Request} ->
-            sys:handle_system_msg(Request, From, Parent,
-                                  ?MODULE, State0#state.debug, State0);
-        {'EXIT', Parent, Reason} ->
-            terminate(Reason, State0),
-            exit(Reason);
         Msg ->
-            enter_loop_batched(Msg, Parent, State0)
+            case Msg of
+                {system, From, Request} ->
+                    sys:handle_system_msg(Request, From, Parent,
+                                          ?MODULE, State0#state.debug, State0);
+                {'EXIT', Parent, Reason} ->
+                    terminate(Reason, State0),
+                    exit(Reason);
+                _ ->
+                    enter_loop_batched(Msg, Parent, State0)
+            end
     after Hib ->
               proc_lib:hibernate(?MODULE, ?FUNCTION_NAME, [State0, Parent])
     end.
@@ -305,14 +321,17 @@ loop_batched(#state{config = #config{batch_size = BatchSize,
               Parent);
 loop_batched(#state{debug = Debug} = State0, Parent) ->
     receive
-        {system, From, Request} ->
-            sys:handle_system_msg(Request, From, Parent,
-                                  ?MODULE, Debug, State0);
-        {'EXIT', Parent, Reason} ->
-            terminate(Reason, State0),
-            exit(Reason);
         Msg ->
-            enter_loop_batched(Msg, Parent, State0)
+            case Msg of
+                {system, From, Request} ->
+                    sys:handle_system_msg(Request, From, Parent,
+                                          ?MODULE, Debug, State0);
+                {'EXIT', Parent, Reason} ->
+                    terminate(Reason, State0),
+                    exit(Reason);
+                _ ->
+                    enter_loop_batched(Msg, Parent, State0)
+            end
     after 0 ->
               State = complete_batch(State0),
               Config = State#state.config,
@@ -350,21 +369,52 @@ complete_batch(#state{batch = Batch0,
             State0#state{batch = [],
                          state = Inner,
                          batch_count = 0};
-        {ok, Actions, Inner} ->
-            {ShouldGc, Debug} =
-                lists:foldl(fun ({reply, {Pid, Tag}, Msg},
-                                 {ShouldGc, Dbg}) ->
-                                    Pid ! {Tag, Msg},
-                                    {ShouldGc,
-                                     handle_debug_out(Pid, Msg, Dbg)};
-                                (garbage_collect, {_, Dbg}) ->
-                                    {true, Dbg}
-                            end, {false, Debug0}, Actions),
+        {ok, Inner, {continue, Continue}} ->
+            handle_continue(Continue,
+                            State0#state{batch = [],
+                                         state = Inner,
+                                         batch_count = 0});
+        {ok, Actions, Inner} when is_list(Actions) ->
+            {ShouldGc, Debug} = handle_actions(Actions, Debug0),
             State0#state{batch = [],
-                         state = Inner,
                          batch_count = 0,
+                         state = Inner,
                          needs_gc = ShouldGc,
                          debug = Debug};
+        {ok, Actions, Inner, {continue, Continue}} when is_list(Actions) ->
+            {ShouldGc, Debug} = handle_actions(Actions, Debug0),
+            handle_continue(Continue,
+                            State0#state{batch = [],
+                                         batch_count = 0,
+                                         state = Inner,
+                                         needs_gc = ShouldGc,
+                                         debug = Debug});
+        {stop, Reason} ->
+            terminate(Reason, State0),
+            exit(Reason);
+        {'EXIT', Reason} ->
+            terminate(Reason, State0),
+            exit(Reason)
+    end.
+
+handle_actions(Actions, Debug0) ->
+    lists:foldl(fun ({reply, {Pid, Tag}, Msg},
+                     {ShouldGc, Dbg}) ->
+                        Pid ! {Tag, Msg},
+                        {ShouldGc,
+                         handle_debug_out(Pid, Msg, Dbg)};
+                    (garbage_collect, {_, Dbg}) ->
+                        {true, Dbg}
+                end, {false, Debug0}, Actions).
+
+
+handle_continue(Continue, #state{config = #config{module = Mod},
+                                 state = Inner0} = State0) ->
+    case catch Mod:handle_continue(Continue, Inner0) of
+        {ok, Inner} ->
+            State0#state{state = Inner};
+        {ok, Inner, {continue, Continue}} ->
+            handle_continue(Continue, State0#state{state = Inner});
         {stop, Reason} ->
             terminate(Reason, State0),
             exit(Reason);
@@ -418,13 +468,8 @@ format_status(_Reason, [_PDict, SysState, Parent, Debug,
          T -> [T]
      end].
 
--if(?OTP_RELEASE >= 22).
 sys_get_log(Debug) ->
     sys:get_log(Debug).
--else.
-sys_get_log(Debug) ->
-    sys:get_debug(log, Debug, []).
--endif.
 
 write_debug(Dev, Event, Name) ->
     io:format(Dev, "~p event = ~p~n", [Name, Event]).

@@ -98,10 +98,22 @@ dispatcher_add(function(sammy) {
         });
 
     sammy.get('#/queues/:vhost/:name', function() {
-            var path = '/queues/' + esc(this.params['vhost']) + '/' + esc(this.params['name']);
-            render({'queue': {path:    path,
-                              options: {ranges:['lengths-q', 'msg-rates-q', 'data-rates-q']}},
-                    'bindings': path + '/bindings'}, 'queue', '#/queues');
+            var vhost = this.params['vhost'];
+            var queue = this.params['name'];
+            var path = '/queues/' + esc(vhost) + '/' + esc(queue);
+            var requests = {'queue': {path:    path,
+                                      options: {ranges:['lengths-q', 'msg-rates-q', 'data-rates-q']}},
+                            'bindings': path + '/bindings'};
+            // we add extra requests that can be added by code plugged on the extension point
+            for (var i = 0; i < QUEUE_EXTRA_CONTENT_REQUESTS.length; i++) {
+                var extra = QUEUE_EXTRA_CONTENT_REQUESTS[i](vhost, queue);
+                for (key in extra) {
+                    if(extra.hasOwnProperty(key)){
+                        requests[key] = extra[key];
+                    }
+                }
+            }
+            render(requests, 'queue', '#/queues');
         });
     sammy.put('#/queues', function() {
             if (sync_put(this, '/queues/:vhost/:name'))
@@ -178,18 +190,26 @@ dispatcher_add(function(sammy) {
                      'permissions': '/permissions'}, 'users');
     sammy.get('#/users/:id', function() {
         var vhosts = JSON.parse(sync_get('/vhosts'));
-            render({'user': '/users/' + esc(this.params['id']),
+        const current_vhost = get_pref('vhost');
+        var index_vhost = 0;
+        for (var i = 0; i < vhosts.length; i++) {
+            if (vhosts[i].name === current_vhost) {
+                index_vhost = i;
+                break;
+            }
+        }
+        render({'user': '/users/' + esc(this.params['id']),
                     'permissions': '/users/' + esc(this.params['id']) + '/permissions',
                     'topic_permissions': '/users/' + esc(this.params['id']) + '/topic-permissions',
                     'vhosts': '/vhosts/',
-                    'exchanges': '/exchanges/' + esc(vhosts[0].name)}, 'user',
-                   '#/users');
+                    'exchanges': '/exchanges/' + esc(vhosts[index_vhost].name)},
+           'user','#/users');
         });
     sammy.put('#/users-add', function() {
             res = sync_put(this, '/users/:username');
             if (res) {
                 if (res.http_status === 204) {
-                    username = res.req_params.username;
+                    username = fmt_escape_html(res.req_params.username);
                     show_popup('warn', "Updated an existing user: '" + username + "'");
                 }
                 update();
@@ -291,6 +311,8 @@ dispatcher_add(function(sammy) {
             update_column_options(this);
         });
     path('#/limits', {'limits': '/vhost-limits',
+                      'user_limits': '/user-limits',
+                      'users': '/users',
                       'vhosts': '/vhosts'}, 'limits');
 
     sammy.put('#/limits', function() {
@@ -307,11 +329,28 @@ dispatcher_add(function(sammy) {
             }
         }
     });
+    sammy.put('#/user-limits', function() {
+        var valAsInt = parseInt(this.params.value);
+        if (isNaN(valAsInt)) {
+            var e = 'Validation failed\n\n' +
+                this.params.name + ' should be a number, actually was "' +
+                this.params.value + '"';
+            show_popup('warn', fmt_escape_html(e));
+        } else {
+            this.params.value = valAsInt;
+            if (sync_put(this, '/user-limits/:user/:name')) {
+                update();
+            }
+        }
+    });
     sammy.post('#/restart_vhost', function(){
         if(sync_post(this, '/vhosts/:vhost/start/:node')) update();
     })
     sammy.del('#/limits', function() {
         if (sync_delete(this, '/vhost-limits/:vhost/:name')) update();
+    });
+    sammy.del('#/user-limits', function() {
+        if (sync_delete(this, '/user-limits/:user/:name')) update();
     });
     sammy.del("#/reset", function(){
             if(sync_delete(this, '/reset')){

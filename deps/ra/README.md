@@ -26,18 +26,17 @@ The following Raft features are implemented:
 
 ### Build Status
 
-[![Build Status](https://travis-ci.org/rabbitmq/ra.svg?branch=master)](https://travis-ci.org/rabbitmq/ra)
+![Actions](https://github.com/rabbitmq/ra/actions/workflows/erlang.yml/badge.svg)
 
 ## Supported Erlang/OTP Versions
 
 Ra supports the following Erlang/OTP versions:
 
+ * `24.x`
  * `23.x`
- * `22.x`
- * `21.3.x` (testing will be discontinued in September 2020)
 
-22.x and later versions are **highly recommended**
-because of [distribution traffic fragmentation](http://blog.erlang.org/OTP-22-Highlights/).
+Modern Erlang releases provide [distribution traffic fragmentation](https://www.erlang.org/blog/otp-22-highlights/#fragmented-distribution-messages)
+which algorithms such as Raft significantly benefit from.
 
 
 ## Design Goals
@@ -89,16 +88,13 @@ After Ra nodes form a cluster, state machine commands can be performed.
 Here's what a small example looks like:
 
 ``` erlang
-%% The Ra application has to be started before it can be used.
-ra:start(),
-
 %% All servers in a Ra cluster are named processes on Erlang nodes.
 %% The Erlang nodes must have distribution enabled and be able to
 %% communicate with each other.
 %% See https://learnyousomeerlang.com/distribunomicon if you are new to Erlang/OTP.
 
 %% These Erlang nodes will host Ra nodes. They are the "seed" and assumed to
-%% be running or come online shortly after Ra cluster formation is started with ra:start_cluster/3.
+%% be running or come online shortly after Ra cluster formation is started with ra:start_cluster/4.
 ErlangNodes = ['ra1@hostname.local', 'ra2@hostname.local', 'ra3@hostname.local'],
 
 %% This will check for Erlang distribution connectivity. If Erlang nodes
@@ -106,22 +102,25 @@ ErlangNodes = ['ra1@hostname.local', 'ra2@hostname.local', 'ra3@hostname.local']
 %% either.
 [io:format("Attempting to communicate with node ~s, response: ~s~n", [N, net_adm:ping(N)]) || N <- ErlangNodes],
 
+%% The Ra application has to be started on all nodes before it can be used.
+[rpc:call(N, ra, start, []) || N <- ErlangNodes],
+
 %% Create some Ra server IDs to pass to the configuration. These IDs will be
 %% used to address Ra nodes in Ra API functions.
 ServerIds = [{quick_start, N} || N <- ErlangNodes],
 
 ClusterName = quick_start,
-%% State machine that implements the logic
+%% State machine that implements the logic and an initial state
 Machine = {simple, fun erlang:'+'/2, 0},
 
-%% Start a Ra cluster  with an addition state machine that has an initial state of 0.
+%% Start a Ra cluster with an addition state machine that has an initial state of 0.
 %% It's sufficient to invoke this function only on one Erlang node. For example, this
 %% can be a "designated seed" node or the node that was first to start and did not discover
 %% any peers after a few retries.
 %%
 %% Repeated startup attempts will fail even if the cluster is formed, has elected a leader
 %% and is fully functional.
-{ok, ServersStarted, _ServersNotStarted} = ra:start_cluster(ClusterName, Machine, ServerIds),
+{ok, ServersStarted, _ServersNotStarted} = ra:start_cluster(default, ClusterName, Machine, ServerIds),
 
 %% Add a number to the state machine.
 %% Simple state machines always return the full state after each operation.
@@ -131,8 +130,164 @@ Machine = {simple, fun erlang:'+'/2, 0},
 {ok, 12, LeaderId1} = ra:process_command(LeaderId, 7).
 ```
 
+### Querying Machine State
+
+Ra machines are only useful if their state can be queried. There are two types of queries:
+
+ * Local queries return machine state on the target node
+ * Leader queries return machine state from the leader node.
+   If a follower node is queried, the query command will be redirected to the leader.
+
+Local queries are much more efficient but can return out-of-date machine state.
+Leader queries offer best possible machine state consistency but potentially require
+sending a request to a remote node.
+
+Use `ra:leader_query/{2,3}` to perform a leader query:
+
+``` erlang
+%% find current Raft cluster leader
+{ok, _Members, LeaderId} = ra:members(quick_start),
+%% perform a leader query on the leader node
+QueryFun = fun(StateVal) -> StateVal end,
+{ok, {_TermMeta, State}, LeaderId1} = ra:leader_query(LeaderId, QueryFun).
+```
+
+Similarly, use `ra:local_query/{2,3}` to perform a local query:
+
+``` erlang
+%% this is the replica hosted on the current Erlang node.
+%% alternatively it can be constructed as {ClusterName, node()}
+{ok, Members, _LeaderId} = ra:members(quick_start),
+LocalReplicaId = lists:keyfind(node(), 2, Members),
+%% perform a local query on the local node
+QueryFun = fun(StateVal) -> StateVal end,
+{ok, {_TermMeta, State}, LeaderId1} = ra:local_query(LocalReplicaId, QueryFun).
+```
+
+A query function is a single argument function that accepts current machine state
+and returns any value (usually derived from the state).
+
+Both `ra:leader_query/2` and `ra:local_query/2` return machine term metadata, a result returned by the query
+function, and current cluster leader ID.
+
+
+### Dynamically Changing Cluster Membership
+
+Nodes can be added to or removed from a Ra cluster dynamically. Only one
+cluster membership change at a time is allowed: concurrent changes
+will be rejected by design.
+
+In this example, instead of starting a "pre-formed" cluster,
+a local server is started and then members are added by calling `ra:add_member/2`.
+
+Start 3 Erlang nodes:
+
+``` shell
+# replace hostname.local with your actual hostname
+rebar3 shell --name ra1@hostname.local
+```
+
+``` shell
+# replace hostname.local with your actual hostname
+rebar3 shell --name ra2@hostname.local
+```
+
+``` shell
+# replace hostname.local with your actual hostname
+rebar3 shell --name ra3@hostname.local
+```
+
+Start the ra application:
+
+``` erlang
+%% on ra1@hostname.local
+ra:start().
+% => ok
+```
+
+``` erlang
+%% on ra2@hostname.local
+ra:start().
+% => ok
+```
+
+``` erlang
+%% on ra3@hostname.local
+ra:start().
+% => ok
+```
+
+A single node cluster can be started from any node.
+
+For the purpose of this example, `ra2@hostname.local` is used as the starting member:
+
+``` erlang
+ClusterName = dyn_members,
+Machine = {simple, fun erlang:'+'/2, 0},
+
+% Start a cluster
+{ok, _, _} =  ra:start_cluster(default, ClusterName, Machine, [{dyn_members, 'ra2@hostname.local'}]).
+```
+
+After the cluster is formed, members can be added.
+
+Add `ra1@hostname.local` by telling `ra2@hostname.local` about it
+and starting a Ra replica (server) on `ra1@hostname.local` itself:
+
+``` erlang
+% Add member
+{ok, _, _} = ra:add_member({dyn_members, 'ra2@hostname.local'}, {dyn_members, 'ra1@hostname.local'}),
+
+% Start the server
+ok = ra:start_server(default, ClusterName, {dyn_members, 'ra1@hostname.local'}, Machine, [{dyn_members, 'ra2@hostname.local'}]).
+```
+
+Add `ra3@hostname.local` to the cluster:
+
+``` erlang
+% Add a new member
+{ok, _, _} = ra:add_member({dyn_members, 'ra2@hostname.local'}, {dyn_members, 'ra3@hostname.local'}),
+
+% Start the server
+ok = ra:start_server(default, ClusterName, {dyn_members, 'ra3@hostname.local'}, Machine, [{dyn_members, 'ra2@hostname.local'}]).
+```
+
+Check the members from any node:
+
+``` erlang
+ra:members({dyn_members, node()}).
+% => {ok,[{dyn_members,'ra1@hostname.local'},
+% =>      {dyn_members,'ra2@hostname.local'},
+% =>      {dyn_members,'ra3@hostname.local'}],
+% =>      {dyn_members,'ra2@hostname.local'}}
+```
+
+If a node wants to leave the cluster, it can use `ra:leave_and_terminate/3`
+and specify itself as the target:
+
+Temporarily add a new ndde, say `ra4@hostname.local`, to the cluster:
+
+``` erlang
+% Add a new member
+{ok, _, _} = ra:add_member({dyn_members, 'ra2@hostname.local'}, {dyn_members, 'ra4@hostname.local'}),
+
+% Start the server
+ok = ra:start_server(default, ClusterName, {dyn_members, 'ra4@hostname.local'}, Machine, [{dyn_members, 'ra2@hostname.local'}]).
+
+%% on ra4@hostname.local
+ra:leave_and_terminate(default, {ClusterName, node()}, {ClusterName, node()}).
+
+ra:members({ClusterName, node()}).
+% => {ok,[{dyn_members,'ra1@hostname.local'},
+% =>      {dyn_members,'ra2@hostname.local'},
+% =>      {dyn_members,'ra3@hostname.local'}],
+% =>      {dyn_members,'ra2@hostname.local'}}
+```
+
+### Other examples
+
 See [Ra state machine tutorial](docs/internals/STATE_MACHINE_TUTORIAL.md)
-for how to write more sophisiticated state machines by implementing
+for how to write more sophisticated state machines by implementing
 the `ra_machine` behaviour.
 
 A [Ra-based key/value store example](https://github.com/rabbitmq/ra-kv-store) is available
@@ -141,7 +296,7 @@ in a separate repository.
 
 ## Documentation
 
-* [API reference](https://rabbitmq.github.io/ra/)
+* [API reference](https://hex.pm/packages/ra)
 * How to write a Ra state machine: [Ra state machine tutorial](docs/internals/STATE_MACHINE_TUTORIAL.md)
 * Design and implementation details: [Ra internals guide](docs/internals/INTERNALS.md)
 
@@ -177,6 +332,11 @@ in a separate repository.
         <td>Positive integer</td>
     </tr>
     <tr>
+        <td>wal_max_entries</td>
+        <td>The maximum number of entries per WAL file. Default: undefined</td>
+        <td>Positive integer</td>
+    </tr>
+    <tr>
         <td>wal_compute_checksums</td>
         <td>Indicate whether the wal should compute and validate checksums. Default: `true`</td>
         <td>Boolean</td>
@@ -189,7 +349,7 @@ in a separate repository.
                     <code>default</code>: used by default. <code>write(2)</code> system calls are delayed until a buffer is due to be flushed. Then it writes all the data in a single call then <code>fsync</code>s. Fastest option but incurs some additional memory use.
                 </li>
                 <li>
-                    <code>o_sync</code>: Like default but will try to open the file with O_SYNC and thus wont need the additional <code>fsync(2)</code> system call. If it fails to open the file with this flag this mode falls back to default.
+                    <code>o_sync</code>: Like default but will try to open the file with O_SYNC and thus won't need the additional <code>fsync(2)</code> system call. If it fails to open the file with this flag this mode falls back to default.
                 </li>
             </ul>
         </td>
@@ -230,6 +390,13 @@ in a separate repository.
         <td>Positive integer</td>
     </tr>
     <tr>
+        <td>wal_hibernate_after</td>
+        <td>
+            Enables hibernation after a timeout of inactivity for the WAL process.
+        </td>
+        <td>Milliseconds</td>
+    </tr>
+    <tr>
         <td>metrics_key</td>
         <td>Metrics key. The key used to write metrics into the ra_metrics table.</td>
         <td>Atom</td>
@@ -242,6 +409,11 @@ in a separate repository.
             of low priority commands that are added to the log each flush cycle. Default: 25
         </td>
         <td>Positive integer</td>
+    </tr>
+    <tr>
+        <td>segment_compute_checksums</td>
+        <td>Indicate whether the segment writer should compute and validate checksums. Default: `true`</td>
+        <td>Boolean</td>
     </tr>
 </table>
 
@@ -258,7 +430,14 @@ logger:set_primary_config(level, debug).
 
 ## Copyright and License
 
-(c) 2017-2020, VMware Inc or its affiliates.
+(c) 2017-2022, VMware Inc or its affiliates.
 
-Double licensed under the ASL2 and MPL2.0.
+Dual licensed under the Apache License Version 2.0 and
+Mozilla Public License Version 2.0.
+
+This means that the user can consider the library to be licensed under
+**any of the licenses from the list** above. For example, you may
+choose the Apache Public License 2.0 and include this library into a
+commercial product.
+
 See [LICENSE](./LICENSE) for details.

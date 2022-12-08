@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2020-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -include("amqp_client.hrl").
@@ -27,6 +27,7 @@
      {<<"connection.blocked">>,           bool, true},
      {<<"authentication_failure_close">>, bool, true}]).
 
--define(CALL_TIMEOUT, rabbit_misc:get_env(amqp_client, gen_server_call_timeout,
-                                          60000)).
+-define(WAIT_FOR_CONFIRMS_TIMEOUT, {60000, millisecond}).
 
+-define(DIRECT_OPERATION_TIMEOUT,  120000).
+-define(CALL_TIMEOUT_DEVIATION,    10000).

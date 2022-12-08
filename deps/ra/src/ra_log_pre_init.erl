@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 -module(ra_log_pre_init).
 
@@ -26,19 +26,21 @@
 %%% API functions
 %%%===================================================================
 
-start_link(DataDir) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [DataDir], []).
+start_link(System) when is_atom(System) ->
+    gen_server:start_link(?MODULE, [System], []).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-init([_DataDir]) ->
+init([System]) ->
     %% ra_log:pre_init ensures that the ra_log_snapshot_state table is
     %% populated before WAL recovery begins to avoid writing unnecessary
     %% indexes to segment files.
-    Regd = ra_directory:list_registered(),
-    _ = [catch(pre_init(Name)) || {Name, _U} <- Regd],
+    Regd = ra_directory:list_registered(System),
+    ?INFO("ra system '~s' running pre init for ~b registered servers",
+          [System, length(Regd)]),
+    _ = [catch(pre_init(System, Name)) || {Name, _U} <- Regd],
     {ok, #state{} , hibernate}.
 
 handle_call(_Request, _From, State) ->
@@ -61,8 +63,8 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-pre_init(Name) ->
-    {ok, #{log_init_args := Log}} = ra_server_sup_sup:prepare_restart_rpc(Name),
+pre_init(System, Name) ->
+    {ok, #{log_init_args := Log}} = ra_server_sup_sup:recover_config(System, Name),
     _ = ra_log:pre_init(Log),
     ok.
 

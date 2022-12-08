@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2018-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(vhost).
@@ -25,7 +25,11 @@
   get_metadata/1,
   get_description/1,
   get_tags/1,
-  set_limits/2
+  get_default_queue_type/1,
+  set_limits/2,
+  set_metadata/2,
+  merge_metadata/2,
+  is_tagged_with/2
 ]).
 
 -define(record_version, vhost_v2).
@@ -79,7 +83,7 @@ new(Name, Limits) ->
           vhost_v1:new(Name, Limits)
     end.
 
--spec new(rabbit_vhost:name(), list(), map()) -> vhost().
+-spec new(name(), list(), map()) -> vhost().
 new(Name, Limits, Metadata) ->
     case record_version_to_use() of
         ?record_version ->
@@ -127,8 +131,16 @@ info_keys() ->
     case record_version_to_use() of
         %% note: this reports description and tags separately even though
         %% they are stored in the metadata map. MK.
-        ?record_version -> [name, description, tags, metadata, tracing, cluster_state];
-        _               -> vhost_v1:info_keys()
+        ?record_version ->
+            [name,
+             description,
+             tags,
+             default_queue_type,
+             metadata,
+             tracing,
+             cluster_state];
+        _ ->
+            vhost_v1:info_keys()
     end.
 
 -spec pattern_match_all() -> vhost_pattern().
@@ -163,6 +175,12 @@ get_tags(#vhost{} = VHost) ->
 get_tags(VHost) ->
     vhost_v1:get_tags(VHost).
 
+-spec get_default_queue_type(vhost()) -> binary() | undefined.
+get_default_queue_type(#vhost{} = VHost) ->
+    maps:get(default_queue_type, get_metadata(VHost), undefined);
+get_default_queue_type(_VHost) ->
+    undefined.
+
 set_limits(VHost, Value) ->
     case record_version_to_use() of
       ?record_version ->
@@ -170,3 +188,29 @@ set_limits(VHost, Value) ->
       _ ->
         vhost_v1:set_limits(VHost, Value)
     end.
+
+-spec set_metadata(vhost(), metadata()) -> vhost().
+set_metadata(VHost, Value) ->
+    case record_version_to_use() of
+      ?record_version ->
+        VHost#vhost{metadata = Value};
+      _ ->
+        %% the field is not available, so this is a no-op
+        VHost
+    end.
+
+-spec merge_metadata(vhost(), metadata()) -> vhost().
+merge_metadata(VHost, Value) ->
+    case record_version_to_use() of
+      ?record_version ->
+        Meta0 = get_metadata(VHost),
+        NewMeta = maps:merge(Meta0, Value),
+        VHost#vhost{metadata = NewMeta};
+      _ ->
+        %% the field is not available, so this is a no-op
+        VHost
+    end.
+
+-spec is_tagged_with(vhost:vhost(), atom()) -> boolean().
+is_tagged_with(VHost, Tag) ->
+    lists:member(Tag, get_tags(VHost)).

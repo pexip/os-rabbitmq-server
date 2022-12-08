@@ -1,7 +1,5 @@
 PROJECT = rabbitmq_cli
 
-dep_observer_cli = git https://github.com/zhongwencool/observer_cli 1.4.4
-
 BUILD_DEPS = rabbit_common
 DEPS = observer_cli
 TEST_DEPS = amqp_client rabbit
@@ -10,28 +8,21 @@ DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
 DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk
 
 VERBOSE_TEST ?= true
+MAX_CASES ?= 1
 
-ifeq ($(VERBOSE_TEST),true)
-MIX_TEST = mix test --trace
-else
-MIX_TEST = mix test --max-cases=1
+MIX_TEST_OPTS ?= ""
+MIX_TEST = ERL_COMPILER_OPTIONS=deterministic mix test --max-cases=$(MAX_CASES)
+
+ifneq ("",$(MIX_TEST_OPTS))
+MIX_TEST := $(MIX_TEST) $(MIX_TEST_OPTS)
 endif
 
-# FIXME: Use erlang.mk patched for RabbitMQ, while waiting for PRs to be
-# reviewed and merged.
+ifeq ($(VERBOSE_TEST),true)
+MIX_TEST := $(MIX_TEST) --trace
+endif
 
-ERLANG_MK_REPO = https://github.com/rabbitmq/erlang.mk.git
-ERLANG_MK_COMMIT = rabbitmq-tmp
-
-WITHOUT = plugins/cover \
-	  plugins/ct \
-	  plugins/dialyzer \
-	  plugins/eunit \
-	  plugins/proper \
-	  plugins/triq
-
-include rabbitmq-components.mk
-include erlang.mk
+include ../../rabbitmq-components.mk
+include ../../erlang.mk
 
 # rabbitmq-mix.mk is generated during the creation of the RabbitMQ
 # source archive. It sets some environment variables to allow
@@ -42,7 +33,9 @@ ACTUAL_ESCRIPTS = escript/rabbitmqctl
 LINKED_ESCRIPTS = escript/rabbitmq-plugins \
 		  escript/rabbitmq-diagnostics \
 		  escript/rabbitmq-queues \
-                  escript/rabbitmq-upgrade
+		  escript/rabbitmq-streams \
+			escript/rabbitmq-tanzu \
+      escript/rabbitmq-upgrade
 ESCRIPTS = $(ACTUAL_ESCRIPTS) $(LINKED_ESCRIPTS)
 
 # Record the build and link dependency: the target files are linked to
@@ -50,8 +43,10 @@ ESCRIPTS = $(ACTUAL_ESCRIPTS) $(LINKED_ESCRIPTS)
 rabbitmq-plugins = escript/rabbitmqctl
 rabbitmq-diagnostics = escript/rabbitmqctl
 rabbitmq-queues = escript/rabbitmqctl
+rabbitmq-streams = escript/rabbitmqctl
+rabbitmq-tanzu = escript/rabbitmqctl
 rabbitmq-upgrade = escript/rabbitmqctl
-escript/rabbitmq-plugins escript/rabbitmq-diagnostics escript/rabbitmq-queues escript/rabbitmq-upgrade: escript/rabbitmqctl
+escript/rabbitmq-plugins escript/rabbitmq-diagnostics escript/rabbitmq-queues escript/rabbitmq-streams escript/rabbitmq-tanzu escript/rabbitmq-upgrade: escript/rabbitmqctl
 
 # We use hardlinks or symlinks in the `escript` directory and
 # install's PREFIX when a single escript can have several names (eg.
@@ -98,9 +93,9 @@ rabbitmqctl_srcs := mix.exs \
 # ones).
 $(ACTUAL_ESCRIPTS): $(rabbitmqctl_srcs)
 	$(gen_verbose) if test -d ../.hex; then \
-		echo y | mix make_all_in_src_archive; \
+		echo y | ERL_COMPILER_OPTIONS=deterministic mix make_all_in_src_archive; \
 	else \
-		echo y | mix make_all; \
+		echo y | ERL_COMPILER_OPTIONS=deterministic mix make_all; \
 	fi
 
 $(LINKED_ESCRIPTS):

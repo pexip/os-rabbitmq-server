@@ -1,18 +1,9 @@
 #!/bin/sh
 # vim:sw=4:et:
-##  The contents of this file are subject to the Mozilla Public License
-##  Version 1.1 (the "License"); you may not use this file except in
-##  compliance with the License. You may obtain a copy of the License
-##  at https://www.mozilla.org/MPL/
+##  This Source Code Form is subject to the terms of the Mozilla Public
+##  License, v. 2.0. If a copy of the MPL was not distributed with this
+##  file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-##  Software distributed under the License is distributed on an "AS IS"
-##  basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-##  the License for the specific language governing rights and
-##  limitations under the License.
-##
-##  The Original Code is RabbitMQ.
-##
-##  The Initial Developer of the Original Code is GoPivotal, Inc.
 ##  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
 ##
 
@@ -27,30 +18,9 @@ SCRIPTS_DIR=$(dirname "$0")
 
 RABBITMQ_DEFAULT_ALLOC_ARGS="+MBas ageffcbf +MHas ageffcbf +MBlmbcs 512 +MHlmbcs 512 +MMmcs 30"
 
-# Bump ETS table limit to 50000
-if [ "x" = "x$ERL_MAX_ETS_TABLES" ]; then
-    ERL_MAX_ETS_TABLES=50000
-fi
-
-# Lazy initialization of threed pool size - if it wasn't set
-# explicitly. This parameter is only needed when server is starting,
-# so it makes no sense to do this calculations in rabbitmq-env or
-# rabbitmq-defaults scripts.
-ensure_thread_pool_size() {
-    if [ -z "${RABBITMQ_IO_THREAD_POOL_SIZE}" ]; then
-        RABBITMQ_IO_THREAD_POOL_SIZE=$(
-            erl \
-                -noinput \
-                -boot "${CLEAN_BOOT_FILE}" \
-                -s rabbit_misc report_default_thread_pool_size
-        )
-    fi
-}
-
 check_start_params() {
     check_not_empty RABBITMQ_BOOT_MODULE
     check_not_empty SASL_BOOT_FILE
-    check_not_empty RABBITMQ_IO_THREAD_POOL_SIZE
 }
 
 check_not_empty() {
@@ -68,7 +38,6 @@ start_rabbitmq_server() {
     set -e
 
     _rmq_env_set_erl_libs
-    ensure_thread_pool_size
 
     RABBITMQ_START_RABBIT=
     [ "x" = "x$RABBITMQ_ALLOW_INPUT" ] && RABBITMQ_START_RABBIT=" -noinput"
@@ -101,14 +70,13 @@ start_rabbitmq_server() {
         ${RABBITMQ_START_RABBIT} \
         -boot "${SASL_BOOT_FILE}" \
         +W w \
-        +K true \
-        +A ${RABBITMQ_IO_THREAD_POOL_SIZE} \
         ${RABBITMQ_DEFAULT_ALLOC_ARGS} \
         ${RABBITMQ_SERVER_ERL_ARGS} \
         ${RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS} \
         ${RABBITMQ_SERVER_START_ARGS} \
-        -lager crash_log false \
-        -lager handlers '[]' \
+        -syslog logger '[]' \
+        -syslog syslog_error_logger false \
+        -kernel prevent_overlapping_partitions false \
         "$@"
 }
 
