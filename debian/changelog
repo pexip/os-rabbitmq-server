@@ -1,3 +1,10 @@
+rabbitmq-server (3.8.9-3pexip5) pexip-v31; urgency=medium
+
+  * Remove init script
+  * Dump available entropy in postinst
+
+ -- John-Mark Bell <jmb@pexip.com>  Wed, 01 Mar 2023 17:01:36 +0000
+
 rabbitmq-server (3.8.9-3pexip4) pexip-bullseye; urgency=medium
 
   * Bullseye rebuild for ARM64 inclusion

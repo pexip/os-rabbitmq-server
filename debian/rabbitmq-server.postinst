@@ -39,6 +39,8 @@ case "$1" in
            [ ! -f /etc/rabbitmq/rabbitmq-env.conf ]; then
             mv /etc/rabbitmq/rabbitmq.conf /etc/rabbitmq/rabbitmq-env.conf
         fi
+        echo -n "Available entropy: "
+        cat /proc/sys/kernel/random/entropy_avail || :
     ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)
