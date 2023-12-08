@@ -1,3 +1,9 @@
+rabbitmq-server (3.10.8-1.1+deb12u1pexip1) pexip-bookworm; urgency=medium
+
+  * New upstream release.
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Fri, 08 Dec 2023 17:56:40 +0000
+
 rabbitmq-server (3.10.8-1.1+deb12u1) bookworm-security; urgency=high
 
   * CVE-2023-46118: Denial of Service by publishing large messages over the
