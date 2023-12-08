@@ -1,3 +1,13 @@
+rabbitmq-server (3.10.8-1.1+deb12u1) bookworm-security; urgency=high
+
+  * CVE-2023-46118: Denial of Service by publishing large messages over the
+    HTTP API. Applied upstream patches that introduce a limit of 10MB:
+    - Reduce_default_HTTP_API_request_body_size_limit_to_10_MiB.patch
+    - Introduce_HTTP_request_body_limit_for_definition_uploads.patch
+    (Closes: #1056723).
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 27 Nov 2023 08:25:34 +0100
+
 rabbitmq-server (3.10.8-1.1pexip3) pexip-bookworm; urgency=medium
 
   * Initial bookworm build
