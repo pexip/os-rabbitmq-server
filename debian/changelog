@@ -1,3 +1,9 @@
+rabbitmq-server (3.10.8-1.1+deb12u1+pexip24u6) pexip; urgency=medium
+
+  * Remove the dependency on socat, no longer needed.
+
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Tue, 14 May 2024 17:14:56 +0100
+
 rabbitmq-server (3.10.8-1.1+deb12u1+pexip24u5) pexip-bookworm; urgency=medium
 
   * New versioning scheme

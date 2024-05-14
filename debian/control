@@ -63,7 +63,6 @@ Depends:
  logrotate,
  lsb-base,
  openssl,
- socat,
  ${misc:Depends},
  ${python3:Depends},
 Description: AMQP server written in Erlang
