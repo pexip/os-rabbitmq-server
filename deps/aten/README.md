@@ -1,7 +1,5 @@
 # Aten
 
-[![Build Status](https://travis-ci.org/rabbitmq/aten.svg?branch=master)](https://travis-ci.org/rabbitmq/aten)
-
 This is an implementation of [A New Adaptive Accrual Failure Detector for Dependable Distributed Systems](https://dl.acm.org/citation.cfm?id=1244129)
 for distributed Erlang.
 
@@ -51,4 +49,4 @@ rebar3 compile
 `aten` is [dual-licensed](./LICENSE) under the Mozilla Public License 2.0
 and the Apache Public License 2.0.
 
-(c) 2017-2021 VMware, Inc or its affiliates.
+(c) 2017-2023 Broadcom. All Rights Reserved. The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.

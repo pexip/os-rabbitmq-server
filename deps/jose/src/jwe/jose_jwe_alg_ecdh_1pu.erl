@@ -2,9 +2,9 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2019, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc Key Agreement with Elliptic Curve Diffie-Hellman One-Pass Unified Model (ECDH-1PU)
-%%% See https://tools.ietf.org/html/draft-madden-jose-ecdh-1pu-02
+%%% See https://datatracker.ietf.org/doc/html/draft-madden-jose-ecdh-1pu-04
 %%%
 %%% @end
 %%% Created :  29 Dec 2019 by Andrew Bennett <potatosaladx@gmail.com>
@@ -104,7 +104,7 @@ to_map(A = ?ECDH_1PU, F) ->
 generate_key(_Fields, {ENCModule, ENC}, ALG=#jose_jwe_alg_ecdh_1pu{epk=EphemeralPublicJWK=#jose_jwk{}}) ->
 	jose_jwe_alg:generate_key(EphemeralPublicJWK, maps:get(<<"alg">>, to_map(ALG, #{})), ENCModule:algorithm(ENC));
 generate_key(_Fields, {ENCModule, ENC}, ALG=#jose_jwe_alg_ecdh_1pu{}) ->
-	jose_jwe_alg:generate_key({ec, <<"P-521">>}, maps:get(<<"alg">>, to_map(ALG, #{})), ENCModule:algorithm(ENC)).
+	jose_jwe_alg:generate_key({ec, <<"X25519">>}, maps:get(<<"alg">>, to_map(ALG, #{})), ENCModule:algorithm(ENC)).
 
 key_decrypt({UStaticPublicKey=#jose_jwk{}, VStaticSecretKey=#jose_jwk{}, UEphemeralKey=#jose_jwk{}}, EncryptedKey, JWEECDH1PU=#jose_jwe_alg_ecdh_1pu{epk=UEphemeralPublicKey=#jose_jwk{}}) ->
 	case jose_jwk:thumbprint(UEphemeralKey) =:= jose_jwk:thumbprint(UEphemeralPublicKey) of

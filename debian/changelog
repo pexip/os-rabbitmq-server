@@ -1,19 +1,41 @@
-rabbitmq-server (3.10.8-1.1+deb12u1) bookworm-security; urgency=high
+rabbitmq-server (4.0.5-3) unstable; urgency=medium
 
-  * CVE-2023-46118: Denial of Service by publishing large messages over the
-    HTTP API. Applied upstream patches that introduce a limit of 10MB:
-    - Reduce_default_HTTP_API_request_body_size_limit_to_10_MiB.patch
-    - Introduce_HTTP_request_body_limit_for_definition_uploads.patch
-    (Closes: #1056723).
+  [ Antonio Terceiro ]
+  * Demote logrotate from Depends: to Recommends:.
 
- -- Thomas Goirand <zigo@debian.org>  Mon, 27 Nov 2023 08:25:34 +0100
+ -- Thomas Goirand <zigo@debian.org>  Mon, 10 Mar 2025 17:04:30 +0100
 
-rabbitmq-server (3.10.8-1.1) unstable; urgency=medium
+rabbitmq-server (4.0.5-2) unstable; urgency=medium
 
-  * Non-maintainer upload.
-  * No source change upload to rebuild with debhelper 13.10.
+  * Works with Erlang 27 (Closes: #1090027).
+  * Removed erlang-erl-docgen build-depends.
+  * Depends on erlang >= 27.
+  * Fixed Extra # in debian/rabbitmq-env.conf thanks to g0tmi1k.
 
- -- Michael Biebl <biebl@debian.org>  Sat, 15 Oct 2022 12:42:19 +0200
+ -- Thomas Goirand <zigo@debian.org>  Mon, 20 Jan 2025 17:30:15 +0100
+
+rabbitmq-server (4.0.5-1) unstable; urgency=medium
+
+  [ Mitchell Dzurick ]
+  * Update d/watch to get tarball & verify signature.
+
+  [ Thomas Goirand ]
+  * New upstream release.
+  * Removed erlang-erl-docgen build-depends.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 17 Dec 2024 10:23:14 +0100
+
+rabbitmq-server (3.12.1-1) experimental; urgency=medium
+
+  * New upstream release. 
+  * d/p/*: Refresh. 
+  * d/control: Bump minimum Erlang version to 25.0.
+  * d/copyright: Tidy for new upstream release, fix stanza ordering.
+  * d/source.lintian-overrides: Refresh overrides with correct match.
+  * d/control: Drop Depends on lsb-base.
+  * d/control: Bump Standards-Version to 4.6.2, no changes.
+
+ -- James Page <james.page@ubuntu.com>  Tue, 18 Jul 2023 09:35:50 +0100
 
 rabbitmq-server (3.10.8-1) unstable; urgency=medium
 

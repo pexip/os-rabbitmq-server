@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2021 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @doc
@@ -13,8 +13,6 @@
 -module(rabbit_boot_state_xterm_titlebar).
 
 -behaviour(gen_server).
-
--include_lib("kernel/include/logger.hrl").
 
 -include_lib("rabbit_common/include/logging.hrl").
 
@@ -95,5 +93,5 @@ format_title(BootState) ->
               "RabbitMQ ~ts~ts", [Vsn, BootStateSuffix]);
         Node ->
             rabbit_misc:format(
-              "~s — RabbitMQ ~ts~ts", [Node, Vsn, BootStateSuffix])
+              "~ts — RabbitMQ ~ts~ts", [Node, Vsn, BootStateSuffix])
     end.

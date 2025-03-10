@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_stomp).
@@ -88,7 +88,7 @@ parse_default_user([{passcode, Passcode} | Rest], Configuration) ->
                                default_passcode = Passcode});
 parse_default_user([Unknown | Rest], Configuration) ->
     rabbit_log:warning("rabbit_stomp: ignoring invalid default_user "
-                       "configuration option: ~p", [Unknown]),
+                       "configuration option: ~tp", [Unknown]),
     parse_default_user(Rest, Configuration).
 
 report_configuration(#stomp_configuration{
@@ -97,7 +97,7 @@ report_configuration(#stomp_configuration{
                         ssl_cert_login   = SSLCertLogin}) ->
     case Login of
         undefined -> ok;
-        _         -> rabbit_log:info("rabbit_stomp: default user '~s' "
+        _         -> rabbit_log:info("rabbit_stomp: default user '~ts' "
                                      "enabled", [Login])
     end,
 
@@ -115,10 +115,10 @@ report_configuration(#stomp_configuration{
 
 list() ->
     [Client ||
-        {_, ListSup, _, _} <- supervisor2:which_children(rabbit_stomp_sup),
-        {_, RanchEmbeddedSup, supervisor, _} <- supervisor2:which_children(ListSup),
+        {_, ListSup, _, _} <- supervisor:which_children(rabbit_stomp_sup),
+        {_, RanchEmbeddedSup, supervisor, _} <- supervisor:which_children(ListSup),
         {{ranch_listener_sup, _}, RanchListSup, _, _} <- supervisor:which_children(RanchEmbeddedSup),
-        {ranch_conns_sup_sup, RanchConnsSup, supervisor, _} <- supervisor2:which_children(RanchListSup),
-        {_, RanchConnSup, supervisor, _} <- supervisor2:which_children(RanchConnsSup),
-        {_, StompClientSup, supervisor, _} <- supervisor2:which_children(RanchConnSup),
+        {ranch_conns_sup_sup, RanchConnsSup, supervisor, _} <- supervisor:which_children(RanchListSup),
+        {_, RanchConnSup, supervisor, _} <- supervisor:which_children(RanchConnsSup),
+        {_, StompClientSup, supervisor, _} <- supervisor:which_children(RanchConnSup),
         {rabbit_stomp_reader, Client, _, _} <- supervisor:which_children(StompClientSup)].

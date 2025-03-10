@@ -2,11 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @author The RabbitMQ team
-%% @copyright 2018-2022 VMware, Inc. or its affiliates.
+%% @copyright 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 %% @doc
 %% This module exposes the API of the {@link rabbit_feature_flags}
@@ -20,20 +20,28 @@
 
 -module(rabbit_ff_registry).
 
+-include_lib("kernel/include/logger.hrl").
+
+-include_lib("rabbit_common/include/logging.hrl").
+
+-include("src/rabbit_feature_flags.hrl").
+-include("src/rabbit_ff_registry.hrl").
+
 -export([get/1,
          list/1,
          states/0,
          is_supported/1,
          is_enabled/1,
          is_registry_initialized/0,
-         is_registry_written_to_disk/0]).
+         is_registry_written_to_disk/0,
+         inventory/0]).
 
--ifdef(TEST).
--on_load(on_load/0).
--endif.
-
--spec get(rabbit_feature_flags:feature_name()) ->
-    rabbit_feature_flags:feature_props() | undefined.
+-spec get(FeatureName) -> Ret when
+      FeatureName :: rabbit_feature_flags:feature_name(),
+      Ret :: FeatureProps | init_required,
+      FeatureProps :: rabbit_feature_flags:feature_props_extended() |
+                      rabbit_deprecated_features:feature_props_extended() |
+                      undefined.
 %% @doc
 %% Returns the properties of a feature flag.
 %%
@@ -44,16 +52,17 @@
 %% @returns the properties of the specified feature flag.
 
 get(FeatureName) ->
-    rabbit_feature_flags:initialize_registry(),
-    %% Initially, is_registry_initialized/0 always returns `false`
-    %% and this ?MODULE:get(FeatureName) is always called. The case
-    %% statement is here to please Dialyzer.
-    case is_registry_initialized() of
-        false -> ?MODULE:get(FeatureName);
-        true  -> undefined
+    case inventory() of
+        init_required ->
+            init_required;
+        #{feature_flags := FeatureFlags} ->
+            maps:get(FeatureName, FeatureFlags, undefined)
     end.
 
--spec list(all | enabled | disabled) -> rabbit_feature_flags:feature_flags().
+-spec list(Which) -> Ret when
+      Which :: all | enabled | disabled | state_changing,
+      Ret :: FeatureFlags | init_required,
+      FeatureFlags :: rabbit_feature_flags:feature_flags().
 %% @doc
 %% Lists all, enabled or disabled feature flags, depending on the argument.
 %%
@@ -64,15 +73,53 @@ get(FeatureName) ->
 %% `disabled'.
 %% @returns A map of selected feature flags.
 
-list(Which) ->
-    rabbit_feature_flags:initialize_registry(),
-    %% See get/1 for an explanation of the case statement below.
-    case is_registry_initialized() of
-        false -> ?MODULE:list(Which);
-        true  -> #{}
+list(all) ->
+    case inventory() of
+        init_required ->
+            init_required;
+        #{feature_flags := AllFeatureFlags} ->
+            AllFeatureFlags
+    end;
+list(enabled) ->
+    case inventory() of
+        init_required ->
+            init_required;
+        #{feature_flags := AllFeatureFlags, states := FeatureStates} ->
+            maps:filter(
+              fun(FeatureName, _FeatureProps) ->
+                      maps:is_key(FeatureName, FeatureStates)
+                      andalso
+                      maps:get(FeatureName, FeatureStates) =:= true
+              end, AllFeatureFlags)
+    end;
+list(disabled) ->
+    case inventory() of
+        init_required ->
+            init_required;
+        #{feature_flags := AllFeatureFlags, states := FeatureStates} ->
+            maps:filter(
+              fun(FeatureName, _FeatureProps) ->
+                      not maps:is_key(FeatureName, FeatureStates)
+                      orelse
+                      maps:get(FeatureName, FeatureStates) =:= false
+              end, AllFeatureFlags)
+    end;
+list(state_changing) ->
+    case inventory() of
+        init_required ->
+            init_required;
+        #{feature_flags := AllFeatureFlags, states := FeatureStates} ->
+            maps:filter(
+              fun(FeatureName, _FeatureProps) ->
+                      maps:is_key(FeatureName, FeatureStates)
+                      andalso
+                      maps:get(FeatureName, FeatureStates) =:= state_changing
+              end, AllFeatureFlags)
     end.
 
--spec states() -> rabbit_feature_flags:feature_states().
+-spec states() -> Ret when
+      Ret :: FeatureStates | init_required,
+      FeatureStates :: rabbit_feature_flags:feature_states().
 %% @doc
 %% Returns the states of supported feature flags.
 %%
@@ -82,14 +129,17 @@ list(Which) ->
 %% @returns A map of feature flag states.
 
 states() ->
-    rabbit_feature_flags:initialize_registry(),
-    %% See get/1 for an explanation of the case statement below.
-    case is_registry_initialized() of
-        false -> ?MODULE:states();
-        true  -> #{}
+    case inventory() of
+        init_required ->
+            init_required;
+        #{states := FeatureStates} ->
+            FeatureStates
     end.
 
--spec is_supported(rabbit_feature_flags:feature_name()) -> boolean().
+-spec is_supported(FeatureName) -> Ret when
+      FeatureName :: rabbit_feature_flags:feature_name(),
+      Ret :: Supported | init_required,
+      Supported :: boolean().
 %% @doc
 %% Returns if a feature flag is supported.
 %%
@@ -101,33 +151,37 @@ states() ->
 %%   otherwise.
 
 is_supported(FeatureName) ->
-    rabbit_feature_flags:initialize_registry(),
-    %% See get/1 for an explanation of the case statement below.
-    case is_registry_initialized() of
-        false -> ?MODULE:is_supported(FeatureName);
-        true  -> false
+    case inventory() of
+        init_required ->
+            init_required;
+        #{feature_flags := FeatureFlags} ->
+            maps:is_key(FeatureName, FeatureFlags)
     end.
 
--spec is_enabled(rabbit_feature_flags:feature_name()) -> boolean() | state_changing.
+-spec is_enabled(FeatureName) -> Ret when
+      FeatureName :: rabbit_feature_flags:feature_name(),
+      Ret :: Enabled | init_required,
+      Enabled :: boolean() | state_changing.
 %% @doc
-%% Returns if a feature flag is supported or if its state is changing.
+%% Returns if a feature flag is enabled or if its state is changing.
 %%
 %% Only the informations stored in the local registry is used to answer
 %% this call.
 %%
 %% @param FeatureName The name of the feature flag to be checked.
-%% @returns `true' if the feature flag is supported, `state_changing' if
+%% @returns `true' if the feature flag is enabled, `state_changing' if
 %%   its state is transient, or `false' otherwise.
 
 is_enabled(FeatureName) ->
-    rabbit_feature_flags:initialize_registry(),
-    %% See get/1 for an explanation of the case statement below.
-    case is_registry_initialized() of
-        false -> ?MODULE:is_enabled(FeatureName);
-        true  -> false
+    case inventory() of
+        init_required ->
+            init_required;
+        #{states := FeatureStates} ->
+            maps:get(FeatureName, FeatureStates, false)
     end.
 
--spec is_registry_initialized() -> boolean().
+-spec is_registry_initialized() -> IsInitialized when
+      IsInitialized :: boolean().
 %% @doc
 %% Indicates if the registry is initialized.
 %%
@@ -139,9 +193,10 @@ is_enabled(FeatureName) ->
 %%   source code.
 
 is_registry_initialized() ->
-    always_return_false().
+    inventory() =/= init_required.
 
--spec is_registry_written_to_disk() -> boolean().
+-spec is_registry_written_to_disk() -> WrittenToDisk when
+      WrittenToDisk :: boolean().
 %% @doc
 %% Indicates if the feature flags state was successfully persisted to disk.
 %%
@@ -156,34 +211,16 @@ is_registry_initialized() ->
 %%   flags state on restart.
 
 is_registry_written_to_disk() ->
-    always_return_true().
+    case inventory() of
+        init_required ->
+            false;
+        #{written_to_disk := IsWrittenToDisk} ->
+            IsWrittenToDisk
+    end.
 
-always_return_true() ->
-    %% This function is here to trick Dialyzer. We want some functions
-    %% in this initial on-disk registry to always return `true` or
-    %% `false`. However the generated registry will return actual
-    %% booleans. The `-spec()` correctly advertises a return type of
-    %% `boolean()`. But in the meantime, Dialyzer only knows about this
-    %% copy which, without the trick below, would always return either
-    %% `true` (e.g. in is_registry_written_to_disk/0) or `false` (e.g.
-    %% is_registry_initialized/0). This obviously causes some warnings
-    %% where the registry functions are used: Dialyzer believes that
-    %% e.g. matching the return value of is_registry_initialized/0
-    %% against `true` will never succeed.
-    %%
-    %% That's why this function makes a call which we know the result,
-    %% but not Dialyzer, to "create" that hard-coded `true` return
-    %% value.
-    erlang:get({?MODULE, always_undefined}) =:= undefined.
+-spec inventory() -> Ret when
+      Ret :: Inventory | init_required,
+      Inventory :: rabbit_feature_flags:inventory().
 
-always_return_false() ->
-    not always_return_true().
-
--ifdef(TEST).
-on_load() ->
-     _ = (catch rabbit_log_feature_flags:debug(
-                  "Feature flags: Loading initial (uninitialized) registry "
-                  "module (~p)",
-                  [self()])),
-    ok.
--endif.
+inventory() ->
+    persistent_term:get(?PT_INVENTORY_KEY, init_required).

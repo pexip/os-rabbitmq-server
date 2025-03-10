@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2015-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_boot_state_systemd).
@@ -48,15 +48,15 @@ code_change(_OldVsn, State, _Extra) ->
 notify_boot_state(ready = BootState) ->
     Status = boot_state_to_desc(BootState),
     ?LOG_DEBUG(
-       ?LOG_PREFIX "notifying of state `~s`",
+       ?LOG_PREFIX "notifying of state `~ts`",
        [BootState],
        #{domain => ?RMQLOG_DOMAIN_PRELAUNCH}),
     systemd:notify([BootState, {status, Status}]);
 notify_boot_state(BootState) ->
     Status = boot_state_to_desc(BootState),
     ?LOG_DEBUG(
-       ?LOG_PREFIX "sending non-systemd state (~s) as status description: "
-       "\"~s\"",
+       ?LOG_PREFIX "sending non-systemd state (~ts) as status description: "
+       "\"~ts\"",
        [BootState, Status],
        #{domain => ?RMQLOG_DOMAIN_PRELAUNCH}),
     systemd:notify({status, Status}).

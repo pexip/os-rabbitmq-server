@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 alias RabbitMQ.CLI.Formatters.FormatterHelpers
 
 defmodule RabbitMQ.CLI.Formatters.Plugins do
@@ -146,7 +146,15 @@ defmodule RabbitMQ.CLI.Formatters.Plugins do
     ]
   end
 
+  defp augment_version(%{version: version, running: false}) do
+    to_string(version)
+  end
+
   defp augment_version(%{version: version, running_version: nil}) do
+    to_string(version)
+  end
+
+  defp augment_version(%{version: version, running_version: ""}) do
     to_string(version)
   end
 
@@ -162,9 +170,11 @@ defmodule RabbitMQ.CLI.Formatters.Plugins do
   defp legend(_, :minimal, _) do
     []
   end
+
   defp legend(_, _, %{quiet: true}) do
     []
   end
+
   defp legend(_, _, %{silent: true}) do
     []
   end

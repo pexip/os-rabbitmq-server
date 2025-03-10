@@ -2,7 +2,7 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2016, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc Private key format for OpenSSH
 %%% See https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.key
 %%% @end
@@ -127,7 +127,7 @@ parse_key(<< W, Rest/binary >>, Body)
 		orelse W =:= $\t ->
 	parse_key(Rest, Body);
 parse_key(<< ?OPENSSH_TAIL, Rest/binary >>, Body) ->
-	case parse_key(jose_base64:decode(Body)) of
+	case parse_key(jose_base64:'decode!'(Body)) of
 		{true, Key} ->
 			{Key, Rest};
 		false ->

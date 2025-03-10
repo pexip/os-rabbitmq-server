@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_federation_queue).
@@ -17,7 +17,6 @@
                     {enables, recovery}]}).
 
 -include_lib("rabbit/include/amqqueue.hrl").
--include_lib("amqp_client/include/amqp_client.hrl").
 -include("rabbit_federation.hrl").
 
 -behaviour(rabbit_queue_decorator).
@@ -99,7 +98,7 @@ active_for(Q) ->
 
 consumer_state_changed(Q, MaxActivePriority, IsEmpty) ->
     QName = amqqueue:get_name(Q),
-    case IsEmpty andalso active_unfederated(MaxActivePriority) of
+    _ = case IsEmpty andalso active_unfederated(MaxActivePriority) of
         true  -> rabbit_federation_queue_link:run(QName);
         false -> rabbit_federation_queue_link:pause(QName)
     end,

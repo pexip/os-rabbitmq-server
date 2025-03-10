@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.ListQueuesCommand do
   require RabbitMQ.CLI.Ctl.InfoKeys
@@ -15,23 +15,25 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ListQueuesCommand do
 
   @default_timeout 60_000
   @info_keys ~w(name durable auto_delete
-            arguments policy pid owner_pid exclusive exclusive_consumer_pid
+            arguments policy operator_policy effective_policy_definition
+            pid owner_pid exclusive exclusive_consumer_pid
             exclusive_consumer_tag messages_ready messages_unacknowledged messages
             messages_ready_ram messages_unacknowledged_ram messages_ram
             messages_persistent message_bytes message_bytes_ready
             message_bytes_unacknowledged message_bytes_ram message_bytes_persistent
             head_message_timestamp disk_reads disk_writes consumers
             consumer_utilisation consumer_capacity
-            memory slave_pids synchronised_slave_pids state type
+            memory state type
             leader members online)a
 
   def description(), do: "Lists queues and their properties"
-  def usage(), do: "list_queues [--vhost <vhost>] [--online] [--offline] [--local] [--no-table-headers] [<column>, ...]"
+
+  def usage(),
+    do:
+      "list_queues [--vhost <vhost>] [--online] [--offline] [--local] [--no-table-headers] [<column>, ...]"
+
   def scopes(), do: [:ctl, :diagnostics]
-  def switches(), do: [offline: :boolean,
-                       online: :boolean,
-                       local: :boolean,
-                       timeout: :integer]
+  def switches(), do: [offline: :boolean, online: :boolean, local: :boolean, timeout: :integer]
   def aliases(), do: [t: :timeout]
 
   def info_keys(), do: @info_keys
@@ -85,11 +87,12 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ListQueuesCommand do
       end
 
     info_keys = InfoKeys.prepare_info_keys(args)
+    broker_keys = InfoKeys.broker_keys(info_keys)
 
     Helpers.with_nodes_in_cluster(node_name, fn nodes ->
-      offline_mfa = {:rabbit_amqqueue, :emit_info_down, [vhost, info_keys]}
-      local_mfa = {:rabbit_amqqueue, :emit_info_local, [vhost, info_keys]}
-      online_mfa = {:rabbit_amqqueue, :emit_info_all, [nodes, vhost, info_keys]}
+      offline_mfa = {:rabbit_amqqueue, :emit_info_down, [vhost, broker_keys]}
+      local_mfa = {:rabbit_amqqueue, :emit_info_local, [vhost, broker_keys]}
+      online_mfa = {:rabbit_amqqueue, :emit_info_all, [nodes, vhost, broker_keys]}
 
       {chunks, mfas} =
         case {local_opt, offline, online} do

@@ -2,7 +2,7 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2015, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc
 %%%
 %%% @end
@@ -22,7 +22,9 @@
 -export([curve25519_module/1]).
 -export([curve448_module/1]).
 -export([json_module/1]).
+-export([pbes2_count_maximum/1]).
 -export([sha3_module/1]).
+-export([unsecured_signing/1]).
 -export([xchacha20_poly1305_module/1]).
 
 %% gen_server callbacks
@@ -72,8 +74,16 @@ curve448_module(Curve448Module) when is_atom(Curve448Module) ->
 json_module(JSONModule) when is_atom(JSONModule) ->
 	gen_server:call(?SERVER, {json_module, JSONModule}).
 
+-spec pbes2_count_maximum(PBES2CountMaximum) -> ok when PBES2CountMaximum :: non_neg_integer().
+pbes2_count_maximum(PBES2CountMaximum) when is_integer(PBES2CountMaximum) andalso PBES2CountMaximum >= 0 ->
+	gen_server:call(?SERVER, {pbes2_count_maximum, PBES2CountMaximum}).
+
 sha3_module(SHA3Module) when is_atom(SHA3Module) ->
 	gen_server:call(?SERVER, {sha3_module, SHA3Module}).
+
+-spec unsecured_signing(UnsecuredSigning) -> ok when UnsecuredSigning :: boolean().
+unsecured_signing(UnsecuredSigning) when is_boolean(UnsecuredSigning) ->
+	gen_server:call(?SERVER, {unsecured_signing, UnsecuredSigning}).
 
 xchacha20_poly1305_module(XChaCha20Poly1305Module) when is_atom(XChaCha20Poly1305Module) ->
 	gen_server:call(?SERVER, {xchacha20_poly1305_module, XChaCha20Poly1305Module}).
@@ -114,9 +124,19 @@ handle_call({json_module, M}, _From, State) ->
 	JSONModule = check_json_module(M),
 	true = ets:insert(?TAB, {json_module, JSONModule}),
 	{reply, ok, State};
+handle_call({pbes2_count_maximum, PBES2CountMaximum}, _From, State) when is_integer(PBES2CountMaximum) andalso PBES2CountMaximum >= 0 ->
+	true = ets:insert(?TAB, {pbes2_count_maximum, PBES2CountMaximum}),
+	{reply, ok, State};
 handle_call({sha3_module, M}, _From, State) ->
 	SHA3Module = check_sha3_module(M),
 	true = ets:insert(?TAB, {sha3_module, SHA3Module}),
+	{reply, ok, State};
+handle_call({unsecured_signing, UnsecuredSigning}, _From, State) when is_boolean(UnsecuredSigning) ->
+	true = ets:insert(?TAB, {unsecured_signing, UnsecuredSigning}),
+	_ = spawn(fun() ->
+		_ = catch jose_jwa:unsecured_signing(UnsecuredSigning),
+		exit(normal)
+	end),
 	{reply, ok, State};
 handle_call({xchacha20_poly1305_module, M}, _From, State) ->
 	XChaCha20Poly1305Module = check_xchacha20_poly1305_module(M),
@@ -149,22 +169,37 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% @private
 support_check() ->
+	PBES2CountMaximum =
+		case application:get_env(jose, pbes2_count_maximum, 10000) of
+			V1 when is_integer(V1) andalso V1 >= 0 ->
+				V1
+		end,
+	UnsecuredSigning =
+		case application:get_env(jose, unsecured_signing, false) of
+			V2 when is_boolean(V2) ->
+				V2
+		end,
 	Fallback = ?CRYPTO_FALLBACK,
-	Entries = lists:flatten(lists:foldl(fun(Check, Acc) ->
+	Entries1 = lists:flatten(lists:foldl(fun(Check, Acc) ->
 		Check(Fallback, Acc)
 	end, [], [
+		fun check_sha3/2,
 		fun check_ec_key_mode/2,
 		fun check_chacha20_poly1305/2,
 		fun check_xchacha20_poly1305/2,
 		fun check_curve25519/2,
 		fun check_curve448/2,
 		fun check_json/2,
-		fun check_sha3/2,
 		fun check_crypto/2,
 		fun check_public_key/2
 	])),
+	Entries2 = [
+		{pbes2_count_maximum, PBES2CountMaximum},
+		{unsecured_signing, UnsecuredSigning}
+		| Entries1
+	],
 	true = ets:delete_all_objects(?TAB),
-	true = ets:insert(?TAB, Entries),
+	true = ets:insert(?TAB, Entries2),
 	ok.
 
 %%%-------------------------------------------------------------------
@@ -220,6 +255,8 @@ check_chacha20_poly1305(Fallback, Entries) ->
 					check_chacha20_poly1305_module(M)
 			end
 	end,
+	%% Potentially used by XChaCha20-Poly1305 related functions below, needs to be inserted early.
+	true = ets:insert(?TAB, {chacha20_poly1305_module, ChaCha20Poly1305Module}),
 	[{chacha20_poly1305_module, ChaCha20Poly1305Module} | Entries].
 
 %% @private
@@ -277,7 +314,7 @@ check_curve25519(Fallback, Entries) ->
 		[] ->
 			case application:get_env(jose, curve25519_module, undefined) of
 				undefined ->
-					check_curve25519_modules(Fallback, [libdecaf, libsodium]);
+					check_curve25519_modules(Fallback, [libdecaf, libsodium, crypto]);
 				M when is_atom(M) ->
 					check_curve25519_module(M)
 			end
@@ -285,6 +322,8 @@ check_curve25519(Fallback, Entries) ->
 	[{curve25519_module, Curve25519Module} | Entries].
 
 %% @private
+check_curve25519_module(crypto) ->
+	jose_curve25519_crypto;
 check_curve25519_module(libdecaf) ->
 	jose_curve25519_libdecaf;
 check_curve25519_module(libsodium) ->
@@ -297,12 +336,44 @@ check_curve25519_modules(Fallback, [Module | Modules]) ->
 	case code:ensure_loaded(Module) of
 		{module, Module} ->
 			_ = application:ensure_all_started(Module),
-			check_curve25519_module(Module);
+			RealFallback = jose_jwa_curve25519,
+			RealModule = check_curve25519_module(Module),
+			try check_curve25519_module_does_it_work(RealFallback, RealModule) of
+				true ->
+					RealModule;
+				false ->
+					check_curve25519_modules(Fallback, Modules)
+			catch _Class:_Reason:_Stacktrace ->
+				% io:format("Class = ~p~nReason = ~p~nStacktrace = ~p~n", [Class, Reason, Stacktrace]),
+				check_curve25519_modules(Fallback, Modules)
+			end;
 		_ ->
 			check_curve25519_modules(Fallback, Modules)
 	end;
 check_curve25519_modules(Fallback, []) ->
 	Fallback.
+
+%% @private
+check_curve25519_module_does_it_work(Fallback, Module) ->
+	{PK, SK = <<Secret:32/binary, _:32/binary>>} = Module:eddsa_keypair(),
+	{PK, SK} = Module:eddsa_keypair(Secret),
+	PK = Module:eddsa_secret_to_public(Secret),
+	Message = crypto:strong_rand_bytes(16),
+	Signature = Module:ed25519_sign(Message, SK),
+	true = Module:ed25519_verify(Signature, Message, PK),
+	true = Fallback:ed25519_verify(Signature, Message, PK),
+	%% NOTE: Ed25519ctx and Ed25519ph are lower priority, no need to check for now.
+	% Ctx = <<"ctx">>,
+	% CtxSignature = Module:ed25519ctx_sign(Message, SK, Ctx),
+	% true = Module:ed25519ctx_verify(CtxSignature, Message, PK, Ctx),
+	% true = Fallback:ed25519ctx_verify(CtxSignature, Message, PK, Ctx),
+	% PHSignature = Module:ed25519ph_sign(Message, SK),
+	% true = Module:ed25519ph_verify(PHSignature, Message, PK),
+	% true = Fallback:ed25519ph_verify(PHSignature, Message, PK),
+	% CtxPHSignature = Module:ed25519ph_sign(Message, SK, Ctx),
+	% true = Module:ed25519ph_verify(CtxPHSignature, Message, PK, Ctx),
+	% true = Fallback:ed25519ph_verify(CtxPHSignature, Message, PK, Ctx),
+	true.
 
 %% @private
 check_curve448(false, Entries) ->
@@ -318,7 +389,7 @@ check_curve448(Fallback, Entries) ->
 		[] ->
 			case application:get_env(jose, curve448_module, undefined) of
 				undefined ->
-					check_curve448_modules(Fallback, [libdecaf]);
+					check_curve448_modules(Fallback, [libdecaf, crypto]);
 				M when is_atom(M) ->
 					check_curve448_module(M)
 			end
@@ -326,6 +397,8 @@ check_curve448(Fallback, Entries) ->
 	[{curve448_module, Curve448Module} | Entries].
 
 %% @private
+check_curve448_module(crypto) ->
+	jose_curve448_crypto;
 check_curve448_module(libdecaf) ->
 	jose_curve448_libdecaf;
 check_curve448_module(Module) when is_atom(Module) ->
@@ -336,12 +409,44 @@ check_curve448_modules(Fallback, [Module | Modules]) ->
 	case code:ensure_loaded(Module) of
 		{module, Module} ->
 			_ = application:ensure_all_started(Module),
-			check_curve448_module(Module);
+			RealFallback = jose_jwa_curve448,
+			RealModule = check_curve448_module(Module),
+			try check_curve448_module_does_it_work(RealFallback, RealModule) of
+				true ->
+					RealModule;
+				false ->
+					check_curve448_modules(Fallback, Modules)
+			catch _Class:_Reason:_Stacktrace ->
+				% io:format("Class = ~p~nReason = ~p~nStacktrace = ~p~n", [_Class, _Reason, _Stacktrace]),
+				check_curve448_modules(Fallback, Modules)
+			end;
 		_ ->
 			check_curve448_modules(Fallback, Modules)
 	end;
 check_curve448_modules(Fallback, []) ->
 	Fallback.
+
+%% @private
+check_curve448_module_does_it_work(Fallback, Module) ->
+	{PK, SK = <<Secret:57/binary, _:57/binary>>} = Module:eddsa_keypair(),
+	{PK, SK} = Module:eddsa_keypair(Secret),
+	PK = Module:eddsa_secret_to_public(Secret),
+	Message = crypto:strong_rand_bytes(16),
+	Signature = Module:ed448_sign(Message, SK),
+	true = Module:ed448_verify(Signature, Message, PK),
+	true = Fallback:ed448_verify(Signature, Message, PK),
+	%% NOTE: Ed448ph is lower priority, no need to check for now.
+	% Ctx = <<"ctx">>,
+	% CtxSignature = Module:ed448_sign(Message, SK, Ctx),
+	% true = Module:ed448_verify(CtxSignature, Message, PK, Ctx),
+	% true = Fallback:ed448_verify(CtxSignature, Message, PK, Ctx),
+	% PHSignature = Module:ed448ph_sign(Message, SK),
+	% true = Module:ed448ph_verify(PHSignature, Message, PK),
+	% true = Fallback:ed448ph_verify(PHSignature, Message, PK),
+	% CtxPHSignature = Module:ed448ph_sign(Message, SK, Ctx),
+	% true = Module:ed448ph_verify(CtxPHSignature, Message, PK, Ctx),
+	% true = Fallback:ed448ph_verify(CtxPHSignature, Message, PK, Ctx),
+	true.
 
 %% @private
 check_json(_Fallback, Entries) ->
@@ -353,9 +458,9 @@ check_json(_Fallback, Entries) ->
 				undefined ->
 					case code:ensure_loaded(elixir) of
 						{module, elixir} ->
-							check_json_modules([ojson, 'Elixir.Jason', 'Elixir.Poison', jiffy, jsone, jsx]);
+							check_json_modules([ojson, 'Elixir.Jason', 'Elixir.Poison', jiffy, jsone, jsx, thoas]);
 						_ ->
-							check_json_modules([ojson, jiffy, jsone, jsx])
+							check_json_modules([ojson, jiffy, jsone, jsx, thoas])
 					end;
 				M when is_atom(M) ->
 					check_json_module(M)
@@ -372,6 +477,8 @@ check_json_module(jsone) ->
 	jose_json_jsone;
 check_json_module(ojson) ->
 	jose_json_ojson;
+check_json_module(thoas) ->
+	jose_json_thoas;
 check_json_module('Elixir.Jason') ->
 	jose_json_jason;
 check_json_module('Elixir.Poison') ->
@@ -441,11 +548,13 @@ check_sha3(Fallback, Entries) ->
 		[] ->
 			case application:get_env(jose, sha3_module, undefined) of
 				undefined ->
-					check_sha3_modules(Fallback, [keccakf1600, libdecaf]);
+					check_sha3_modules(Fallback, [libdecaf, keccakf1600]);
 				M when is_atom(M) ->
 					check_sha3_module(M)
 			end
 	end,
+	%% Potentially used by Ed448 related functions below, needs to be inserted early.
+	true = ets:insert(?TAB, {sha3_module, SHA3Module}),
 	[{sha3_module, SHA3Module} | Entries].
 
 %% @private
@@ -573,7 +682,7 @@ check_rsa_sign(Fallback) ->
 			future
 	end,
 	SignEntries = [begin
-		case has_rsa_sign(Padding, Legacy, sha) of
+		case has_rsa_sign(Padding, Legacy, sha256) of
 			false ->
 				{{rsa_sign, Padding}, {Fallback, [{rsa_padding, Padding}]}};
 			{true, Module} ->
@@ -598,7 +707,7 @@ check_xchacha20_poly1305(Fallback, Entries) ->
 		[] ->
 			case application:get_env(jose, xchacha20_poly1305_module, undefined) of
 				undefined ->
-					check_xchacha20_poly1305_modules(Fallback, [crypto]);
+					check_xchacha20_poly1305_modules(Fallback, [libsodium, crypto]);
 				M when is_atom(M) ->
 					check_xchacha20_poly1305_module(M)
 			end
@@ -608,6 +717,8 @@ check_xchacha20_poly1305(Fallback, Entries) ->
 %% @private
 check_xchacha20_poly1305_module(crypto) ->
 	jose_xchacha20_poly1305_crypto;
+check_xchacha20_poly1305_module(libsodium) ->
+	jose_xchacha20_poly1305_libsodium;
 check_xchacha20_poly1305_module(Module) when is_atom(Module) ->
 	Module.
 

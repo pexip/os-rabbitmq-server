@@ -2,7 +2,7 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2016, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc
 %%%
 %%% @end
@@ -13,7 +13,7 @@
 -behaviour(jose_jwk_kty).
 -behaviour(jose_jwk_use_enc).
 
--include_lib("jose_public_key.hrl").
+-include("jose_public_key.hrl").
 
 %% jose_jwk callbacks
 -export([from_map/1]).
@@ -142,6 +142,14 @@ block_encryptor(_KTY, Fields=#{ <<"alg">> := ALG, <<"enc">> := ENC, <<"use">> :=
 		<<"enc">> => ENC
 	}, Fields);
 block_encryptor(KTY, Fields=#{ <<"alg">> := <<"ECDH-1PU", _/binary>> }) ->
+	block_encryptor(KTY, maps:merge(Fields, #{
+		<<"enc">> => case jose_jwa:is_block_cipher_supported({aes_gcm, 128}) of
+			false -> <<"A128CBC-HS256">>;
+			true  -> <<"A128GCM">>
+		end,
+		<<"use">> => <<"enc">>
+	}));
+block_encryptor(KTY, Fields=#{ <<"alg">> := <<"ECDH-SS", _/binary>> }) ->
 	block_encryptor(KTY, maps:merge(Fields, #{
 		<<"enc">> => case jose_jwa:is_block_cipher_supported({aes_gcm, 128}) of
 			false -> <<"A128CBC-HS256">>;

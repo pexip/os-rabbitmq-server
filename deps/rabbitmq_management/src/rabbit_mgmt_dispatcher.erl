@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_dispatcher).
@@ -27,12 +27,13 @@ build_routes(Ignore) ->
     MgmtRdrRte = {"/mgmt", rabbit_mgmt_wm_redirect, "/"},
     LocalPaths = [{module_app(M), "www"} || M <- modules(Ignore)],
     LocalStaticRte = {"/[...]", rabbit_mgmt_wm_static, LocalPaths},
+    OauthBootstrap = build_oauth_bootstrap_route(Prefix),
     % NB: order is significant in the routing list
     Routes0 = build_module_routes(Ignore) ++
         [ApiRdrRte, CliRdrRte, MgmtRdrRte, StatsRdrRte1, StatsRdrRte2, LocalStaticRte],
     Routes1 = maybe_add_path_prefix(Routes0, Prefix),
     % NB: ensure the root routes are first
-    Routes2 = RootIdxRtes ++ Routes1,
+    Routes2 = RootIdxRtes ++ OauthBootstrap ++ maybe_add_path_prefix([{"/login", rabbit_mgmt_login, []}], Prefix) ++ Routes1,
     [{'_', Routes2}].
 
 build_root_index_routes("", ManagementApp) ->
@@ -40,6 +41,12 @@ build_root_index_routes("", ManagementApp) ->
 build_root_index_routes(Prefix, ManagementApp) ->
     [{"/", rabbit_mgmt_wm_redirect, Prefix ++ "/"},
      {Prefix, rabbit_mgmt_wm_static, root_idx_file(ManagementApp)}].
+
+build_oauth_bootstrap_route("") ->
+    [{"/js/oidc-oauth/bootstrap.js", rabbit_mgmt_oauth_bootstrap, #{}}];
+build_oauth_bootstrap_route(Prefix) ->
+    [{"/js/oidc-oauth/bootstrap.js", rabbit_mgmt_wm_redirect, Prefix ++ "/js/oidc-oauth/bootstrap.js"},
+     {Prefix ++ "/js/oidc-oauth/bootstrap.js", rabbit_mgmt_oauth_bootstrap, #{}}].
 
 build_redirect_route(Path, Location) ->
     {Path, rabbit_mgmt_wm_redirect, Location}.
@@ -56,8 +63,18 @@ build_module_routes(Ignore) ->
     Routes = [Module:dispatcher() || Module <- modules(Ignore)],
     [{"/api" ++ Path, Mod, Args} || {Path, Mod, Args} <- lists:append(Routes)].
 
-modules(IgnoreApps) ->
-    [Module || {App, Module, Behaviours} <-
+modules(IgnoreApps0) ->
+    Apps0 = rabbit_misc:rabbitmq_related_apps(),
+    Apps = case IgnoreApps0 of
+               [] ->
+                   Apps0;
+               _ ->
+                   IgnoreApps = sets:from_list(IgnoreApps0, [{version, 2}]),
+                   lists:filter(
+                     fun(App) -> not sets:is_element(App, IgnoreApps) end,
+                     Apps0)
+           end,
+    [Module || {_App, Module, Behaviours} <-
                %% Sort rabbitmq_management modules first. This is
                %% a microoptimization because most files belong to
                %% this application. Making it first avoids several
@@ -69,8 +86,7 @@ modules(IgnoreApps) ->
                      (_, {rabbitmq_management, _, _}) -> false;
                      ({A, _, _}, {B, _, _})           -> A =< B
                  end,
-                 rabbit_misc:all_module_attributes(behaviour)),
-               not lists:member(App, IgnoreApps),
+                 rabbit_misc:module_attributes_from_apps(behaviour, Apps)),
                lists:member(rabbit_mgmt_extension, Behaviours)].
 
 module_app(Module) ->
@@ -127,12 +143,18 @@ dispatcher() ->
      {"/exchanges/:vhost/:exchange/bindings/source",           rabbit_mgmt_wm_bindings, [exchange_source]},
      {"/exchanges/:vhost/:exchange/bindings/destination",      rabbit_mgmt_wm_bindings, [exchange_destination]},
      {"/queues",                                               rabbit_mgmt_wm_queues, []},
+     {"/queues/detailed",                                      rabbit_mgmt_wm_queues, [detailed]},
      {"/queues/:vhost",                                        rabbit_mgmt_wm_queues, []},
      {"/queues/:vhost/:queue",                                 rabbit_mgmt_wm_queue, []},
      {"/queues/:vhost/:destination/bindings",                  rabbit_mgmt_wm_bindings, [queue]},
      {"/queues/:vhost/:queue/contents",                        rabbit_mgmt_wm_queue_purge, []},
      {"/queues/:vhost/:queue/get",                             rabbit_mgmt_wm_queue_get, []},
      {"/queues/:vhost/:queue/actions",                         rabbit_mgmt_wm_queue_actions, []},
+     {"/queues/quorum/:vhost/:queue/replicas/add",             rabbit_mgmt_wm_quorum_queue_replicas_add_member, []},
+     {"/queues/quorum/:vhost/:queue/replicas/delete",          rabbit_mgmt_wm_quorum_queue_replicas_delete_member, []},
+     {"/queues/quorum/replicas/on/:node/grow",                 rabbit_mgmt_wm_quorum_queue_replicas_grow, []},
+     {"/queues/quorum/replicas/on/:node/shrink",               rabbit_mgmt_wm_quorum_queue_replicas_shrink, []},
+     {"/queues/quorum/:vhost/:queue/status",                   rabbit_mgmt_wm_quorum_queue_status, []},
      {"/bindings",                                             rabbit_mgmt_wm_bindings, [all]},
      {"/bindings/:vhost",                                      rabbit_mgmt_wm_bindings, [all]},
      {"/bindings/:vhost/e/:source/:dtype/:destination",        rabbit_mgmt_wm_bindings, [source_destination]},
@@ -157,6 +179,8 @@ dispatcher() ->
      {"/user-limits/:user",                                    rabbit_mgmt_wm_user_limits, []},
      {"/feature-flags",                                        rabbit_mgmt_wm_feature_flags, []},
      {"/feature-flags/:name/enable",                           rabbit_mgmt_wm_feature_flag_enable, []},
+     {"/deprecated-features",                                  rabbit_mgmt_wm_deprecated_features, [all]},
+     {"/deprecated-features/used",                             rabbit_mgmt_wm_deprecated_features, [used]},
      {"/whoami",                                               rabbit_mgmt_wm_whoami, []},
      {"/permissions",                                          rabbit_mgmt_wm_permissions, []},
      {"/permissions/:vhost/:user",                             rabbit_mgmt_wm_permission, []},
@@ -174,7 +198,6 @@ dispatcher() ->
      {"/health/checks/port-listener/:port",                    rabbit_mgmt_wm_health_check_port_listener, []},
      {"/health/checks/protocol-listener/:protocol",            rabbit_mgmt_wm_health_check_protocol_listener, []},
      {"/health/checks/virtual-hosts",                          rabbit_mgmt_wm_health_check_virtual_hosts, []},
-     {"/health/checks/node-is-mirror-sync-critical",           rabbit_mgmt_wm_health_check_node_is_mirror_sync_critical, []},
      {"/health/checks/node-is-quorum-critical",                rabbit_mgmt_wm_health_check_node_is_quorum_critical, []},
      {"/reset",                                                rabbit_mgmt_wm_reset, []},
      {"/reset/:node",                                          rabbit_mgmt_wm_reset, []},
@@ -182,5 +205,8 @@ dispatcher() ->
      {"/auth",                                                 rabbit_mgmt_wm_auth, []},
      {"/auth/attempts/:node",                                  rabbit_mgmt_wm_auth_attempts, [all]},
      {"/auth/attempts/:node/source",                           rabbit_mgmt_wm_auth_attempts, [by_source]},
-     {"/login",                                                rabbit_mgmt_wm_login, []}
+     {"/login",                                                rabbit_mgmt_wm_login, []},
+     {"/config/effective",                                     rabbit_mgmt_wm_environment, []},
+     {"/auth/hash_password/:password",                         rabbit_mgmt_wm_hash_password, []},
+     {"/version",                                              rabbit_mgmt_wm_version, []}
     ].

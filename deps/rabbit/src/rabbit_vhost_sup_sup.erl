@@ -2,14 +2,14 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_vhost_sup_sup).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 
--behaviour(supervisor2).
+-behaviour(supervisor).
 
 -export([init/1]).
 
@@ -18,15 +18,18 @@
          start_vhost/1, start_vhost/2,
          get_vhost_sup/1, get_vhost_sup/2,
          save_vhost_sup/3,
-         save_vhost_process/2]).
--export([delete_on_all_nodes/1, start_on_all_nodes/1]).
+         save_vhost_process/2,
+         save_vhost_recovery_terms/2,
+         lookup_vhost_sup_record/1,
+         lookup_vhost_recovery_terms/1]).
+-export([delete_on_all_nodes/1, start_on_all_nodes/1, start_on_all_nodes/2]).
 -export([is_vhost_alive/1]).
 -export([check/0]).
 
 %% Internal
 -export([stop_and_delete_vhost/1]).
 
--record(vhost_sup, {vhost, vhost_sup_pid, wrapper_pid, vhost_process_pid}).
+-record(vhost_sup, {vhost, vhost_sup_pid, wrapper_pid, vhost_process_pid, recovery_terms_pid}).
 
 start() ->
     case supervisor:start_child(rabbit_sup, {?MODULE,
@@ -38,50 +41,59 @@ start() ->
     end.
 
 start_link() ->
-    supervisor2:start_link({local, ?MODULE}, ?MODULE, []).
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
     %% This assumes that a single vhost termination should not shut down nodes
     %% unless the operator opts in.
     RestartStrategy = vhost_restart_strategy(),
-    ets:new(?MODULE, [named_table, public, {keypos, #vhost_sup.vhost}]),
+    _ = ets:new(?MODULE, [named_table, public, {keypos, #vhost_sup.vhost}]),
     {ok, {{simple_one_for_one, 0, 5},
           [{rabbit_vhost, {rabbit_vhost_sup_wrapper, start_link, []},
             RestartStrategy, ?SUPERVISOR_WAIT, supervisor,
             [rabbit_vhost_sup_wrapper, rabbit_vhost_sup]}]}}.
 
 start_on_all_nodes(VHost) ->
-    %% Do not try to start a vhost on booting peer nodes
-    AllBooted = [Node || Node <- rabbit_nodes:all_running(), rabbit:is_booted(Node)],
+    %% By default select only fully booted peers
+    AllBooted = rabbit_nodes:list_running(),
     Nodes     = [node() | AllBooted],
+    start_on_all_nodes(VHost, Nodes).
+
+start_on_all_nodes(VHost, Nodes) ->
     Results   = [{Node, start_vhost(VHost, Node)} || Node <- Nodes],
     Failures  = lists:filter(fun
-                               ({_, {ok, _}}) -> false;
-                               ({_, {error, {already_started, _}}}) -> false;
-                               (_) -> true
-                            end,
-                            Results),
+                                 ({_, {ok, _}}) -> false;
+                                 ({_, {error, {already_started, _}}}) -> false;
+                                 (_) -> true
+                             end,
+        Results),
     case Failures of
         []     -> ok;
         Errors -> {error, {failed_to_start_vhost_on_nodes, Errors}}
     end.
 
 delete_on_all_nodes(VHost) ->
-    [ stop_and_delete_vhost(VHost, Node) || Node <- rabbit_nodes:all_running() ],
+    _ = [ stop_and_delete_vhost(VHost, Node) || Node <- rabbit_nodes:list_running() ],
     ok.
 
 stop_and_delete_vhost(VHost) ->
     StopResult = case lookup_vhost_sup_record(VHost) of
-        not_found -> ok;
+        not_found ->
+            rabbit_log:warning("Supervisor for vhost '~ts' not found during deletion procedure",
+                            [VHost]),
+            ok;
         #vhost_sup{wrapper_pid = WrapperPid,
                    vhost_sup_pid = VHostSupPid} ->
             case is_process_alive(WrapperPid) of
-                false -> ok;
-                true  ->
-                    rabbit_log:info("Stopping vhost supervisor ~p"
-                                    " for vhost '~s'",
+                false ->
+                    rabbit_log:info("Supervisor ~tp for vhost '~ts' already stopped",
                                     [VHostSupPid, VHost]),
-                    case supervisor2:terminate_child(?MODULE, WrapperPid) of
+                    ok;
+                true  ->
+                    rabbit_log:info("Stopping vhost supervisor ~tp"
+                                    " for vhost '~ts'",
+                                    [VHostSupPid, VHost]),
+                    case supervisor:terminate_child(?MODULE, WrapperPid) of
                         ok ->
                             true = ets:delete(?MODULE, VHost),
                             ok;
@@ -100,9 +112,9 @@ stop_and_delete_vhost(VHost, Node) ->
     case rabbit_misc:rpc_call(Node, rabbit_vhost_sup_sup, stop_and_delete_vhost, [VHost]) of
         ok -> ok;
         {badrpc, RpcErr} ->
-            rabbit_log:error("Failed to stop and delete a vhost ~p"
-                             " on node ~p."
-                             " Reason: ~p",
+            rabbit_log:error("Failed to stop and delete a vhost ~tp"
+                             " on node ~tp."
+                             " Reason: ~tp",
                              [VHost, Node, RpcErr]),
             {error, RpcErr}
     end.
@@ -113,7 +125,7 @@ init_vhost(VHost) ->
         {ok, _} -> ok;
         {error, {already_started, _}} ->
             rabbit_log:warning(
-                "Attempting to start an already started vhost '~s'.",
+                "Attempting to start an already started vhost '~ts'.",
                 [VHost]),
             ok;
         {error, {no_such_vhost, VHost}} ->
@@ -122,15 +134,15 @@ init_vhost(VHost) ->
             case vhost_restart_strategy() of
                 permanent ->
                     rabbit_log:error(
-                        "Unable to initialize vhost data store for vhost '~s'."
-                        " Reason: ~p",
+                        "Unable to initialize vhost data store for vhost '~ts'."
+                        " Reason: ~tp",
                         [VHost, Reason]),
                     throw({error, Reason});
                 transient ->
                     rabbit_log:warning(
-                        "Unable to initialize vhost data store for vhost '~s'."
+                        "Unable to initialize vhost data store for vhost '~ts'."
                         " The vhost will be stopped for this node. "
-                        " Reason: ~p",
+                        " Reason: ~tp",
                         [VHost, Reason]),
                     ok
             end
@@ -179,7 +191,7 @@ start_vhost(VHost) ->
         true  ->
             case whereis(?MODULE) of
                 Pid when is_pid(Pid) ->
-                    supervisor2:start_child(?MODULE, [VHost]);
+                    supervisor:start_child(?MODULE, [VHost]);
                 undefined ->
                     {error, rabbit_vhost_sup_sup_not_running}
             end
@@ -209,13 +221,20 @@ is_vhost_alive(VHost) ->
 save_vhost_sup(VHost, WrapperPid, VHostPid) ->
     true = ets:insert(?MODULE, #vhost_sup{vhost = VHost,
                                           vhost_sup_pid = VHostPid,
-                                          wrapper_pid = WrapperPid}),
+                                          wrapper_pid = WrapperPid,
+                                          recovery_terms_pid = no_pid}),
+    ok.
+
+-spec save_vhost_recovery_terms(rabbit_types:vhost(), pid()) -> ok.
+save_vhost_recovery_terms(VHost, RecoveryTermsPid) ->
+    true = ets:update_element(?MODULE, VHost,
+                              [{#vhost_sup.recovery_terms_pid, RecoveryTermsPid}]),
     ok.
 
 -spec save_vhost_process(rabbit_types:vhost(), pid()) -> ok.
 save_vhost_process(VHost, VHostProcessPid) ->
     true = ets:update_element(?MODULE, VHost,
-                              {#vhost_sup.vhost_process_pid, VHostProcessPid}),
+                              [{#vhost_sup.vhost_process_pid, VHostProcessPid}]),
     ok.
 
 -spec lookup_vhost_sup_record(rabbit_types:vhost()) -> #vhost_sup{} | not_found.
@@ -225,6 +244,17 @@ lookup_vhost_sup_record(VHost) ->
             case ets:lookup(?MODULE, VHost) of
                 [] -> not_found;
                 [#vhost_sup{} = VHostSup] -> VHostSup
+            end;
+        undefined -> not_found
+    end.
+
+-spec lookup_vhost_recovery_terms(rabbit_types:vhost()) -> pid() | not_found.
+lookup_vhost_recovery_terms(VHost) ->
+    case ets:info(?MODULE, name) of
+        ?MODULE ->
+            case ets:lookup(?MODULE, VHost) of
+                [] -> not_found;
+                [#vhost_sup{} = VHostSup] -> VHostSup#vhost_sup.recovery_terms_pid
             end;
         undefined -> not_found
     end.
@@ -257,7 +287,7 @@ check() ->
     VHosts = rabbit_vhost:list_names(),
     lists:filter(
       fun(V) ->
-              case rabbit_vhost_sup_sup:get_vhost_sup(V) of
+              case get_vhost_sup(V) of
                   {ok, Sup} ->
                       MsgStores = [Pid || {Name, Pid, _, _} <- supervisor:which_children(Sup),
                                          lists:member(Name, [msg_store_persistent,

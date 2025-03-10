@@ -2,43 +2,31 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 
 -module(osiris_replica).
 
 -behaviour(gen_server).
+-behaviour(osiris_member).
 
 -include("osiris.hrl").
 
--define(INFO_(Name, Str, Args),
-             ?INFO("~s [~s:~s/~b] " Str,
-                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+-define(DEFAULT_PORT_RANGE, {6000, 6500}).
 
--define(WARN_(Name, Str, Args),
-             ?WARN("~s [~s:~s/~b] " Str,
-                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
-
--define(ERROR_(Name, Str, Args),
-             ?ERROR("~s [~s:~s/~b] " Str,
-                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
-
--define(DEBUG_(Name, Str, Args),
-             ?DEBUG("~s [~s:~s/~b] " Str,
-                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
 %% osiris replica, starts TCP listener ("server side" of the link),
 %% spawns remote reader, TCP listener replicates and
 %% confirms latest offset back to primary
 
 %% API functions
 -export([start/2,
-         start_link/1,
-         stop/2,
-         delete/2]).
+         start_link/1
+        ]).
 %% Test
 -export([get_port/1, combine_ips_hosts/4]).
 %% gen_server callbacks
 -export([init/1,
+         handle_continue/2,
          handle_call/3,
          handle_cast/2,
          handle_info/2,
@@ -48,17 +36,16 @@
 
 %% holds static or rarely changing fields
 -record(cfg,
-        {name :: string(),
+        {name :: osiris:name(),
          leader_pid :: pid(),
          acceptor_pid :: pid(),
          replica_reader_pid :: pid(),
-         directory :: file:filename(),
+         directory :: file:filename_all(),
          port :: non_neg_integer(),
          transport :: osiris_log:transport(),
          socket :: undefined | gen_tcp:socket() | ssl:sslsocket(),
          gc_interval :: infinity | non_neg_integer(),
          reference :: term(),
-         offset_ref :: atomics:atomics_ref(),
          event_formatter :: undefined | mfa(),
          counter :: counters:counters_ref(),
          token :: undefined | binary()}).
@@ -72,7 +59,7 @@
         {cfg :: #cfg{},
          parse_state :: parse_state(),
          log :: osiris_log:state(),
-         committed_offset = -1 :: -1 | osiris:offset(),
+         committed_chunk_id = -1 :: -1 | osiris:offset(),
          offset_listeners = [] ::
              [{pid(), osiris:offset(), mfa() | undefined}]
         }).
@@ -85,11 +72,13 @@
 -define(C_FORCED_GCS, ?C_NUM_LOG_FIELDS + 2).
 -define(C_PACKETS, ?C_NUM_LOG_FIELDS + 3).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 4).
+-define(C_EPOCH, ?C_NUM_LOG_FIELDS + 5).
 -define(ADD_COUNTER_FIELDS,
         [{committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
          {forced_gcs, ?C_FORCED_GCS, counter, "Number of garbage collection runs"},
          {packets, ?C_PACKETS, counter, "Number of packets"},
-         {readers, ?C_READERS, counter, "Number of readers"}]).
+         {readers, ?C_READERS, counter, "Number of readers"},
+         {epoch, ?C_EPOCH, counter, "Current epoch"}]).
 
 -define(DEFAULT_ONE_TIME_TOKEN_TIMEOUT, 30000).
 -define(TOKEN_SIZE, 32).
@@ -99,20 +88,26 @@
 %%% API functions
 %%%===================================================================
 
-start(Node, Config = #{name := Name}) when is_list(Name) ->
-    supervisor:start_child({?SUP, Node},
-                           #{id => Name,
-                             start => {?MODULE, start_link, [Config]},
-                             restart => temporary,
-                             shutdown => 5000,
-                             type => worker,
-                             modules => [?MODULE]}).
-
-stop(Node, #{name := Name}) ->
-    ?SUP:stop_child(Node, Name).
-
-delete(Node, Config = #{}) ->
-    ?SUP:delete_child(Node, Config).
+-spec start(node(), Config :: osiris:config()) ->
+    supervisor:startchild_ret().
+start(Node, Config = #{name := Name}) when ?IS_STRING(Name) ->
+    case supervisor:start_child({?SUP, Node},
+                                #{id => Name,
+                                  start => {?MODULE, start_link, [Config]},
+                                  restart => temporary,
+                                  shutdown => 5000,
+                                  type => worker,
+                                  modules => [?MODULE]}) of
+        {ok, Pid} = Res ->
+            %% make a dummy call to block until intialisation is complete
+            _ = await(Pid),
+            Res;
+        {ok, _, Pid} = Res ->
+            _ = await(Pid),
+            Res;
+        Err ->
+            Err
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -126,6 +121,9 @@ start_link(Conf) ->
 
 get_port(Server) ->
     gen_server:call(Server, get_port).
+
+await(Server) ->
+    gen_server:call(Server, await, infinity).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -142,36 +140,40 @@ get_port(Server) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init(#{name := Name,
-       leader_pid := LeaderPid,
-       reference := ExtRef} =
-         Config) ->
+init(Config) ->
+    {ok, undefined, {continue, Config}}.
+
+handle_continue(#{name := Name0,
+                  epoch := Epoch,
+                  leader_pid := LeaderPid,
+                  reference := ExtRef} = Config, undefined)
+  when ?IS_STRING(Name0) ->
+    Name = osiris_util:normalise_name(Name0),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     Node = node(LeaderPid),
 
-    case rpc:call(Node, osiris_writer, overview, [LeaderPid]) of
+    %% osiris_writer:overview/1 may need to call into the writer process and
+    %% wait for it to initialise before replying. This could take some time
+    %% so it makes no sense to have an upper bound on the timeout
+    case rpc:call(Node, osiris_writer, overview, [LeaderPid], infinity) of
+        {error, no_process} ->
+            ?INFO_(Name, "Writer process not alive, exiting...", []),
+            {stop, {shutdown, writer_unavailable}, undefined};
         {error, _} = Err ->
-            {stop, Err};
+            {stop, Err, undefined};
         {badrpc, Reason} ->
-            {error, Reason};
-        {ok, {LeaderRange, LeaderEpochOffs}}  ->
-            {ok, {Min, Max}} = application:get_env(port_range),
+            {stop, {badrpc, Reason}, undefined};
+        {ok, {LeaderRange, LeaderEpochOffs}} ->
+            {Min, Max} = application:get_env(osiris, port_range,
+                                             ?DEFAULT_PORT_RANGE),
             Transport = application:get_env(osiris, replication_transport, tcp),
             Self = self(),
             CntName = {?MODULE, ExtRef},
 
-            ORef = atomics:new(2, [{signed, true}]),
-            atomics:put(ORef, 1, -1),
-            atomics:put(ORef, 2, -1),
-
             Dir = osiris_log:directory(Config),
             Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
                                            Config#{dir => Dir,
-                                                   first_offset_fun =>
-                                                   fun (Fst) ->
-                                                           atomics:put(ORef, 2, Fst)
-                                                   end,
                                                    counter_spec =>
                                                    {CntName, ?ADD_COUNTER_FIELDS}}),
             CntRef = osiris_log:counters_ref(Log),
@@ -185,8 +187,8 @@ init(#{name := Name,
                     %% re-discover the committed offset
                     osiris_writer:ack(LeaderPid, {LastChId, LastTs})
             end,
-            ?INFO_(Name, "next offset ~b, tail info ~w",
-                   [NextOffset, TailInfo]),
+            ?INFO_(Name, "osiris replica starting in epoch ~b, next offset ~b, tail info ~w",
+                   [Epoch, NextOffset, TailInfo]),
 
             %% HostName: append the HostName to the Ip(s) list: in some cases
             %% like NAT or redirect the local ip addresses are not enough.
@@ -215,11 +217,10 @@ init(#{name := Name,
                                          HostNameFromHost),
 
             Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
-            ?DEBUG_(Name, "replica resolved host endpoints: ~w",
-                    [IpsHosts]),
-            ?DEBUG_(Name, "replica using '~s' transport for replication",
-                    [Transport]),
+            ?DEBUG_(Name, "replica resolved host endpoints: ~0p", [IpsHosts]),
             {Port, LSock} = open_listener(Transport, {Min, Max}, 0),
+            ?DEBUG_(Name, "replica listening on port '~b' using transport ~s",
+                    [Port, Transport]),
             Acceptor = spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
 
             ReplicaReaderConf = #{hosts => IpsHosts,
@@ -231,38 +232,48 @@ init(#{name := Name,
                                   start_offset => TailInfo,
                                   reference => ExtRef,
                                   connection_token => Token},
-            RRPid = osiris_replica_reader:start(Node, ReplicaReaderConf),
-            true = link(RRPid),
-            GcInterval0 = application:get_env(osiris,
-                                             replica_forced_gc_default_interval,
-                                             4999),
+            case osiris_replica_reader:start(Node, ReplicaReaderConf) of
+                {ok, RRPid} ->
+                    true = link(RRPid),
+                    GcInterval0 = application:get_env(osiris,
+                                                      replica_forced_gc_default_interval,
+                                                      4999),
 
-            GcInterval1 = case is_integer(GcInterval0) of
-                              true ->
-                                  _ = erlang:send_after(GcInterval0, self(), force_gc),
-                                  GcInterval0;
-                              false ->
-                                  infinity
-                          end,
-            counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
-            EvtFmt = maps:get(event_formatter, Config, undefined),
-            {ok,
-             #?MODULE{cfg =
-                      #cfg{name = Name,
-                           leader_pid = LeaderPid,
-                           acceptor_pid = Acceptor,
-                           replica_reader_pid = RRPid,
-                           directory = Dir,
-                           port = Port,
-                           gc_interval = GcInterval1,
-                           reference = ExtRef,
-                           offset_ref = ORef,
-                           event_formatter = EvtFmt,
-                           counter = CntRef,
-                           token = Token,
-                           transport = Transport},
-                      log = Log,
-                      parse_state = undefined}}
+                    GcInterval1 = case is_integer(GcInterval0) of
+                                      true ->
+                                          _ = erlang:send_after(GcInterval0, self(), force_gc),
+                                          GcInterval0;
+                                      false ->
+                                          infinity
+                                  end,
+                    counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
+                    counters:put(CntRef, ?C_EPOCH, Epoch),
+                    Shared = osiris_log:get_shared(Log),
+                    osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
+                                                     fun(Inc) ->
+                                                             counters:add(CntRef, ?C_READERS, Inc)
+                                                     end),
+                    EvtFmt = maps:get(event_formatter, Config, undefined),
+                    {noreply,
+                     #?MODULE{cfg =
+                                  #cfg{name = Name,
+                                       leader_pid = LeaderPid,
+                                       acceptor_pid = Acceptor,
+                                       replica_reader_pid = RRPid,
+                                       directory = Dir,
+                                       port = Port,
+                                       gc_interval = GcInterval1,
+                                       reference = ExtRef,
+                                       event_formatter = EvtFmt,
+                                       counter = CntRef,
+                                       token = Token,
+                                       transport = Transport},
+                              log = Log,
+                              parse_state = undefined}};
+                {error, Reason} ->
+                    ?WARN_(Name, " failed to start replica reader. Reason ~0p", [Reason]),
+                    {stop, {shutdown, Reason}, undefined}
+            end
     end.
 
 combine_ips_hosts(tcp, IPs, HostName, HostNameFromHost) when
@@ -281,30 +292,38 @@ open_listener(_Transport, Range, 100) ->
 open_listener(Transport, {Min, Max} = Range, Attempts) ->
     Offs = rand:uniform(Max - Min),
     Port = Min + Offs,
-    Options = listener_opts(),
+    Options = listener_opts(Transport),
     case listen(Transport, Port, Options) of
         {ok, LSock} ->
             {Port, LSock};
         {error, eaddrinuse} ->
+            timer:sleep(Attempts),
             open_listener(Transport, Range, Attempts + 1);
         E ->
             throw({stop, E})
     end.
 
-accept(_Name, tcp, LSock, Process) ->
-    {ok, Sock} = gen_tcp:accept(LSock),
-    _ = gen_tcp:close(LSock),
-    ok = gen_tcp:controlling_process(Sock, Process),
-    Process ! {socket, Sock},
-    ok;
+accept(Name, tcp, LSock, Process) ->
+    case gen_tcp:accept(LSock) of
+        {ok, Sock} ->
+            try gen_tcp:close(LSock) of
+                ok -> ok
+            catch _:Err ->
+                      ?DEBUG_(Name, "gen_tcp:close/1 failed with ~0p", [Err])
+            end,
+            ok = gen_tcp:controlling_process(Sock, Process),
+            Process ! {socket, Sock},
+            ok;
+        {error, Err} ->
+            ?DEBUG_(Name, "gen_tcp:accept/1 failed with ~0p", [Err]),
+            gen_tcp:close(LSock),
+            ok
+    end;
 accept(Name, ssl, LSock, Process) ->
-    ?DEBUG_(Name, "Starting socket listener for replication over TLS", []),
+    ?DEBUG_(Name, "Starting socket acceptor for replication over TLS", []),
     {ok, Sock0} = ssl:transport_accept(LSock),
-    case ssl:handshake(Sock0,
-                       application:get_env(osiris,
-                                           replication_server_ssl_options,
-                                           []))
-    of
+    SslOptions = application:get_env(osiris, replication_server_ssl_options, []),
+    case ssl:handshake(Sock0, SslOptions) of
         {ok, Sock} ->
             _ = ssl:close(LSock),
             ok = ssl:controlling_process(Sock, Process),
@@ -341,18 +360,19 @@ handle_call(get_port, _From,
     {reply, Port, State};
 handle_call(get_reader_context, _From,
             #?MODULE{cfg =
-                         #cfg{offset_ref = ORef,
-                              name = Name,
+                         #cfg{name = Name,
                               directory = Dir,
                               reference = Ref,
                               counter = CntRef},
-                     committed_offset = COffs} =
+                     committed_chunk_id = COffs,
+                     log = Log} =
                 State) ->
+    Shared = osiris_log:get_shared(Log),
     Reply =
         #{dir => Dir,
           name => Name,
           committed_offset => COffs,
-          offset_ref => ORef,
+          shared => Shared,
           reference => Ref,
           readers_counter_fun => fun(Inc) -> counters:add(CntRef, ?C_READERS, Inc) end},
     {reply, Reply, State};
@@ -360,6 +380,8 @@ handle_call({update_retention, Retention}, _From,
             #?MODULE{log = Log0} = State) ->
     Log = osiris_log:update_retention(Retention, Log0),
     {reply, ok, State#?MODULE{log = Log}};
+handle_call(await, _From, State) ->
+    {reply, ok, State};
 handle_call(Unknown, _From,
             #?MODULE{cfg = #cfg{name = Name}} = State) ->
     ?INFO_(Name, "unknown command ~W", [Unknown, 10]),
@@ -375,27 +397,43 @@ handle_call(Unknown, _From,
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast({committed_offset, Offs},
-            #?MODULE{cfg = #cfg{offset_ref = ORef, counter = Cnt},
-                     committed_offset = Last} =
+handle_cast({committed_offset, CommittedChId},
+            #?MODULE{cfg = #cfg{counter = Cnt},
+                     log = Log,
+                     committed_chunk_id = LastCommittedChId} =
                 State) ->
-    case Offs > Last of
+    case CommittedChId > LastCommittedChId of
         true ->
             %% notify offset listeners
-            counters:put(Cnt, ?C_COMMITTED_OFFSET, Offs),
-            ok = atomics:put(ORef, 1, Offs),
+            counters:put(Cnt, ?C_COMMITTED_OFFSET, CommittedChId),
+            ok = osiris_log:set_committed_chunk_id(Log, CommittedChId),
             {noreply,
-             notify_offset_listeners(State#?MODULE{committed_offset = Offs})};
+             notify_offset_listeners(
+               State#?MODULE{committed_chunk_id = CommittedChId})};
         false ->
             State
     end;
 handle_cast({register_offset_listener, Pid, EvtFormatter, Offset},
-            #?MODULE{offset_listeners = Listeners} = State0) ->
-    State1 =
-        State0#?MODULE{offset_listeners =
-                           [{Pid, Offset, EvtFormatter} | Listeners]},
-    State = notify_offset_listeners(State1),
-    {noreply, State};
+            #?MODULE{cfg = #cfg{reference = Ref,
+                                event_formatter = DefaultFmt},
+                     log = Log,
+                     offset_listeners = Listeners} = State) ->
+    Max = max_readable_chunk_id(Log),
+    case Offset =< Max of
+        true ->
+            %% only evaluate the request, the rest will be evaluated
+            %% when data is written or committed
+            Evt = wrap_osiris_event(
+                    select_formatter(EvtFormatter, DefaultFmt),
+                    {osiris_offset, Ref, Max}),
+            Pid ! Evt,
+            {noreply, State};
+        false ->
+            %% queue the offset listener for later
+            {noreply,
+             State#?MODULE{offset_listeners = [{Pid, Offset, EvtFormatter} |
+                                               Listeners]}}
+    end;
 handle_cast(Msg, #?MODULE{cfg = #cfg{name = Name}} = State) ->
     ?DEBUG_(Name, "osiris_replica unhandled cast ~w", [Msg]),
     {noreply, State}.
@@ -436,7 +474,8 @@ handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
             ok = setopts(Transport, Socket, [{active, 5}]),
             {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
         {ok, Other} ->
-            ?WARN_(Name, "invalid token received ~w", [Other]),
+            ?WARN_(Name, "invalid token received ~w expected ~w",
+                   [Other, Token]),
             {stop, invalid_token, State};
         {error, Reason} ->
             ?WARN_(Name, "error awaiting token ~w", [Reason])
@@ -465,7 +504,7 @@ handle_info({ssl_closed, Socket},
     {stop, normal, State};
 handle_info({tcp_error, Socket, Error},
             #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
-    ?DEBUG_(Name, "osiris_replica: ~s Socket error ~p. Exiting...",
+    ?DEBUG_(Name, "osiris_replica: ~ts Socket error ~0p. Exiting...",
            [Error]),
     {stop, {tcp_error, Error}, State};
 handle_info({ssl_error, Socket, Error},
@@ -478,22 +517,13 @@ handle_info({'DOWN', _Ref, process, Pid, Info},
     ?DEBUG_(Name, "DOWN received for Pid ~w, Info: ~w",
            [Pid, Info]),
     {noreply, State};
-handle_info({'EXIT', RRPid, shutdown = Info},
-            #?MODULE{cfg = #cfg{name = Name,
-                                replica_reader_pid = RRPid}} = State) ->
-    %% any replica reader exit is troublesome and requires the replica to also
-    %% terminate
-    ?INFO_(Name, "replica reader ~w exited with ~w", [RRPid, Info]),
-    %% the replica reader shut down normally, so we use the normal return code
-    %% to avoid logging the whole stack trace
-    {stop, normal, State};
 handle_info({'EXIT', RRPid, Info},
             #?MODULE{cfg = #cfg{name = Name,
                                 replica_reader_pid = RRPid}} = State) ->
     %% any replica reader exit is troublesome and requires the replica to also
     %% terminate
     ?ERROR_(Name, "replica reader ~w exited with ~w", [RRPid, Info]),
-    {stop, replica_reader_exit, State};
+    {stop, {shutdown, Info}, State};
 handle_info({'EXIT', Ref, normal},
             #?MODULE{cfg = #cfg{name = Name}} = State) ->
     %% we assume any 'normal' EXIT is fine to ignore (port etc)
@@ -506,14 +536,14 @@ handle_info({'EXIT', Ref, Info},
     {stop, unexpected_exit, State}.
 
 handle_incoming_data(Socket, Bin,
-            #?MODULE{cfg =
-                         #cfg{socket = Socket,
-                              leader_pid = LeaderPid,
-                              transport = Transport,
-                              counter = Cnt},
-                     parse_state = ParseState0,
-                     log = Log0} =
-                State0) ->
+                     #?MODULE{cfg =
+                              #cfg{socket = Socket,
+                                   leader_pid = LeaderPid,
+                                   transport = Transport,
+                                   counter = Cnt},
+                              parse_state = ParseState0,
+                              log = Log0} =
+                     State0) ->
     counters:add(Cnt, ?C_PACKETS, 1),
     %% deliberately ignoring return value here as it would fail if the
     %% tcp connection has been closed and we still want to try to process
@@ -532,8 +562,8 @@ handle_incoming_data(Socket, Bin,
         undefined ->
             {noreply, State1};
         _ ->
-            State = notify_offset_listeners(State1),
             ok = osiris_writer:ack(LeaderPid, OffsetTimestamp),
+            State = notify_offset_listeners(State1),
             {noreply, State}
     end.
 
@@ -548,11 +578,19 @@ handle_incoming_data(Socket, Bin,
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
+terminate(_Reason, undefined) ->
+    %% if we crash in handle_continue we may end up here
+    ok;
 terminate(Reason, #?MODULE{cfg = #cfg{name = Name,
                                       socket = Sock}, log = Log}) ->
     ?DEBUG_(Name, "terminating with ~w ", [Reason]),
+    _ = ets:delete(osiris_reader_context_cache, self()),
     ok = osiris_log:close(Log),
-    ok = gen_tcp:close(Sock),
+    case Sock of
+        undefined -> ok;
+        _ ->
+            ok = gen_tcp:close(Sock)
+    end,
     ok.
 
 %%--------------------------------------------------------------------
@@ -571,7 +609,7 @@ format_status(#{state := #?MODULE{cfg = #cfg{name = Name,
                                   log = Log,
                                   parse_state = ParseState,
                                   offset_listeners = OffsetListeners,
-                                  committed_offset = CommittedOffset}} = Status) ->
+                                  committed_chunk_id = CommittedOffset}} = Status) ->
     maps:update(state,
                 #{name => Name,
                   external_reference => ExtRef,
@@ -580,8 +618,11 @@ format_status(#{state := #?MODULE{cfg = #cfg{name = Name,
                   num_offset_listeners => length(OffsetListeners),
                   committed_offset => CommittedOffset
                  },
-                Status).
-
+                Status);
+format_status(Status) ->
+    %% Handle formatting the status when the server shut down before start-up,
+    %% for example when the rpc call in `handle_continue/2' fails.
+    Status.
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
@@ -599,13 +640,14 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
               TSize:32/unsigned,
-              _Reserved:32,
+              FSize:8/unsigned,
+              _Reserved:24,
+              _Filter:FSize/binary,
               _Data:Size/binary,
               _TData:TSize/binary,
-              Rem/binary>> =
-                All,
+              Rem/binary>> = All,
             undefined, Acc) ->
-    TotalSize = Size + TSize + ?HEADER_SIZE_B,
+    TotalSize = ?HEADER_SIZE_B + FSize + Size + TSize,
     <<Chunk:TotalSize/binary, _/binary>> = All,
     parse_chunk(Rem, undefined, [{{FirstOffset, Timestamp}, Chunk} | Acc]);
 parse_chunk(Bin, undefined, Acc)
@@ -622,11 +664,11 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
               TSize:32/unsigned,
-              _Reserved:32,
-              Partial/binary>> =
-                All,
+              FSize:8/unsigned,
+              _Reserved:24,
+              Partial/binary>> = All,
             undefined, Acc) ->
-    {{{FirstOffset, Timestamp}, [All], Size + TSize - byte_size(Partial)},
+    {{{FirstOffset, Timestamp}, [All], FSize + Size + TSize - byte_size(Partial)},
      lists:reverse(Acc)};
 parse_chunk(Bin, PartialHeaderBin, Acc)
     when is_binary(PartialHeaderBin) ->
@@ -643,34 +685,28 @@ parse_chunk(Bin, {FirstOffsetTs, IOData, RemSize}, Acc) ->
     {{FirstOffsetTs, [Bin | IOData], RemSize - byte_size(Bin)},
      lists:reverse(Acc)}.
 
-notify_offset_listeners(#?MODULE{cfg =
-                                     #cfg{reference = Ref,
-                                          event_formatter = EvtFmt},
-                                 committed_offset = COffs,
+notify_offset_listeners(#?MODULE{cfg = #cfg{reference = Ref,
+                                            event_formatter = EvtFmt},
+                                 committed_chunk_id = CommittedChId,
                                  log = Log,
-                                 offset_listeners = L0} =
-                            State) ->
-    case osiris_log:tail_info(Log) of
-        {_NextOffs, {_, LastChId, _LastTs}} ->
-            Max = min(COffs, LastChId),
-            %% do not notify offset listeners if the committed offset isn't
-            %% available locally yet
-            {Notify, L} =
-                lists:splitwith(fun({_Pid, O, _}) -> O =< Max end, L0),
-            _ = [begin
-                     Evt =
-                         %% the per offset listener event formatter takes precedence of
-                         %% the process scoped one
-                         wrap_osiris_event(
-                           select_formatter(Fmt, EvtFmt),
-                           {osiris_offset, Ref, COffs}),
-                     P ! Evt
-                 end
-                 || {P, _, Fmt} <- Notify],
-            State#?MODULE{offset_listeners = L};
-        _ ->
-            State
-    end.
+                                 offset_listeners = L0} = State) ->
+    Max = max_readable_chunk_id(Log),
+    {Notify, L} =
+        lists:partition(fun({_Pid, O, _}) -> O =< Max end, L0),
+    _ = [begin
+             Evt =
+             %% the per offset listener event formatter takes precedence of
+             %% the process scoped one
+                 wrap_osiris_event(
+                   select_formatter(Fmt, EvtFmt),
+                   {osiris_offset, Ref, CommittedChId}),
+             P ! Evt
+         end
+         || {P, _, Fmt} <- Notify],
+    State#?MODULE{offset_listeners = L}.
+
+max_readable_chunk_id(Log) ->
+    min(osiris_log:committed_offset(Log), osiris_log:last_chunk_id(Log)).
 
 %% INTERNAL
 
@@ -694,19 +730,27 @@ setopts(tcp, Socket, Options) ->
 setopts(ssl, Socket, Options) ->
     ssl:setopts(Socket, Options).
 
-listener_opts() ->
+listener_opts(tcp) ->
     RcvBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
     Buffer = application:get_env(osiris, replica_buffer, RcvBuf * 2),
     KeepAlive = application:get_env(osiris, replica_keepalive, false),
+    ReuseAddr = application:get_env(osiris, replica_reuseaddr, true),
+    Linger = application:get_env(osiris, replica_linger, true),
+    LingerTimeout = application:get_env(osiris, replica_linger_timeout, 0),
     [binary,
-     {reuseaddr, true},
+     {reuseaddr, ReuseAddr},
+     {linger, {Linger, LingerTimeout}},
      {backlog, 0},
      {packet, raw},
      {active, false},
      {buffer, Buffer},
      {recbuf, RcvBuf},
      {keepalive, KeepAlive}
-    ].
+    ];
+listener_opts(ssl) ->
+    Opts = listener_opts(tcp),
+    SslOptions = application:get_env(osiris, replication_server_ssl_options, []),
+    Opts ++ SslOptions.
 
 listen(tcp, Port, Options) ->
     gen_tcp:listen(Port, Options);

@@ -2,14 +2,14 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_classic_queue_index_v2).
 
 -export([erase/1, init/3, reset_state/1, recover/7,
          terminate/3, delete_and_terminate/1,
-         publish/7, ack/2, read/3]).
+         info/1, publish/7, publish/8, ack/2, read/3]).
 
 %% Recovery. Unlike other functions in this module, these
 %% apply to all queues all at once.
@@ -41,18 +41,7 @@
 -define(HEADER_SIZE, 64). %% bytes
 -define(ENTRY_SIZE,  32). %% bytes
 
-%% The file_handle_cache module tracks reservations at
-%% the level of the process. This means we cannot
-%% handle them independently in the store and index.
-%% Because the index may reserve more FDs than the
-%% store the index becomes responsible for this and
-%% will always reserve at least 2 FDs, and release
-%% everything when terminating.
--define(STORE_FD_RESERVATIONS, 2).
-
 -include_lib("rabbit_common/include/rabbit.hrl").
--include_lib("kernel/include/file.hrl").
-
 %% Set to true to get an awful lot of debug logs.
 -if(false).
 -define(DEBUG(X,Y), logger:debug("~0p: " ++ X, [?FUNCTION_NAME|Y])).
@@ -71,7 +60,8 @@
     queue_name :: rabbit_amqqueue:name(),
 
     %% Queue index directory.
-    dir :: file:filename(),
+    %% Stored as binary() as opposed to file:filename() to save memory.
+    dir :: binary(),
 
     %% Buffer of all write operations to be performed.
     %% When the buffer reaches a certain size, we reduce
@@ -111,7 +101,7 @@
     %% and there are outstanding unconfirmed messages.
     %% In that case the buffer is flushed to disk when
     %% the queue requests a sync (after a timeout).
-    confirms = gb_sets:new() :: gb_sets:set(),
+    confirms = sets:new([{version,2}]) :: sets:set(),
 
     %% Segments we currently know of along with the
     %% number of unacked messages remaining in the
@@ -156,7 +146,7 @@
 
 %% Types copied from rabbit_queue_index.
 
--type on_sync_fun() :: fun ((gb_sets:set()) -> ok).
+-type on_sync_fun() :: fun ((sets:set()) -> ok).
 -type contains_predicate() :: fun ((rabbit_types:msg_id()) -> boolean()).
 -type shutdown_terms() :: list() | 'non_clean_shutdown'.
 
@@ -195,17 +185,17 @@ init_for_conversion(#resource{ virtual_host = VHost } = Name, OnSyncFun, OnSyncM
 
 init1(Name, Dir, OnSyncFun, OnSyncMsgFun) ->
     ensure_queue_name_stub_file(Name, Dir),
+    DirBin = rabbit_file:filename_to_binary(Dir),
     #qi{
         queue_name = Name,
-        dir = Dir,
+        dir = << DirBin/binary, "/" >>,
         on_sync = OnSyncFun,
         on_sync_msg = OnSyncMsgFun
     }.
 
 ensure_queue_name_stub_file(#resource{virtual_host = VHost, name = QName}, Dir) ->
     QueueNameFile = filename:join(Dir, ?QUEUE_NAME_STUB_FILE),
-    ok = filelib:ensure_dir(QueueNameFile),
-    ok = file:write_file(QueueNameFile, <<"VHOST: ", VHost/binary, "\n",
+    ok = write_file_and_ensure_dir(QueueNameFile, <<"VHOST: ", VHost/binary, "\n",
                                           "QUEUE: ", QName/binary, "\n",
                                           "INDEX: v2\n">>).
 
@@ -216,8 +206,8 @@ reset_state(State = #qi{ queue_name     = Name,
                          on_sync        = OnSyncFun,
                          on_sync_msg    = OnSyncMsgFun }) ->
     ?DEBUG("~0p", [State]),
-    delete_and_terminate(State),
-    init1(Name, Dir, OnSyncFun, OnSyncMsgFun).
+    _ = delete_and_terminate(State),
+    init1(Name, rabbit_file:binary_to_filename(Dir), OnSyncFun, OnSyncMsgFun).
 
 -spec recover(rabbit_amqqueue:name(), shutdown_terms(), boolean(),
                     contains_predicate(),
@@ -265,7 +255,7 @@ recover(#resource{ virtual_host = VHost, name = QueueName } = Name, Terms,
             State = recover_segments(State0, Terms, IsMsgStoreClean,
                                      ContainsCheckFun, OnSyncFun, OnSyncMsgFun,
                                      CountersRef, Context),
-            rabbit_log:warning("Queue ~s in vhost ~s dropped ~b/~b/~b persistent messages "
+            rabbit_log:warning("Queue ~ts in vhost ~ts dropped ~b/~b/~b persistent messages "
                                "and ~b transient messages after unclean shutdown",
                                [QueueName, VHost,
                                 counters:get(CountersRef, ?RECOVER_DROPPED_PERSISTENT_PER_VHOST),
@@ -277,8 +267,9 @@ recover(#resource{ virtual_host = VHost, name = QueueName } = Name, Terms,
              State}
     end.
 
-recover_segments(State0 = #qi { queue_name = Name, dir = Dir }, Terms, IsMsgStoreClean,
+recover_segments(State0 = #qi { queue_name = Name, dir = DirBin }, Terms, IsMsgStoreClean,
                  ContainsCheckFun, OnSyncFun, OnSyncMsgFun, CountersRef, Context) ->
+    Dir = rabbit_file:binary_to_filename(DirBin),
     SegmentFiles = rabbit_file:wildcard(".*\\" ++ ?SEGMENT_EXTENSION, Dir),
     State = case SegmentFiles of
         %% No segments found.
@@ -290,7 +281,7 @@ recover_segments(State0 = #qi { queue_name = Name, dir = Dir }, Terms, IsMsgStor
                 list_to_integer(filename:basename(F, ?SEGMENT_EXTENSION))
             || F <- SegmentFiles]),
             %% We use a temporary store state to check that messages do exist.
-            StoreState0 = rabbit_classic_queue_store_v2:init(Name, OnSyncMsgFun),
+            StoreState0 = rabbit_classic_queue_store_v2:init(Name),
             {State1, StoreState} = recover_segments(State0, ContainsCheckFun, StoreState0, CountersRef, Segments),
             _ = rabbit_classic_queue_store_v2:terminate(StoreState),
             State1
@@ -338,7 +329,7 @@ recover_segments(State0, ContainsCheckFun, StoreState0, CountersRef, [Segment|Ta
         %% File was either empty or the header was invalid.
         %% We cannot recover this file.
         _ ->
-            rabbit_log:warning("Deleting invalid v2 segment file ~s (file has invalid header)",
+            rabbit_log:warning("Deleting invalid v2 segment file ~ts (file has invalid header)",
                                [SegmentFile]),
             ok = file:close(Fd),
             _ = prim_file:delete(SegmentFile),
@@ -445,7 +436,7 @@ recover_segment(State, ContainsCheckFun, StoreState0, CountersRef, Fd,
 recover_index_v1_clean(State0 = #qi{ queue_name = Name }, Terms, IsMsgStoreClean,
                        ContainsCheckFun, OnSyncFun, OnSyncMsgFun) ->
     #resource{virtual_host = VHost, name = QName} = Name,
-    rabbit_log:info("Converting queue ~s in vhost ~s from v1 to v2 after clean shutdown", [QName, VHost]),
+    rabbit_log:info("Converting queue ~ts in vhost ~ts from v1 to v2 after clean shutdown", [QName, VHost]),
     {_, _, V1State} = rabbit_queue_index:recover(Name, Terms, IsMsgStoreClean,
                                                  ContainsCheckFun, OnSyncFun, OnSyncMsgFun,
                                                  convert),
@@ -454,7 +445,7 @@ recover_index_v1_clean(State0 = #qi{ queue_name = Name }, Terms, IsMsgStoreClean
     %% share code with dirty recovery.
     CountersRef = counters:new(?RECOVER_COUNTER_SIZE, []),
     State = recover_index_v1_common(State0, V1State, CountersRef),
-    rabbit_log:info("Queue ~s in vhost ~s converted ~b total messages from v1 to v2",
+    rabbit_log:info("Queue ~ts in vhost ~ts converted ~b total messages from v1 to v2",
                     [QName, VHost, counters:get(CountersRef, ?RECOVER_COUNT)]),
     State.
 
@@ -462,7 +453,7 @@ recover_index_v1_dirty(State0 = #qi{ queue_name = Name }, Terms, IsMsgStoreClean
                        ContainsCheckFun, OnSyncFun, OnSyncMsgFun,
                        CountersRef) ->
     #resource{virtual_host = VHost, name = QName} = Name,
-    rabbit_log:info("Converting queue ~s in vhost ~s from v1 to v2 after unclean shutdown", [QName, VHost]),
+    rabbit_log:info("Converting queue ~ts in vhost ~ts from v1 to v2 after unclean shutdown", [QName, VHost]),
     %% We ignore the count and bytes returned here because we cannot trust
     %% rabbit_queue_index: it has a bug that may lead to more bytes being
     %% returned than it really has.
@@ -473,16 +464,17 @@ recover_index_v1_dirty(State0 = #qi{ queue_name = Name }, Terms, IsMsgStoreClean
                                                  ContainsCheckFun, OnSyncFun, OnSyncMsgFun,
                                                  convert),
     State = recover_index_v1_common(State0, V1State, CountersRef),
-    rabbit_log:info("Queue ~s in vhost ~s converted ~b total messages from v1 to v2",
+    rabbit_log:info("Queue ~ts in vhost ~ts converted ~b total messages from v1 to v2",
                     [QName, VHost, counters:get(CountersRef, ?RECOVER_COUNT)]),
     State.
 
 %% At this point all messages are persistent because transient messages
 %% were dropped during the v1 index recovery.
-recover_index_v1_common(State0 = #qi{ queue_name = Name, dir = Dir },
+recover_index_v1_common(State0 = #qi{ queue_name = Name, dir = DirBin },
                         V1State, CountersRef) ->
+    Dir = rabbit_file:binary_to_filename(DirBin),
     %% Use a temporary per-queue store state to store embedded messages.
-    StoreState0 = rabbit_classic_queue_store_v2:init(Name, fun(_, _) -> ok end),
+    StoreState0 = rabbit_classic_queue_store_v2:init(Name),
     %% Go through the v1 index and publish messages to the v2 index.
     {LoSeqId, HiSeqId, _} = rabbit_queue_index:bounds(V1State),
     %% When resuming after a crash we need to double check the messages that are both
@@ -537,9 +529,9 @@ terminate(VHost, Terms, State0 = #qi { dir = Dir,
         ok = file:sync(Fd),
         ok = file:close(Fd)
     end, OpenFds),
-    file_handle_cache:release_reservation(),
     %% Write recovery terms for faster recovery.
-    rabbit_recovery_terms:store(VHost, filename:basename(Dir),
+    _ = rabbit_recovery_terms:store(VHost,
+                                filename:basename(rabbit_file:binary_to_filename(Dir)),
                                 [{v2_index_state, {?VERSION, Segments}} | Terms]),
     State#qi{ segments = #{},
               fds = #{} }.
@@ -553,20 +545,30 @@ delete_and_terminate(State = #qi { dir = Dir,
     _ = maps:map(fun(_, Fd) ->
         ok = file:close(Fd)
     end, OpenFds),
-    file_handle_cache:release_reservation(),
     %% Erase the data on disk.
-    ok = erase_index_dir(Dir),
+    ok = erase_index_dir(rabbit_file:binary_to_filename(Dir)),
     State#qi{ segments = #{},
               fds = #{} }.
+
+-spec info(state()) -> [{atom(), integer()}].
+
+info(#qi{ write_buffer = WriteBuffer, write_buffer_updates = NumUpdates }) ->
+    [
+        {qi_buffer_size,   map_size(WriteBuffer)},
+        {qi_buffer_num_up, NumUpdates}
+    ].
 
 -spec publish(rabbit_types:msg_id(), rabbit_variable_queue:seq_id(),
               rabbit_variable_queue:msg_location(),
               rabbit_types:message_properties(), boolean(),
               non_neg_integer() | infinity, State) -> State when State::state().
 
+publish(MsgId, SeqId, Location, Props, IsPersistent, TargetRamCount, State) ->
+    publish(MsgId, SeqId, Location, Props, IsPersistent, true, TargetRamCount, State).
+
 %% Because we always persist to the msg_store, the Msg(Or)Id argument
 %% here is always a binary, never a record.
-publish(MsgId, SeqId, Location, Props, IsPersistent, TargetRamCount,
+publish(MsgId, SeqId, Location, Props, IsPersistent, ShouldConfirm, TargetRamCount,
         State0 = #qi { write_buffer = WriteBuffer0,
                        segments = Segments }) ->
     ?DEBUG("~0p ~0p ~0p ~0p ~0p ~0p ~0p", [MsgId, SeqId, Location, Props, IsPersistent, TargetRamCount, State0]),
@@ -583,7 +585,7 @@ publish(MsgId, SeqId, Location, Props, IsPersistent, TargetRamCount,
     end,
     %% When publisher confirms have been requested for this
     %% message we mark the message as unconfirmed.
-    State = maybe_mark_unconfirmed(MsgId, Props, State2),
+    State = maybe_mark_unconfirmed(MsgId, Props, ShouldConfirm, State2),
     maybe_flush_buffer(State, SegmentEntryCount).
 
 new_segment_file(Segment, SegmentEntryCount, State = #qi{ segments = Segments }) ->
@@ -613,18 +615,9 @@ new_segment_file(Segment, SegmentEntryCount, State = #qi{ segments = Segments })
 %% using too many FDs when the consumer lags a lot. We
 %% limit at 4 because we try to keep up to 2 for reading
 %% and 2 for writing.
-reduce_fd_usage(SegmentToOpen, State = #qi{ fds = OpenFds })
+reduce_fd_usage(_SegmentToOpen, State = #qi{ fds = OpenFds })
         when map_size(OpenFds) < 4 ->
-    %% The only case where we need to update reservations is
-    %% when we are opening a segment that wasn't already open,
-    %% and we are not closing another segment at the same time.
-    case OpenFds of
-        #{SegmentToOpen := _} ->
-            State;
-        _ ->
-            file_handle_cache:set_reservation(?STORE_FD_RESERVATIONS + map_size(OpenFds) + 1),
-            State
-    end;
+    State;
 reduce_fd_usage(SegmentToOpen, State = #qi{ fds = OpenFds0 }) ->
     case OpenFds0 of
         #{SegmentToOpen := _} ->
@@ -657,9 +650,9 @@ reduce_fd_usage(SegmentToOpen, State = #qi{ fds = OpenFds0 }) ->
     end.
 
 maybe_mark_unconfirmed(MsgId, #message_properties{ needs_confirming = true },
-        State = #qi { confirms = Confirms }) ->
-    State#qi{ confirms = gb_sets:add_element(MsgId, Confirms) };
-maybe_mark_unconfirmed(_, _, State) ->
+        true, State = #qi { confirms = Confirms }) ->
+    State#qi{ confirms = sets:add_element(MsgId, Confirms) };
+maybe_mark_unconfirmed(_, _, _, State) ->
     State.
 
 maybe_flush_buffer(State = #qi { write_buffer = WriteBuffer,
@@ -706,7 +699,6 @@ flush_buffer(State0 = #qi { write_buffer = WriteBuffer0,
         {Fd, FoldState} = get_fd_for_segment(Segment, FoldState1),
         LocBytes = flush_buffer_consolidate(lists:sort(LocBytes0), 1),
         ok = file:pwrite(Fd, LocBytes),
-        file_handle_cache_stats:update(queue_index_write),
         FoldState
     end, State0, Writes),
     %% Update the cache. If we are flushing the entire write buffer,
@@ -855,7 +847,6 @@ delete_segment(Segment, State0 = #qi{ fds = OpenFds0 }) ->
     State = case maps:take(Segment, OpenFds0) of
         {Fd, OpenFds} ->
             ok = file:close(Fd),
-            file_handle_cache:set_reservation(?STORE_FD_RESERVATIONS + map_size(OpenFds)),
             State0#qi{ fds = OpenFds };
         error ->
             State0
@@ -969,7 +960,6 @@ read_from_disk(SeqIdsToRead0, State0 = #qi{ write_buffer = WriteBuffer }, Acc0) 
     ReadSize = (LastSeqId - FirstSeqId + 1) * ?ENTRY_SIZE,
     case get_fd(FirstSeqId, State0) of
         {Fd, OffsetForSeqId, State} ->
-            file_handle_cache_stats:update(queue_index_read),
             %% When reading further than the end of a partial file,
             %% file:pread/3 will return what it could read.
             case file:pread(Fd, OffsetForSeqId, ReadSize) of
@@ -1055,19 +1045,19 @@ sync(State0 = #qi{ confirms = Confirms,
                    on_sync = OnSyncFun }) ->
     ?DEBUG("~0p", [State0]),
     State = flush_buffer(State0, full, segment_entry_count()),
-    _ = case gb_sets:is_empty(Confirms) of
+    _ = case sets:is_empty(Confirms) of
         true ->
             ok;
         false ->
             OnSyncFun(Confirms)
     end,
-    State#qi{ confirms = gb_sets:new() }.
+    State#qi{ confirms = sets:new([{version,2}]) }.
 
--spec needs_sync(state()) -> 'false'.
+-spec needs_sync(state()) -> 'false' | 'confirms'.
 
 needs_sync(State = #qi{ confirms = Confirms }) ->
     ?DEBUG("~0p", [State]),
-    case gb_sets:is_empty(Confirms) of
+    case sets:is_empty(Confirms) of
         true -> false;
         false -> confirms
     end.
@@ -1100,11 +1090,8 @@ queue_index_walker({start, DurableQueues}) when is_list(DurableQueues) ->
          ok = gatherer:fork(Gatherer),
          ok = worker_pool:submit_async(
                 fun () -> link(Gatherer),
-                          try
-                              queue_index_walker_reader(QueueName, Gatherer)
-                          after
-                              unlink(Gatherer)
-                          end,
+                          ok = queue_index_walker_reader(QueueName, Gatherer),
+                          unlink(Gatherer),
                           ok
                 end)
      end || QueueName <- DurableQueues],
@@ -1115,8 +1102,11 @@ queue_index_walker({next, Gatherer}) when is_pid(Gatherer) ->
         empty ->
             ok = gatherer:stop(Gatherer),
             finished;
+        %% From v1 index walker. @todo Remove when no longer possible to convert from v1.
         {value, {MsgId, Count}} ->
-            {MsgId, Count, {next, Gatherer}}
+            {MsgId, Count, {next, Gatherer}};
+        {value, MsgIds} ->
+            {MsgIds, {next, Gatherer}}
     end.
 
 queue_index_walker_reader(#resource{ virtual_host = VHost } = Name, Gatherer) ->
@@ -1143,27 +1133,30 @@ queue_index_walker_segment(F, Gatherer) ->
         {ok, <<?MAGIC:32,?VERSION:8,
                FromSeqId:64/unsigned,ToSeqId:64/unsigned,
                _/bits>>} ->
-            queue_index_walker_segment(Fd, Gatherer, 0, ToSeqId - FromSeqId);
+            queue_index_walker_segment(Fd, Gatherer, 0, ToSeqId - FromSeqId, []);
         _ ->
             %% Invalid segment file. Skip.
             ok
     end,
     ok = file:close(Fd).
 
-queue_index_walker_segment(_, _, N, N) ->
+queue_index_walker_segment(_, Gatherer, N, N, Acc) ->
     %% We reached the end of the segment file.
+    gatherer:sync_in(Gatherer, Acc),
     ok;
-queue_index_walker_segment(Fd, Gatherer, N, Total) ->
+queue_index_walker_segment(Fd, Gatherer, N, Total, Acc) ->
     case file:read(Fd, ?ENTRY_SIZE) of
         %% We found a non-ack persistent entry. Gather it.
         {ok, <<1,_:7,1:1,_,1,Id:16/binary,_/bits>>} ->
-            gatherer:sync_in(Gatherer, {Id, 1}),
-            queue_index_walker_segment(Fd, Gatherer, N + 1, Total);
+            queue_index_walker_segment(Fd, Gatherer, N + 1, Total, [Id|Acc]);
         %% We found an ack, a transient entry or a non-entry. Skip it.
         {ok, _} ->
-            queue_index_walker_segment(Fd, Gatherer, N + 1, Total);
+            queue_index_walker_segment(Fd, Gatherer, N + 1, Total, Acc);
         %% We reached the end of a partial segment file.
+        eof when Acc =:= [] ->
+            ok;
         eof ->
+            gatherer:sync_in(Gatherer, Acc),
             ok
     end.
 
@@ -1183,7 +1176,7 @@ stop(VHost) ->
 
 pre_publish(MsgOrId, SeqId, Location, Props, IsPersistent, TargetRamCount, State) ->
     ?DEBUG("~0p ~0p ~0p ~0p ~0p ~0p ~0p", [MsgOrId, SeqId, Location, Props, IsPersistent, TargetRamCount, State]),
-    publish(MsgOrId, SeqId, Location, Props, IsPersistent, TargetRamCount, State).
+    publish(MsgOrId, SeqId, Location, Props, IsPersistent, false, TargetRamCount, State).
 
 flush_pre_publish_cache(TargetRamCount, State) ->
     ?DEBUG("~0p ~0p", [TargetRamCount, State]),
@@ -1242,7 +1235,7 @@ segment_entry_count() ->
     %% A value lower than the max write_buffer size results in nothing needing
     %% to be written to disk as long as the consumer consumes as fast as the
     %% producer produces.
-    application:get_env(rabbit, classic_queue_index_v2_segment_entry_count, 4096).
+    persistent_term:get(classic_queue_index_v2_segment_entry_count, 4096).
 
 %% Note that store files will also be removed if there are any in this directory.
 %% Currently the v2 per-queue store expects this function to remove its own files.
@@ -1266,7 +1259,8 @@ queue_name_to_dir_name(#resource { kind = queue,
     rabbit_misc:format("~.36B", [Num]).
 
 segment_file(Segment, #qi{ dir = Dir }) ->
-    filename:join(Dir, integer_to_list(Segment) ++ ?SEGMENT_EXTENSION).
+    N = integer_to_binary(Segment),
+    <<Dir/binary, N/binary, ?SEGMENT_EXTENSION>>.
 
 highest_continuous_seq_id([SeqId|Tail], EndSeqId)
         when (1 + SeqId) =:= EndSeqId ->
@@ -1276,3 +1270,14 @@ highest_continuous_seq_id([SeqId1, SeqId2|Tail], EndSeqId)
     highest_continuous_seq_id([SeqId2|Tail], EndSeqId);
 highest_continuous_seq_id([SeqId|Tail], _) ->
     {SeqId, Tail}.
+
+write_file_and_ensure_dir(Name, IOData) ->
+    case file:write_file(Name, IOData, [raw]) of
+        ok -> ok;
+        {error, enoent} ->
+            case filelib:ensure_dir(Name) of
+                ok -> file:write_file(Name, IOData, [raw]);
+                Err -> Err
+            end;
+         Err -> Err
+    end.

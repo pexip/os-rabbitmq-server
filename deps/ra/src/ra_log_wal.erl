@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 %% @hidden
 -module(ra_log_wal).
@@ -33,10 +33,12 @@
 -define(C_WAL_FILES, 1).
 -define(C_BATCHES, 2).
 -define(C_WRITES, 3).
+-define(C_BYTES_WRITTEN, 4).
 -define(COUNTER_FIELDS,
         [{wal_files, ?C_WAL_FILES, counter, "Number of write-ahead log files created"},
          {batches, ?C_BATCHES, counter, "Number of batches written"},
-         {writes, ?C_WRITES, counter, "Number of entries written"}
+         {writes, ?C_WRITES, counter, "Number of entries written"},
+         {bytes_written, ?C_BYTES_WRITTEN, counter, "Number of bytes written"}
          ]).
 
 % a writer_id consists of a unqique local name (see ra_directory) and a writer's
@@ -84,15 +86,17 @@
                write_strategy = default :: wal_write_strategy(),
                sync_method = datasync :: sync | datasync | none,
                counter :: counters:counters_ref(),
-               open_mem_tbls_name :: atom(),
-               closed_mem_tbls_name :: atom(),
+               open_mem_tbls_tid :: ets:tid(),
+               closed_mem_tbls_tid :: ets:tid(),
                names :: ra_system:names(),
                explicit_gc = false :: boolean(),
-               pre_allocate = false :: boolean()
+               pre_allocate = false :: boolean(),
+               compress_mem_tables = false :: boolean(),
+               ra_log_snapshot_state_tid :: ets:tid()
               }).
 
--record(wal, {fd :: 'maybe'(file:io_device()),
-              filename :: 'maybe'(file:filename()),
+-record(wal, {fd :: option(file:io_device()),
+              filename :: option(file:filename()),
               writer_name_cache = {0, #{}} :: writer_name_cache(),
               max_size :: non_neg_integer(),
               entry_count = 0 :: non_neg_integer()
@@ -114,7 +118,7 @@
                 % and the last index seen
                 writers = #{} :: #{ra_uid() =>
                                    {in_seq | out_of_seq, ra_index()}},
-                batch :: 'maybe'(#batch{})
+                batch :: option(#batch{})
                }).
 
 -type state() :: #state{}.
@@ -131,7 +135,10 @@
                       recovery_chunk_size  => non_neg_integer(),
                       hibernate_after => non_neg_integer(),
                       max_batch_size => non_neg_integer(),
-                      garbage_collect => boolean()
+                      garbage_collect => boolean(),
+                      min_heap_size => non_neg_integer(),
+                      min_bin_vheap_size => non_neg_integer(),
+                      compress_mem_tables => boolean()
                      }.
 
 -export_type([wal_conf/0,
@@ -143,20 +150,21 @@
 -type wal_op() :: {cast, wal_command()} |
                   {call, from(), wal_command()}.
 
--spec write(writer_id(), atom(), ra_index(), ra_term(), term()) ->
-    ok | {error, wal_down}.
-write(From, Wal, Idx, Term, Entry) ->
-    named_cast(Wal, {append, From, Idx, Term, Entry}).
+-spec write(writer_id(), atom() | pid(), ra_index(), ra_term(), term()) ->
+    {ok, pid()} | {error, wal_down}.
+write(From, Wal, Idx, Term, Cmd) ->
+    named_cast(Wal, {append, From, Idx, Term, Cmd}).
 
 -spec truncate_write(writer_id(), atom(), ra_index(), ra_term(), term()) ->
-    ok | {error, wal_down}.
-truncate_write(From, Wal, Idx, Term, Entry) ->
-   named_cast(Wal, {truncate, From, Idx, Term, Entry}).
+    {ok, pid()} | {error, wal_down}.
+truncate_write(From, Wal, Idx, Term, Cmd) ->
+   named_cast(Wal, {truncate, From, Idx, Term, Cmd}).
 
 -spec write_batch(Wal :: atom() | pid(), [wal_command()]) ->
-    ok | {error, wal_down}.
+    {ok, pid()} | {error, wal_down}.
 write_batch(Wal, WalCommands) when is_pid(Wal) ->
-    gen_batch_server:cast_batch(Wal, WalCommands);
+    gen_batch_server:cast_batch(Wal, WalCommands),
+    {ok, Wal};
 write_batch(Wal, WalCommands) when is_atom(Wal) ->
     case whereis(Wal) of
         undefined ->
@@ -166,7 +174,8 @@ write_batch(Wal, WalCommands) when is_atom(Wal) ->
     end.
 
 named_cast(To, Msg) when is_pid(To) ->
-    gen_batch_server:cast(To, Msg);
+    gen_batch_server:cast(To, Msg),
+    {ok, To};
 named_cast(Wal, Msg) ->
     case whereis(Wal) of
         undefined ->
@@ -224,7 +233,7 @@ start_link(#{name := Name} = Config)
 
 %%% Callbacks
 
--spec init(wal_conf()) -> {ok, state()}.
+-spec init(wal_conf()) -> {ok, state()} | {stop, wal_checksum_validation_failure}.
 init(#{dir := Dir} = Conf0) ->
     #{max_size_bytes := MaxWalSize,
       max_entries := MaxEntries,
@@ -235,17 +244,22 @@ init(#{dir := Dir} = Conf0) ->
       write_strategy := WriteStrategy,
       sync_method := SyncMethod,
       garbage_collect := Gc,
+      min_heap_size := MinHeapSize,
+      min_bin_vheap_size := MinBinVheapSize,
+      compress_mem_tables := CompressMemTables,
       names := #{wal := WalName,
                  open_mem_tbls := OpenTblsName,
                  closed_mem_tbls := ClosedTblsName} = Names} =
         merge_conf_defaults(Conf0),
-    ?NOTICE("WAL: ~s init, open tbls: ~w, closed tbls: ~w",
+    ?NOTICE("WAL: ~ts init, open tbls: ~w, closed tbls: ~w",
             [WalName, OpenTblsName, ClosedTblsName]),
     process_flag(trap_exit, true),
     % given ra_log_wal is effectively a fan-in sink it is likely that it will
     % at times receive large number of messages from a large number of
     % writers
     process_flag(message_queue_data, off_heap),
+    process_flag(min_bin_vheap_size, MinBinVheapSize),
+    process_flag(min_heap_size, MinHeapSize),
     CRef = ra_counters:new(WalName, ?COUNTER_FIELDS),
     % wait for the segment writer to process anything in flight
     ok = ra_log_segment_writer:await(SegWriter),
@@ -262,12 +276,19 @@ init(#{dir := Dir} = Conf0) ->
                  write_strategy = WriteStrategy,
                  sync_method = SyncMethod,
                  counter = CRef,
-                 open_mem_tbls_name = OpenTblsName,
-                 closed_mem_tbls_name = ClosedTblsName,
+                 open_mem_tbls_tid = ets:whereis(OpenTblsName),
+                 closed_mem_tbls_tid = ets:whereis(ClosedTblsName),
                  names = Names,
                  explicit_gc = Gc,
-                 pre_allocate = PreAllocate},
-    {ok, recover_wal(Dir, Conf)}.
+                 pre_allocate = PreAllocate,
+                 compress_mem_tables = CompressMemTables,
+                 ra_log_snapshot_state_tid = ets:whereis(ra_log_snapshot_state)},
+    try recover_wal(Dir, Conf) of
+        Result ->
+            {ok, Result}
+    catch _:Err ->
+              Err
+    end.
 
 -spec handle_batch([wal_op()], state()) ->
     {ok, [gen_batch_server:action()], state()}.
@@ -280,31 +301,39 @@ handle_batch(Ops, #state{conf = #conf{explicit_gc = Gc}} = State0) ->
               end,
     {ok, Actions, complete_batch(State)}.
 
-terminate(_Reason, State) ->
+terminate(Reason, State) ->
+    ?DEBUG("wal: terminating with ~W", [Reason, 20]),
     _ = cleanup(State),
     ok.
 
 format_status(#state{conf = #conf{write_strategy = Strat,
+                                  sync_method = SyncMeth,
                                   compute_checksums = Cs,
+                                  names = #{wal := WalName},
                                   max_size_bytes = MaxSize},
                      writers = Writers,
                      file_size = FSize,
                      wal = #wal{filename = Fn}}) ->
     #{write_strategy => Strat,
+      sync_method => SyncMeth,
       compute_checksums => Cs,
       writers => maps:size(Writers),
       filename => filename:basename(Fn),
       current_size => FSize,
-      max_size_bytes => MaxSize}.
+      max_size_bytes => MaxSize,
+      counters => ra_counters:overview(WalName)
+     }.
 
 %% Internal
 
 handle_op({cast, WalCmd}, State) ->
-    handle_msg(WalCmd, State).
+    handle_msg(WalCmd, State);
+handle_op({info,{'EXIT', _, Reason}}, _State) ->
+    throw({stop, Reason}).
 
 recover_wal(Dir, #conf{segment_writer = SegWriter,
-                       open_mem_tbls_name = OpenTbl,
-                       closed_mem_tbls_name = ClosedTbl,
+                       open_mem_tbls_tid = OpenTbl,
+                       closed_mem_tbls_tid = ClosedTbl,
                        recovery_chunk_size = RecoveryChunkSize} = Conf) ->
     % ensure configured directory exists
     ok = ra_lib:make_dir(Dir),
@@ -323,17 +352,17 @@ recover_wal(Dir, #conf{segment_writer = SegWriter,
     % It needs to be atomic so that readers don't accidentally
     % read partially recovered
     % tables mixed with old tables
-    RecoverConf = Conf#conf{open_mem_tbls_name = RecoverTid},
+    RecoverConf = Conf#conf{open_mem_tbls_tid = RecoverTid},
     All = [begin
                FBase = filename:basename(F),
-               ?DEBUG("wal: recovering ~s", [FBase]),
+               ?DEBUG("wal: recovering ~ts", [FBase]),
                Fd = open_at_first_record(F),
                {Time, ok} = timer:tc(
                               fun () ->
                                       recover_wal_chunks(RecoverConf, Fd,
                                                          RecoveryChunkSize)
                               end),
-               ?DEBUG("wal: recovered ~s time taken ~bms",
+               ?DEBUG("wal: recovered ~ts time taken ~bms",
                       [FBase, Time div 1000]),
                close_existing(Fd),
                recovering_to_closed(RecoverTid, F)
@@ -369,7 +398,7 @@ extract_file_num([F | _]) ->
 cleanup(#state{wal = #wal{fd = undefined}}) ->
     ok;
 cleanup(#state{wal = #wal{fd = Fd}}) ->
-    _ = ra_file_handle:sync(Fd),
+    _ = ra_file:sync(Fd),
     ok.
 
 serialize_header(UId, Trunc, {Next, Cache} = WriterCache) ->
@@ -391,7 +420,7 @@ serialize_header(UId, Trunc, {Next, Cache} = WriterCache) ->
              {Next + 1, Cache#{UId => BinId}}}
     end.
 
-write_data({UId, _} = Id, Idx, Term, Data0, Trunc,
+write_data({UId, _} = Id, Idx, Term, Data0, Trunc, SnapIdx,
            #state{conf = #conf{compute_checksums = ComputeChecksum},
                   wal = #wal{writer_name_cache = Cache0,
                              entry_count = Count} = Wal} = State00) ->
@@ -400,7 +429,7 @@ write_data({UId, _} = Id, Idx, Term, Data0, Trunc,
     case should_roll_wal(State00) of
         true ->
             State = roll_over(State00),
-            write_data(Id, Idx, Term, Data0, Trunc, State);
+            write_data(Id, Idx, Term, Data0, Trunc, SnapIdx, State);
         false ->
             EntryData = to_binary(Data0),
             EntryDataLen = iolist_size(EntryData),
@@ -421,17 +450,22 @@ write_data({UId, _} = Id, Idx, Term, Data0, Trunc,
                       <<Checksum:32/integer, EntryDataLen:32/unsigned>> |
                       Entry],
             append_data(State0, Id, Idx, Term, Data0,
-                        DataSize, Record, Trunc)
+                        DataSize, Record, Trunc, SnapIdx)
     end.
 
 
 handle_msg({append, {UId, Pid} = Id, Idx, Term, Entry},
-           #state{writers = Writers} = State0) ->
+           #state{conf = Conf,
+                  writers = Writers} = State0) ->
+    SnapIdx = snap_idx(Conf, UId),
     case maps:find(UId, Writers) of
+        _ when Idx =< SnapIdx ->
+            %% a snapshot already exists that is higher - just drop the write
+            State0#state{writers = Writers#{UId => {in_seq, SnapIdx}}};
         {ok, {_, PrevIdx}} when Idx =< PrevIdx + 1 ->
-            write_data(Id, Idx, Term, Entry, false, State0);
+            write_data(Id, Idx, Term, Entry, false, SnapIdx, State0);
         error ->
-            write_data(Id, Idx, Term, Entry, false, State0);
+            write_data(Id, Idx, Term, Entry, false, SnapIdx, State0);
         {ok, {out_of_seq, _}} ->
             % writer is out of seq simply ignore drop the write
             % TODO: capture metric for dropped writes
@@ -445,33 +479,35 @@ handle_msg({append, {UId, Pid} = Id, Idx, Term, Entry},
             Pid ! {ra_log_event, {resend_write, PrevIdx + 1}},
             State0#state{writers = Writers#{UId => {out_of_seq, PrevIdx}}}
     end;
-handle_msg({truncate, Id, Idx, Term, Entry}, State0) ->
-    write_data(Id, Idx, Term, Entry, true, State0);
+handle_msg({truncate, Id, Idx, Term, Entry}, #state{conf = Conf} = State0) ->
+    SnapIdx = snap_idx(Conf, Id),
+    write_data(Id, Idx, Term, Entry, true, SnapIdx, State0);
 handle_msg(rollover, State) ->
     roll_over(State).
 
-append_data(#state{conf = Cfg,
+append_data(#state{conf = #conf{counter = C} = Cfg,
                    file_size = FileSize,
                    batch = Batch0,
                    writers = Writers} = State,
-            {UId, Pid}, Idx, Term, Entry, DataSize, Data, Truncate) ->
+            {UId, Pid}, Idx, Term, Entry, DataSize, Data, Truncate, SnapIdx) ->
     Batch = incr_batch(Cfg, Batch0, UId, Pid,
-                       {Idx, Term, Entry}, Data, Truncate),
+                       {Idx, Term, Entry}, Data, Truncate, SnapIdx),
+    counters:add(C, ?C_BYTES_WRITTEN, DataSize),
     State#state{file_size = FileSize + DataSize,
                 batch = Batch,
                 writers = Writers#{UId => {in_seq, Idx}} }.
 
-incr_batch(#conf{open_mem_tbls_name = OpnMemTbl} = Cfg,
+incr_batch(#conf{open_mem_tbls_tid = OpnMemTbl} = Cfg,
            #batch{writes = Writes,
                   waiting = Waiting0,
                   pending = Pend} = Batch,
-           UId, Pid, {Idx, Term, _} = Record, Data, Truncate) ->
+           UId, Pid, {Idx, Term, _} = Record, Data, Truncate, SnapIdx) ->
     Waiting = case Waiting0 of
                   #{Pid := #batch_writer{tbl_start = TblStart0,
                                          tid = _Tid,
                                          from = From,
                                          inserts = Inserts0} = W} ->
-                      TblStart = table_start(Truncate, Idx, TblStart0),
+                      TblStart = max(SnapIdx, table_start(Truncate, Idx, TblStart0)),
                       Inserts = case Inserts0 of
                                     [] ->
                                         [Record];
@@ -498,14 +534,16 @@ incr_batch(#conf{open_mem_tbls_name = OpnMemTbl} = Cfg,
                       {Tid, TblStart} =
                           case ets:lookup(OpnMemTbl, UId) of
                               [{_UId, TblStart0, _TblEnd, T}] ->
-                                  {T, table_start(Truncate, Idx, TblStart0)};
+                                  {T, max(SnapIdx,
+                                          table_start(Truncate, Idx, TblStart0))};
                               _ ->
                                   %% there is no table so need
                                   %% to open one
+                                  TS = max(SnapIdx, Idx),
                                   T = open_mem_table(Cfg, UId),
                                   true = ets:insert_new(OpnMemTbl,
-                                                        {UId, Idx, Idx, T}),
-                                  {T, Idx}
+                                                        {UId, TS, Idx - 1, T}),
+                                  {T, TS}
                           end,
                       Writer = #batch_writer{tbl_start = TblStart,
                                              from = Idx,
@@ -521,30 +559,34 @@ incr_batch(#conf{open_mem_tbls_name = OpnMemTbl} = Cfg,
                 waiting = Waiting,
                 pending = [Pend | Data]}.
 
-update_mem_table(#conf{open_mem_tbls_name = OpnMemTbl} = Cfg,
+update_mem_table(#conf{open_mem_tbls_tid = OpnMemTbl} = Cfg,
                  UId, Idx, Term, Entry, Truncate) ->
     % TODO: if Idx =< First we could truncate the entire table and save
     % some disk space when it later is flushed to disk
+    SnapIdx = snap_idx(Cfg, UId),
     case ets:lookup(OpnMemTbl, UId) of
         [{_UId, From0, _To, Tid}] ->
-            true = ets:insert(Tid, {Idx, Term, Entry}),
-            From = table_start(Truncate, Idx, From0),
-            % update Last idx for current tbl
-            % this is how followers overwrite previously seen entries
-            % TODO: OPTIMISATION
-            % Writers don't need this updated for every entry. As they keep
-            % a local cache of unflushed entries it is sufficient to update
-            % ra_log_open_mem_tables before completing the batch.
-            % Instead the `From` and `To` could be kept in the batch.
-            _ = ets:update_element(OpnMemTbl, UId, [{2, From}, {3, Idx}]);
-        [] ->
+            case Idx > SnapIdx of
+                true ->
+                    true = ets:insert(Tid, {Idx, Term, Entry}),
+                    From = table_start(Truncate, Idx, From0),
+                    % update Last idx for current tbl
+                    % this is how followers overwrite previously seen entries
+                    _ = ets:update_element(OpnMemTbl, UId, [{2, From}, {3, Idx}]);
+                false ->
+                    From = max(SnapIdx, table_start(Truncate, Idx, From0)),
+                    _ = ets:update_element(OpnMemTbl, UId, [{2, From}])
+            end;
+        [] when Idx > SnapIdx ->
             % open new ets table
             Tid = open_mem_table(Cfg, UId),
             true = ets:insert_new(OpnMemTbl, {UId, Idx, Idx, Tid}),
-            true = ets:insert(Tid, {Idx, Term, Entry})
+            true = ets:insert(Tid, {Idx, Term, Entry});
+        _ ->
+            true
     end.
 
-roll_over(#state{conf = #conf{open_mem_tbls_name = Tbl}} = State0) ->
+roll_over(#state{conf = #conf{open_mem_tbls_tid = Tbl}} = State0) ->
     State = complete_batch(State0),
     roll_over(Tbl, start_batch(State)).
 
@@ -604,7 +646,7 @@ prepare_file(File, Modes) ->
     %% rename is atomic-ish so we will never accidentally write an empty wal file
     %% using prim_file here as file:rename/2 uses the file server
     ok = prim_file:rename(Tmp, File),
-    case ra_file_handle:open(File, Modes) of
+    case file:open(File, Modes) of
         {ok, Fd2} ->
             {ok, ?HEADER_SIZE} = file:position(Fd2, ?HEADER_SIZE),
             {ok, Fd2};
@@ -616,7 +658,7 @@ make_tmp(File) ->
     Tmp = filename:rootname(File) ++ ".tmp",
     {ok, Fd} = file:open(Tmp, [write, binary, raw]),
     ok = file:write(Fd, <<?MAGIC, ?CURRENT_VERSION:8/unsigned>>),
-    ok = file:sync(Fd),
+    ok = ra_file:sync(Fd),
     ok = file:close(Fd),
     Tmp.
 
@@ -643,13 +685,12 @@ maybe_pre_allocate(Conf, _Fd, _Max) ->
 close_file(undefined) ->
     ok;
 close_file(Fd) ->
-    % ok = ra_file_handle:sync(Fd),
-    ra_file_handle:close(Fd).
+    file:close(Fd).
 
 close_open_mem_tables(MemTables,
                       #conf{segment_writer = TblWriter,
-                            open_mem_tbls_name = OpnMemTbls,
-                            closed_mem_tbls_name = CloseMemTbls},
+                            open_mem_tbls_tid = OpnMemTbls,
+                            closed_mem_tbls_tid = CloseMemTbls},
                       Filename) ->
     % insert into closed mem tables
     % so that readers can still resolve the table whilst it is being
@@ -680,11 +721,19 @@ recovering_to_closed(RecoverTid, Filename) ->
 
 open_mem_table(Cfg, {UId, _Pid}) ->
     open_mem_table(Cfg, UId);
-open_mem_table(#conf{names = Names}, UId) ->
+open_mem_table(#conf{names = Names,
+                     compress_mem_tables = CompressTbls}, UId) ->
     % lookup the locally registered name of the process to use as ets
     % name
     ServerName = ra_directory:name_of(Names, UId),
-    Tid = ets:new(ServerName, [set, {write_concurrency, true}, public]),
+    Opts = case CompressTbls of
+               true ->
+                   [set, {write_concurrency, true}, public, compressed];
+               false ->
+                   [set, {write_concurrency, true}, public]
+           end,
+
+    Tid = ets:new(ServerName, Opts),
     % immediately give away ownership to ets process
     true = ra_log_ets:give_away(Names, Tid),
     Tid.
@@ -695,33 +744,37 @@ start_batch(#state{conf = #conf{counter = CRef}} = State) ->
 
 
 post_notify_flush(#state{wal = #wal{fd = Fd},
-                         conf =  #conf{write_strategy = sync_after_notify,
-                                       sync_method = SyncMeth}}) ->
-    ok = ra_file_handle:SyncMeth(Fd);
+                         conf = #conf{write_strategy = sync_after_notify,
+                                      sync_method = SyncMeth}}) ->
+    sync(Fd, SyncMeth);
 post_notify_flush(_State) ->
     ok.
 
-
 flush_pending(#state{wal = #wal{fd = Fd},
                      batch = #batch{pending = Pend},
-                     conf =  #conf{write_strategy = WriteStrategy,
-                                   sync_method = SyncMeth}} = State0) ->
+                     conf = #conf{write_strategy = WriteStrategy,
+                                  sync_method = SyncMeth}} = State0) ->
 
     case WriteStrategy of
         default ->
-            ok = ra_file_handle:write(Fd, Pend),
-            ok = ra_file_handle:SyncMeth(Fd),
-            ok;
+            ok = file:write(Fd, Pend),
+            sync(Fd, SyncMeth);
         _ ->
-            ok = ra_file_handle:write(Fd, Pend)
+            ok = file:write(Fd, Pend)
     end,
     State0#state{batch = undefined}.
+
+sync(_Fd, none) ->
+    ok;
+sync(Fd, Meth) ->
+    ok = file:Meth(Fd),
+    ok.
 
 complete_batch(#state{batch = undefined} = State) ->
     State;
 complete_batch(#state{batch = #batch{waiting = Waiting,
                                      writes = NumWrites},
-                      conf = #conf{open_mem_tbls_name = OpnTbl} = Cfg
+                      conf = #conf{open_mem_tbls_tid = OpnTbl} = Cfg
                       } = State0) ->
     % TS = erlang:system_time(microsecond),
     State = flush_pending(State0),
@@ -933,7 +986,10 @@ merge_conf_defaults(Conf) ->
                  pre_allocate => false,
                  write_strategy => default,
                  garbage_collect => false,
-                 sync_method => datasync}, Conf).
+                 sync_method => datasync,
+                 min_bin_vheap_size => ?MIN_BIN_VHEAP_SIZE,
+                 min_heap_size => ?MIN_HEAP_SIZE,
+                 compress_mem_tables => false}, Conf).
 
 to_binary(Term) ->
     term_to_iovec(Term).
@@ -962,3 +1018,11 @@ table_start(false, Idx, TblStart) ->
     min(TblStart, Idx);
 table_start(true, Idx, _TblStart) ->
     Idx.
+
+snap_idx(#conf{ra_log_snapshot_state_tid = Tid}, ServerUId) ->
+    try ets:lookup_element(Tid, ServerUId, 2) of
+        Idx ->
+            Idx
+    catch _:badarg ->
+              -1
+    end.

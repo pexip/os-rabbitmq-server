@@ -1,6 +1,6 @@
 # JOSE
 
-[![Build Status](https://travis-ci.org/potatosalad/erlang-jose.svg?branch=master)](https://travis-ci.org/potatosalad/erlang-jose) [![Hex.pm](https://img.shields.io/hexpm/v/jose.svg)](https://hex.pm/packages/jose)
+[![Build Status](https://github.com/potatosalad/erlang-jose/actions/workflows/main.yml/badge.svg?branch=main)](https://github.com/potatosalad/erlang-jose/actions) [![Hex.pm](https://img.shields.io/hexpm/v/jose.svg)](https://hex.pm/packages/jose)
 
 JSON Object Signing and Encryption (JOSE) for Erlang and Elixir.
 
@@ -34,7 +34,7 @@ Add `jose` to your project's dependencies in your `Makefile` for [`erlang.mk`](h
 
 ```erlang
 {deps, [
-  {jose, ".*", {git, "git://github.com/potatosalad/erlang-jose.git", {branch, "master"}}}
+  jose
 ]}.
 ```
 
@@ -48,7 +48,7 @@ For example, with Elixir and `mix.exs`
 defp deps() do
   [
     {:jose, "~> 1.11"},
-    {:ojson, "~> 1.0"}
+    {:jason, "~> 1.4"}
   ]
 end
 ```
@@ -57,8 +57,8 @@ Or with Erlang and `rebar.config`
 
 ```erlang
 {deps, [
-  {jose, ".*", {git, "git://github.com/potatosalad/erlang-jose.git", {branch, "master"}}},
-  {ojson, ".*", {git, "git://github.com/potatosalad/erlang-ojson.git", {branch, "master"}}}
+  jose,
+  ojson
 ]}.
 ```
 
@@ -126,7 +126,7 @@ JOSE.sha3_module(:jose_jwa_sha3) # uses the pure Erlang implementation (slow)
 
 However, not all of the required algorithms are supported natively by Erlang/Elixir.  For algorithms unsupported by the native [`crypto`](http://www.erlang.org/doc/man/crypto.html) and [`public_key`](http://www.erlang.org/doc/man/public_key.html), `jose` has a pure Erlang implementation that may be used as a fallback.
 
-See [ALGORITHMS.md](https://github.com/potatosalad/erlang-jose/blob/master/ALGORITHMS.md) for more information about algorithm support for specific OTP versions.
+See [ALGORITHMS.md](https://github.com/potatosalad/erlang-jose/blob/main/ALGORITHMS.md) for more information about algorithm support for specific OTP versions.
 
 By default, the algorithm fallback is disabled, but can be enabled by setting the `crypto_fallback` application environment variable for `jose` to `true` or by calling `jose:crypto_fallback/1` or `JOSE.crypto_fallback/1` with `true`.
 
@@ -142,20 +142,27 @@ JOSE.JWA.supports()
     ["A128GCMKW", "A128KW", "A192GCMKW", "A192KW", "A256GCMKW", "A256KW",
      "C20PKW", "ECDH-1PU", "ECDH-1PU+A128GCMKW", "ECDH-1PU+A128KW",
      "ECDH-1PU+A192GCMKW", "ECDH-1PU+A192KW", "ECDH-1PU+A256GCMKW",
-     "ECDH-1PU+A256KW", "ECDH-1PU+C20PKW", "ECDH-ES", "ECDH-ES+A128GCMKW",
-     "ECDH-ES+A128KW", "ECDH-ES+A192GCMKW", "ECDH-ES+A192KW",
-     "ECDH-ES+A256GCMKW", "ECDH-ES+A256KW", "ECDH-ES+C20PKW",
+     "ECDH-1PU+A256KW", "ECDH-1PU+C20PKW", "ECDH-1PU+XC20PKW", "ECDH-ES",
+     "ECDH-ES+A128GCMKW", "ECDH-ES+A128KW", "ECDH-ES+A192GCMKW",
+     "ECDH-ES+A192KW", "ECDH-ES+A256GCMKW", "ECDH-ES+A256KW", "ECDH-ES+C20PKW",
+     "ECDH-ES+XC20PKW", "ECDH-SS", "ECDH-SS+A128GCMKW", "ECDH-SS+A128KW",
+     "ECDH-SS+A192GCMKW", "ECDH-SS+A192KW", "ECDH-SS+A256GCMKW",
+     "ECDH-SS+A256KW", "ECDH-SS+C20PKW", "ECDH-SS+XC20PKW",
      "PBES2-HS256+A128GCMKW", "PBES2-HS256+A128KW", "PBES2-HS384+A192GCMKW",
      "PBES2-HS384+A192KW", "PBES2-HS512+A256GCMKW", "PBES2-HS512+A256KW",
-     "PBES2-HS512+C20PKW", "RSA-OAEP", "RSA-OAEP-256", "RSA1_5", "dir"]},
+     "PBES2-HS512+C20PKW", "PBES2-HS512+XC20PKW", "RSA-OAEP", "RSA-OAEP-256",
+     "RSA1_5", "XC20PKW", "dir"]},
    {:enc,
     ["A128CBC-HS256", "A128GCM", "A192CBC-HS384", "A192GCM", "A256CBC-HS512",
-     "A256GCM", "C20P"]}, {:zip, ["DEF"]}},
-  {:jwk, {:kty, ["EC", "OKP", "RSA", "oct"]}, {:kty_OKP_crv, []}},
+     "A256GCM", "C20P", "XC20P"]}, {:zip, ["DEF"]}},
+  {:jwk, {:kty, ["EC", "OKP", "RSA", "oct"]},
+   {:kty_OKP_crv,
+    ["Ed25519", "Ed25519ph", "Ed448", "Ed448ph", "X25519", "X448"]}},
   {:jws,
    {:alg,
-    ["ES256", "ES384", "ES512", "HS256", "HS384", "HS512", "PS256", "PS384",
-     "PS512", "Poly1305", "RS256", "RS384", "RS512"]}}
+    ["ES256", "ES256K", "ES384", "ES512", "Ed25519", "Ed25519ph", "Ed448",
+     "Ed448ph", "EdDSA", "HS256", "HS384", "HS512", "PS256", "PS384", "PS512",
+     "Poly1305", "RS1", "RS256", "RS384", "RS512"]}}
 ]
 
 # setting crypto_fallback to true
@@ -173,10 +180,13 @@ JOSE.JWA.supports()
      "ECDH-1PU+A256KW", "ECDH-1PU+C20PKW", "ECDH-1PU+XC20PKW", "ECDH-ES",
      "ECDH-ES+A128GCMKW", "ECDH-ES+A128KW", "ECDH-ES+A192GCMKW",
      "ECDH-ES+A192KW", "ECDH-ES+A256GCMKW", "ECDH-ES+A256KW", "ECDH-ES+C20PKW",
-     "ECDH-ES+XC20PKW", "PBES2-HS256+A128GCMKW", "PBES2-HS256+A128KW",
-     "PBES2-HS384+A192GCMKW", "PBES2-HS384+A192KW", "PBES2-HS512+A256GCMKW",
-     "PBES2-HS512+A256KW", "PBES2-HS512+C20PKW", "PBES2-HS512+XC20PKW",
-     "RSA-OAEP", "RSA-OAEP-256", "RSA1_5", "XC20PKW", "dir"]},
+     "ECDH-ES+XC20PKW", "ECDH-SS", "ECDH-SS+A128GCMKW", "ECDH-SS+A128KW",
+     "ECDH-SS+A192GCMKW", "ECDH-SS+A192KW", "ECDH-SS+A256GCMKW",
+     "ECDH-SS+A256KW", "ECDH-SS+C20PKW", "ECDH-SS+XC20PKW",
+     "PBES2-HS256+A128GCMKW", "PBES2-HS256+A128KW", "PBES2-HS384+A192GCMKW",
+     "PBES2-HS384+A192KW", "PBES2-HS512+A256GCMKW", "PBES2-HS512+A256KW",
+     "PBES2-HS512+C20PKW", "PBES2-HS512+XC20PKW", "RSA-OAEP", "RSA-OAEP-256",
+     "RSA1_5", "XC20PKW", "dir"]},
    {:enc,
     ["A128CBC-HS256", "A128GCM", "A192CBC-HS384", "A192GCM", "A256CBC-HS512",
      "A256GCM", "C20P", "XC20P"]}, {:zip, ["DEF"]}},
@@ -185,15 +195,15 @@ JOSE.JWA.supports()
     ["Ed25519", "Ed25519ph", "Ed448", "Ed448ph", "X25519", "X448"]}},
   {:jws,
    {:alg,
-    ["ES256", "ES384", "ES512", "Ed25519", "Ed25519ph", "Ed448", "Ed448ph",
-     "HS256", "HS384", "HS512", "PS256", "PS384", "PS512", "Poly1305", "RS256",
-     "RS384", "RS512"]}}
+    ["ES256", "ES256K", "ES384", "ES512", "Ed25519", "Ed25519ph", "Ed448",
+     "Ed448ph", "EdDSA", "HS256", "HS384", "HS512", "PS256", "PS384", "PS512",
+     "Poly1305", "RS1", "RS256", "RS384", "RS512"]}}
 ]
 ```
 
 #### Unsecured Signing Vulnerability
 
-The [`"none"`](https://tools.ietf.org/html/rfc7515#appendix-A.5) signing algorithm is disabled by default to prevent accidental verification of empty signatures (read about the vulnerability [here](https://auth0.com/blog/2015/03/31/critical-vulnerabilities-in-json-web-token-libraries/)).
+The [`"none"`](https://tools.ietf.org/html/rfc7515#appendix-A.5) signing algorithm is disabled by default to prevent accidental verification of empty signatures (read about the vulnerability [here](https://auth0.com/blog/critical-vulnerabilities-in-json-web-token-libraries/)).
 
 If you want to further restrict the signature algorithms allowed for a token, use `JOSE.JWT.verify_strict/3`:
 
@@ -239,9 +249,9 @@ You may also enable the `"none"` algorithm as an application environment variabl
 JOSE.JWA.supports[:jws]
 
 {:alg,
- ["ES256", "ES384", "ES512", "Ed25519", "Ed25519ph", "Ed448", "Ed448ph",
-  "HS256", "HS384", "HS512", "PS256", "PS384", "PS512", "Poly1305", "RS256",
-  "RS384", "RS512"]}
+ ["ES256", "ES256K", "ES384", "ES512", "Ed25519", "Ed25519ph", "Ed448",
+  "Ed448ph", "EdDSA", "HS256", "HS384", "HS512", "PS256", "PS384", "PS512",
+  "Poly1305", "RS1", "RS256", "RS384", "RS512"]}
 
 # setting unsecured_signing to true
 JOSE.unsecured_signing(true)
@@ -250,9 +260,9 @@ JOSE.unsecured_signing(true)
 JOSE.JWA.supports[:jws]
 
 {:alg,
- ["ES256", "ES384", "ES512", "Ed25519", "Ed25519ph", "Ed448", "Ed448ph",
-  "HS256", "HS384", "HS512", "PS256", "PS384", "PS512", "Poly1305", "RS256",
-  "RS384", "RS512", "none"]}
+ ["ES256", "ES256K", "ES384", "ES512", "Ed25519", "Ed25519ph", "Ed448",
+  "Ed448ph", "EdDSA", "HS256", "HS384", "HS512", "PS256", "PS384", "PS512",
+  "Poly1305", "RS1", "RS256", "RS384", "RS512", "none"]}
 ```
 
 ## Usage
@@ -463,17 +473,17 @@ EncryptedECDHES = jose_jwk:box_encrypt(AliceToBob, BobPublicJWK, AlicePrivateJWK
 - [X] `A128KW`
 - [X] `A192KW`
 - [X] `A256KW`
-- [X] `C20PKW` <sup>[draft-amringer-jose-chacha](https://tools.ietf.org/html/draft-amringer-jose-chacha-01)</sup>
+- [X] `C20PKW` <sup>[draft-amringer-jose-chacha](https://datatracker.ietf.org/doc/html/draft-amringer-jose-chacha-02)</sup>
 - [X] `dir`
-- [X] `ECDH-1PU`
-- [X] `ECDH-1PU+A128GCMKW` <sup>non-standard, [draft-madden-jose-ecdh-1pu](https://tools.ietf.org/html/draft-madden-jose-ecdh-1pu-02)</sup>
-- [X] `ECDH-1PU+A192GCMKW` <sup>non-standard, [draft-madden-jose-ecdh-1pu](https://tools.ietf.org/html/draft-madden-jose-ecdh-1pu-02)</sup>
-- [X] `ECDH-1PU+A256GCMKW` <sup>non-standard, [draft-madden-jose-ecdh-1pu](https://tools.ietf.org/html/draft-madden-jose-ecdh-1pu-02)</sup>
-- [X] `ECDH-1PU+A128KW` <sup>[draft-madden-jose-ecdh-1pu](https://tools.ietf.org/html/draft-madden-jose-ecdh-1pu-02)</sup>
-- [X] `ECDH-1PU+A192KW` <sup>[draft-madden-jose-ecdh-1pu](https://tools.ietf.org/html/draft-madden-jose-ecdh-1pu-02)</sup>
-- [X] `ECDH-1PU+A256KW` <sup>[draft-madden-jose-ecdh-1pu](https://tools.ietf.org/html/draft-madden-jose-ecdh-1pu-02)</sup>
-- [X] `ECDH-1PU+C20PKW` <sup>[draft-amringer-jose-chacha](https://tools.ietf.org/html/draft-amringer-jose-chacha-01), [draft-madden-jose-ecdh-1pu](https://tools.ietf.org/html/draft-madden-jose-ecdh-1pu-02)</sup>
-- [X] `ECDH-1PU+XC20PKW` <sup>[draft-amringer-jose-chacha](https://tools.ietf.org/html/draft-amringer-jose-chacha-01), [draft-madden-jose-ecdh-1pu](https://tools.ietf.org/html/draft-madden-jose-ecdh-1pu-02)</sup>
+- [X] `ECDH-1PU` <sup>[draft-madden-jose-ecdh-1pu](https://datatracker.ietf.org/doc/html/draft-madden-jose-ecdh-1pu-04)</sup>
+- [X] `ECDH-1PU+A128GCMKW` <sup>non-standard, [draft-madden-jose-ecdh-1pu](https://datatracker.ietf.org/doc/html/draft-madden-jose-ecdh-1pu-04)</sup>
+- [X] `ECDH-1PU+A192GCMKW` <sup>non-standard, [draft-madden-jose-ecdh-1pu](https://datatracker.ietf.org/doc/html/draft-madden-jose-ecdh-1pu-04)</sup>
+- [X] `ECDH-1PU+A256GCMKW` <sup>non-standard, [draft-madden-jose-ecdh-1pu](https://datatracker.ietf.org/doc/html/draft-madden-jose-ecdh-1pu-04)</sup>
+- [X] `ECDH-1PU+A128KW` <sup>[draft-madden-jose-ecdh-1pu](https://datatracker.ietf.org/doc/html/draft-madden-jose-ecdh-1pu-04)</sup>
+- [X] `ECDH-1PU+A192KW` <sup>[draft-madden-jose-ecdh-1pu](https://datatracker.ietf.org/doc/html/draft-madden-jose-ecdh-1pu-04)</sup>
+- [X] `ECDH-1PU+A256KW` <sup>[draft-madden-jose-ecdh-1pu](https://datatracker.ietf.org/doc/html/draft-madden-jose-ecdh-1pu-04)</sup>
+- [X] `ECDH-1PU+C20PKW` <sup>[draft-amringer-jose-chacha](https://datatracker.ietf.org/doc/html/draft-amringer-jose-chacha-02), [draft-madden-jose-ecdh-1pu](https://datatracker.ietf.org/doc/html/draft-madden-jose-ecdh-1pu-04)</sup>
+- [X] `ECDH-1PU+XC20PKW` <sup>[draft-amringer-jose-chacha](https://datatracker.ietf.org/doc/html/draft-amringer-jose-chacha-02), [draft-madden-jose-ecdh-1pu](https://datatracker.ietf.org/doc/html/draft-madden-jose-ecdh-1pu-04)</sup>
 - [X] `ECDH-ES`
 - [X] `ECDH-ES+A128GCMKW` <sup>non-standard</sup>
 - [X] `ECDH-ES+A192GCMKW` <sup>non-standard</sup>
@@ -481,8 +491,17 @@ EncryptedECDHES = jose_jwk:box_encrypt(AliceToBob, BobPublicJWK, AlicePrivateJWK
 - [X] `ECDH-ES+A128KW`
 - [X] `ECDH-ES+A192KW`
 - [X] `ECDH-ES+A256KW`
-- [X] `ECDH-ES+C20PKW` <sup>[draft-amringer-jose-chacha](https://tools.ietf.org/html/draft-amringer-jose-chacha-01)</sup>
-- [X] `ECDH-ES+XC20PKW` <sup>[draft-amringer-jose-chacha](https://tools.ietf.org/html/draft-amringer-jose-chacha-01)</sup>
+- [X] `ECDH-ES+C20PKW` <sup>[draft-amringer-jose-chacha](https://datatracker.ietf.org/doc/html/draft-amringer-jose-chacha-02)</sup>
+- [X] `ECDH-ES+XC20PKW` <sup>[draft-amringer-jose-chacha](https://datatracker.ietf.org/doc/html/draft-amringer-jose-chacha-02)</sup>
+- [X] `ECDH-SS` <sup>[draft-amringer-jose-ecdh-ss](https://datatracker.ietf.org/doc/html/draft-amringer-jose-ecdh-ss-00)</sup>
+- [X] `ECDH-SS+A128GCMKW` <sup>non-standard, [draft-amringer-jose-ecdh-ss](https://datatracker.ietf.org/doc/html/draft-amringer-jose-ecdh-ss-00)</sup>
+- [X] `ECDH-SS+A192GCMKW` <sup>non-standard, [draft-amringer-jose-ecdh-ss](https://datatracker.ietf.org/doc/html/draft-amringer-jose-ecdh-ss-00)</sup>
+- [X] `ECDH-SS+A256GCMKW` <sup>non-standard, [draft-amringer-jose-ecdh-ss](https://datatracker.ietf.org/doc/html/draft-amringer-jose-ecdh-ss-00)</sup>
+- [X] `ECDH-SS+A128KW` <sup>[draft-amringer-jose-ecdh-ss](https://datatracker.ietf.org/doc/html/draft-amringer-jose-ecdh-ss-00)</sup>
+- [X] `ECDH-SS+A192KW` <sup>[draft-amringer-jose-ecdh-ss](https://datatracker.ietf.org/doc/html/draft-amringer-jose-ecdh-ss-00)</sup>
+- [X] `ECDH-SS+A256KW` <sup>[draft-amringer-jose-ecdh-ss](https://datatracker.ietf.org/doc/html/draft-amringer-jose-ecdh-ss-00)</sup>
+- [X] `ECDH-SS+C20PKW` <sup>[draft-amringer-jose-chacha](https://datatracker.ietf.org/doc/html/draft-amringer-jose-chacha-02), [draft-amringer-jose-ecdh-ss](https://datatracker.ietf.org/doc/html/draft-amringer-jose-ecdh-ss-00)</sup>
+- [X] `ECDH-SS+XC20PKW` <sup>[draft-amringer-jose-chacha](https://datatracker.ietf.org/doc/html/draft-amringer-jose-chacha-02), [draft-amringer-jose-ecdh-ss](https://datatracker.ietf.org/doc/html/draft-amringer-jose-ecdh-ss-00)</sup>
 - [X] `PBES2-HS256+A128GCMKW` <sup>non-standard</sup>
 - [X] `PBES2-HS384+A192GCMKW` <sup>non-standard</sup>
 - [X] `PBES2-HS512+A256GCMKW` <sup>non-standard</sup>
@@ -494,7 +513,7 @@ EncryptedECDHES = jose_jwk:box_encrypt(AliceToBob, BobPublicJWK, AlicePrivateJWK
 - [X] `RSA1_5`
 - [X] `RSA-OAEP`
 - [X] `RSA-OAEP-256`
-- [X] `XC20PKW` <sup>[draft-amringer-jose-chacha](https://tools.ietf.org/html/draft-amringer-jose-chacha-01)</sup>
+- [X] `XC20PKW` <sup>[draft-amringer-jose-chacha](https://datatracker.ietf.org/doc/html/draft-amringer-jose-chacha-02)</sup>
 
 #### `"enc"` [RFC 7518 Section 5](https://tools.ietf.org/html/rfc7518#section-5)
 
@@ -504,8 +523,8 @@ EncryptedECDHES = jose_jwk:box_encrypt(AliceToBob, BobPublicJWK, AlicePrivateJWK
 - [X] `A128GCM`
 - [X] `A192GCM`
 - [X] `A256GCM`
-- [X] `C20P` <sup>[draft-amringer-jose-chacha](https://tools.ietf.org/html/draft-amringer-jose-chacha-01)</sup>
-- [X] `XC20P` <sup>[draft-amringer-jose-chacha](https://tools.ietf.org/html/draft-amringer-jose-chacha-01)</sup>
+- [X] `C20P` <sup>[draft-amringer-jose-chacha](https://datatracker.ietf.org/doc/html/draft-amringer-jose-chacha-02)</sup>
+- [X] `XC20P` <sup>[draft-amringer-jose-chacha](https://datatracker.ietf.org/doc/html/draft-amringer-jose-chacha-02)</sup>
 
 #### `"zip"` [RFC 7518 Section 7.3](https://tools.ietf.org/html/rfc7518#section-7.3)
 
@@ -535,6 +554,7 @@ EncryptedECDHES = jose_jwk:box_encrypt(AliceToBob, BobPublicJWK, AlicePrivateJWK
 - [X] `Ed448` <sup>[RFC 8037](https://tools.ietf.org/html/rfc8037), [RFC 8032](https://tools.ietf.org/html/rfc8032#section-5.2)</sup>
 - [X] `Ed448ph` <sup>[RFC 8037](https://tools.ietf.org/html/rfc8037), [RFC 8032](https://tools.ietf.org/html/rfc8032#section-5.2)</sup>
 - [X] `EdDSA` <sup>[RFC 8037](https://tools.ietf.org/html/rfc8037), [RFC 8032](https://tools.ietf.org/html/rfc8032)</sup>
+- [X] `ES256K` <sup>[RFC 8812](https://datatracker.ietf.org/doc/html/rfc8812)</sup>
 - [X] `ES256`
 - [X] `ES384`
 - [X] `ES512`
@@ -545,6 +565,7 @@ EncryptedECDHES = jose_jwk:box_encrypt(AliceToBob, BobPublicJWK, AlicePrivateJWK
 - [X] `PS256`
 - [X] `PS384`
 - [X] `PS512`
+- [X] `RS1` <sup>deprecated, [RFC 8812](https://datatracker.ietf.org/doc/html/rfc8812)</sup>
 - [X] `RS256`
 - [X] `RS384`
 - [X] `RS512`

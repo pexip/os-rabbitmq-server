@@ -3,16 +3,14 @@
 %%
 %% 1) the module name is supervisor2
 %%
-%% 2) a find_child/2 utility function has been added
-%%
-%% 3) Added an 'intrinsic' restart type. Like the transient type, this
+%% 2) Added an 'intrinsic' restart type. Like the transient type, this
 %%    type means the child should only be restarted if the child exits
 %%    abnormally. Unlike the transient type, if the child exits
 %%    normally, the supervisor itself also exits normally. If the
 %%    child is a supervisor and it exits normally (i.e. with reason of
 %%    'shutdown') then the child's parent also exits normally.
 %%
-%% 4) child specifications can contain, as the restart type, a tuple
+%% 3) child specifications can contain, as the restart type, a tuple
 %%    {permanent, Delay} | {transient, Delay} | {intrinsic, Delay}
 %%    where Delay >= 0 (see point (4) below for intrinsic). The delay,
 %%    in seconds, indicates what should happen if a child, upon being
@@ -37,10 +35,10 @@
 %%    perspective it's a normal exit, whilst from supervisor's
 %%    perspective, it's an abnormal exit.
 %%
-%% 5) normal, and {shutdown, _} exit reasons are all treated the same
+%% 4) normal, and {shutdown, _} exit reasons are all treated the same
 %%    (i.e. are regarded as normal exits)
 %%
-%% All modifications are (C) 2010-2022 VMware, Inc. or its affiliates.
+%% All modifications are (C) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 %% %CopyrightBegin%
 %%
@@ -69,12 +67,11 @@
          start_child/2, restart_child/2,
          delete_child/2, terminate_child/2,
          which_children/1, count_children/1,
-         check_childspecs/1, get_childspec/2,
-         find_child/2]).
+         check_childspecs/1, get_childspec/2]).
 
 %% Internal exports
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3, format_status/2]).
+         terminate/2, code_change/3]).
 
 %% For release_handler only
 -export([get_callback_module/1]).
@@ -114,7 +111,7 @@
 
 %%--------------------------------------------------------------------------
 
--export_type([sup_flags/0, child_spec/0, startchild_ret/0, strategy/0]).
+-export_type([sup_flags/0, child_spec/0, startchild_ret/0, strategy/0, sup_name/0]).
 
 %%--------------------------------------------------------------------------
 
@@ -308,13 +305,6 @@ which_children(Supervisor) ->
              |{workers, ChildWorkerCount :: non_neg_integer()}.
 count_children(Supervisor) ->
     call(Supervisor, count_children).
-
--spec find_child(Supervisor, Name) -> [pid()] when
-      Supervisor :: sup_ref(),
-      Name :: child_id().
-find_child(Supervisor, Name) ->
-    [Pid || {Name1, Pid, _Type, _Modules} <- which_children(Supervisor),
-            Name1 =:= Name].
 
 call(Supervisor, Req) ->
     gen_server:call(Supervisor, Req, infinity).
@@ -888,17 +878,13 @@ do_restart_delay(Reason,
 
 maybe_restart(Strategy, Child, State) ->
     case restart(Strategy, Child, State) of
-        {{try_again, Reason}, NState2} ->
+        {{try_again, TryAgainId}, NState2} ->
             %% Leaving control back to gen_server before
             %% trying again. This way other incoming requests
             %% for the supervisor can be handled - e.g. a
             %% shutdown request for the supervisor or the
             %% child.
-            Id = if ?is_simple(State) -> Child#child.pid;
-                    true -> Child#child.id
-                 end,
-            Args = [self(), Id, Reason],
-            {ok, _TRef} = timer:apply_after(0, ?MODULE, try_again_restart, Args),
+            try_again_restart(TryAgainId),
             {ok, NState2};
         Other ->
             Other
@@ -1619,12 +1605,6 @@ report_progress(Child, SupName) ->
                 report_cb=>fun logger:format_otp_report/1,
                 logger_formatter=>#{title=>"PROGRESS REPORT"},
                 error_logger=>#{tag=>info_report,type=>progress}}).
-
-format_status(terminate, [_PDict, State]) ->
-    State;
-format_status(_, [_PDict, State]) ->
-    [{data, [{"State", State}]},
-     {supervisor, [{"Callback", State#state.module}]}].
 
 %%%-----------------------------------------------------------------
 %%% Dynamics database access

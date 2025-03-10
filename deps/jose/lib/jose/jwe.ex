@@ -15,6 +15,15 @@ defmodule JOSE.JWE do
     * `"A192KW"`
     * `"A256KW"`
     * `"dir"`
+    * `"ECDH-1PU"`
+    * `"ECDH-1PU+A128GCMKW"`
+    * `"ECDH-1PU+A192GCMKW"`
+    * `"ECDH-1PU+A256GCMKW"`
+    * `"ECDH-1PU+A128KW"`
+    * `"ECDH-1PU+A192KW"`
+    * `"ECDH-1PU+A256KW"`
+    * `"ECDH-1PU+C20PKW"`
+    * `"ECDH-1PU+XC20PKW"`
     * `"ECDH-ES"`
     * `"ECDH-ES+A128GCMKW"`
     * `"ECDH-ES+A192GCMKW"`
@@ -24,9 +33,23 @@ defmodule JOSE.JWE do
     * `"ECDH-ES+A256KW"`
     * `"ECDH-ES+C20PKW"`
     * `"ECDH-ES+XC20PKW"`
+    * `"ECDH-SS"`
+    * `"ECDH-SS+A128GCMKW"`
+    * `"ECDH-SS+A192GCMKW"`
+    * `"ECDH-SS+A256GCMKW"`
+    * `"ECDH-SS+A128KW"`
+    * `"ECDH-SS+A192KW"`
+    * `"ECDH-SS+A256KW"`
+    * `"ECDH-SS+C20PKW"`
+    * `"ECDH-SS+XC20PKW"`
+    * `"PBES2-HS256+A128GCMKW"`
+    * `"PBES2-HS384+A192GCMKW"`
+    * `"PBES2-HS512+A256GCMKW"`
     * `"PBES2-HS256+A128KW"`
     * `"PBES2-HS384+A192KW"`
     * `"PBES2-HS512+A256KW"`
+    * `"PBES2-HS512+C20PKW"`
+    * `"PBES2-HS512+XC20PKW"`
     * `"RSA1_5"`
     * `"RSA-OAEP"`
     * `"RSA-OAEP-256"`
@@ -355,6 +378,8 @@ defmodule JOSE.JWE do
   @doc """
   Converts a `JOSE.JWE` struct to a `:jose_jwe` record.
   """
+  @spec to_record(t()) :: tuple()
+  @spec to_record([t()]) :: [tuple()]
   def to_record(%JOSE.JWE{unquote_splicing(pairs)}) do
     {:jose_jwe, unquote_splicing(vals)}
   end
@@ -364,6 +389,8 @@ defmodule JOSE.JWE do
   @doc """
   Converts a `:jose_jwe` record into a `JOSE.JWE`.
   """
+  @spec from_record(tuple()) :: t()
+  @spec from_record([tuple()]) :: [t()]
   def from_record(jose_jwe)
 
   def from_record({:jose_jwe, unquote_splicing(vals)}) do
@@ -397,6 +424,8 @@ defmodule JOSE.JWE do
        zip: {MyCustomCompress, :state}}
 
   """
+  @spec from(t() | map() | binary()) :: t()
+  @spec from([t() | map() | binary()]) :: [t()]
   def from(list) when is_list(list), do: for(element <- list, into: [], do: from(element))
   def from(jwe = %JOSE.JWE{}), do: from(to_record(jwe))
   def from(any), do: :jose_jwe.from(any) |> from_record()
@@ -404,17 +433,22 @@ defmodule JOSE.JWE do
   @doc """
   Converts a binary into a `JOSE.JWE`.
   """
+  @spec from_binary(binary()) :: t()
+  @spec from_binary([binary()]) :: [t()]
   def from_binary(list) when is_list(list), do: for(element <- list, into: [], do: from_binary(element))
   def from_binary(binary), do: :jose_jwe.from_binary(binary) |> from_record()
 
   @doc """
   Reads file and calls `from_binary/1` to convert into a `JOSE.JWE`.
   """
+  @spec from_file(String.t()) :: t()
   def from_file(file), do: :jose_jwe.from_file(file) |> from_record()
 
   @doc """
   Converts a map into a `JOSE.JWE`.
   """
+  @spec from_map(map()) :: t()
+  @spec from_map([map()]) :: [t()]
   def from_map(list) when is_list(list), do: for(element <- list, into: [], do: from_map(element))
   def from_map(map), do: :jose_jwe.from_map(map) |> from_record()
 
@@ -423,6 +457,8 @@ defmodule JOSE.JWE do
   @doc """
   Converts a `JOSE.JWE` into a binary.
   """
+  @spec to_binary(t() | map() | binary()) :: binary()
+  @spec to_binary([t() | map() | binary()]) :: [binary()]
   def to_binary(list) when is_list(list), do: for(element <- list, into: [], do: to_binary(element))
   def to_binary(jwe = %JOSE.JWE{}), do: to_binary(to_record(jwe))
   def to_binary(any), do: :jose_jwe.to_binary(any)
@@ -430,12 +466,15 @@ defmodule JOSE.JWE do
   @doc """
   Calls `to_binary/1` on a `JOSE.JWE` and then writes the binary to file.
   """
+  @spec to_file(String.t(), t() | map() | binary()) :: :ok | {:error, reason :: term()}
   def to_file(file, jwe = %JOSE.JWE{}), do: to_file(file, to_record(jwe))
   def to_file(file, any), do: :jose_jwe.to_file(file, any)
 
   @doc """
   Converts a `JOSE.JWE` into a map.
   """
+  @spec to_map(t() | map() | binary()) :: map()
+  @spec to_map([t() | map() | binary()]) :: [map()]
   def to_map(list) when is_list(list), do: for(element <- list, into: [], do: to_map(element))
   def to_map(jwe = %JOSE.JWE{}), do: to_map(to_record(jwe))
   def to_map(any), do: :jose_jwe.to_map(any)
@@ -458,6 +497,7 @@ defmodule JOSE.JWE do
 
   See `block_encrypt/2`.
   """
+  @spec block_decrypt(JOSE.JWK.t(), binary()) :: {plaintext :: binary(), t()} | {:error, t()}
   def block_decrypt(jwk = %JOSE.JWK{}, encrypted), do: block_decrypt(JOSE.JWK.to_record(jwk), encrypted)
 
   def block_decrypt({your_public_jwk = %JOSE.JWK{}, my_private_jwk}, encrypted),
@@ -479,6 +519,7 @@ defmodule JOSE.JWE do
   @doc """
   Encrypts `plain_text` using the `jwk` and algorithm specified by the `jwe` by getting the `cek` for `block_encrypt/4`.
   """
+  @spec block_encrypt(JOSE.JWK.t(), binary(), t()) :: binary()
   def block_encrypt(jwk = %JOSE.JWK{}, plain_text, jwe), do: block_encrypt(JOSE.JWK.to_record(jwk), plain_text, jwe)
 
   def block_encrypt({your_public_jwk = %JOSE.JWK{}, my_private_jwk}, plain_text, jwe),
@@ -493,6 +534,7 @@ defmodule JOSE.JWE do
   @doc """
   Encrypts `plain_text` using the `jwk`, `cek`, and algorithm specified by the `jwe` by getting the `iv` for `block_encrypt/5`.
   """
+  @spec block_encrypt(JOSE.JWK.t(), binary(), map(), t()) :: binary()
   def block_encrypt(jwk = %JOSE.JWK{}, plain_text, cek, jwe), do: block_encrypt(JOSE.JWK.to_record(jwk), plain_text, cek, jwe)
 
   def block_encrypt({your_public_jwk = %JOSE.JWK{}, my_private_jwk}, plain_text, cek, jwe),
@@ -520,6 +562,7 @@ defmodule JOSE.JWE do
 
   See `block_decrypt/2`.
   """
+  @spec block_encrypt(JOSE.JWK.t(), binary(), map(), binary(), t()) :: {binary(), t()}
   def block_encrypt(jwk = %JOSE.JWK{}, plain_text, cek, iv, jwe),
     do: block_encrypt(JOSE.JWK.to_record(jwk), plain_text, cek, iv, jwe)
 
@@ -544,6 +587,7 @@ defmodule JOSE.JWE do
 
   See `expand/1`.
   """
+  @spec compact(map() | {map(), map()}) :: {map(), binary()}
   defdelegate compact(encrypted), to: :jose_jwe
 
   @doc """
@@ -554,6 +598,7 @@ defmodule JOSE.JWE do
 
   See `uncompress/2`.
   """
+  @spec compress(binary(), t() | tuple()) :: binary()
   def compress(plain_text, jwe = %JOSE.JWE{}), do: compress(plain_text, to_record(jwe))
   def compress(plain_text, jwe), do: :jose_jwe.compress(plain_text, jwe)
 
@@ -569,6 +614,7 @@ defmodule JOSE.JWE do
 
   See `compact/1`.
   """
+  @spec expand(binary()) :: {map(), map()}
   defdelegate expand(encrypted), to: :jose_jwe
 
   @doc """
@@ -581,6 +627,8 @@ defmodule JOSE.JWE do
         <<188, 156, 171, 224, 232, 231, 41, 250, 210, 117, 112, 219, 134, 218, 94, 50>>}}
 
   """
+  @spec generate_key(t() | binary() | map()) :: JOSE.JWK.t()
+  @spec generate_key([t() | binary() | map()]) :: [JOSE.JWK.t()]
   def generate_key(list) when is_list(list), do: for(element <- list, into: [], do: generate_key(element))
   def generate_key(jwe = %JOSE.JWE{}), do: generate_key(to_record(jwe))
   def generate_key(any), do: JOSE.JWK.from_record(:jose_jwe.generate_key(any))
@@ -597,6 +645,7 @@ defmodule JOSE.JWE do
 
   See `key_encrypt/3`.
   """
+  @spec key_decrypt(JOSE.JWK.t(), binary(), t()) :: {binary(), t()} | {:error, term()}
   def key_decrypt(jwk = %JOSE.JWK{}, encrypted_key, jwe), do: key_decrypt(JOSE.JWK.to_record(jwk), encrypted_key, jwe)
 
   def key_decrypt({your_public_jwk = %JOSE.JWK{}, my_private_jwk}, encrypted_key, jwe),
@@ -625,6 +674,7 @@ defmodule JOSE.JWE do
 
   See `key_decrypt/3`.
   """
+  @spec key_encrypt(JOSE.JWK.t(), binary(), t()) :: {binary(), t()} | {:error, term()}
   def key_encrypt(jwk = %JOSE.JWK{}, decrypted_key, jwe), do: key_encrypt(JOSE.JWK.to_record(jwk), decrypted_key, jwe)
 
   def key_encrypt({your_public_jwk = %JOSE.JWK{}, my_private_jwk}, decrypted_key, jwe),
@@ -648,6 +698,7 @@ defmodule JOSE.JWE do
   @doc """
   Merges map on right into map on left.
   """
+  @spec merge(t() | tuple(), t() | tuple()) :: t()
   def merge(left = %JOSE.JWE{}, right), do: merge(left |> to_record, right)
   def merge(left, right = %JOSE.JWE{}), do: merge(left, right |> to_record)
   def merge(left, right), do: :jose_jwe.merge(left, right) |> from_record
@@ -666,6 +717,7 @@ defmodule JOSE.JWE do
       <<137, 211, 127, 99, 39, 152, 102, 161, 4, 236, 25, 41, 123, 24, 64, 217>>
 
   """
+  @spec next_cek(JOSE.JWK.t(), t() | tuple() | map() | binary()) :: binary()
   def next_cek(jwk = %JOSE.JWK{}, jwe), do: next_cek(JOSE.JWK.to_record(jwk), jwe)
 
   def next_cek({your_public_jwk = %JOSE.JWK{}, my_private_jwk}, jwe),
@@ -687,6 +739,7 @@ defmodule JOSE.JWE do
       96
 
   """
+  @spec next_iv(t() | tuple()) :: binary()
   def next_iv(jwe = %JOSE.JWE{}), do: next_iv(to_record(jwe))
   def next_iv(jwe), do: :jose_jwe.next_iv(jwe)
 
@@ -698,6 +751,7 @@ defmodule JOSE.JWE do
 
   See `compress/2`.
   """
+  @spec uncompress(binary(), t() | tuple()) :: binary()
   def uncompress(cipher_text, jwe = %JOSE.JWE{}), do: uncompress(cipher_text, to_record(jwe))
   def uncompress(cipher_text, jwe), do: :jose_jwe.uncompress(cipher_text, jwe)
 end

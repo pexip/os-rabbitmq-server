@@ -2,12 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 
 -module(osiris_util).
 
 -include("osiris.hrl").
+-include_lib("kernel/include/file.hrl").
 
 -export([validate_base64uri/1,
          to_base64uri/1,
@@ -17,7 +18,12 @@
          get_replication_configuration_from_tls_dist/0,
          get_replication_configuration_from_tls_dist/1,
          get_replication_configuration_from_tls_dist/2,
-         partition_parallel/3
+         partition_parallel/3,
+         normalise_name/1,
+         get_reader_context/1,
+         cache_reader_context/6,
+         is_dir/1,
+         is_file/1
         ]).
 
 %% For testing
@@ -28,8 +34,8 @@
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01"
         "23456789_-=").
 
--spec validate_base64uri(string()) -> boolean().
-validate_base64uri(Str) when is_list(Str) ->
+-spec validate_base64uri(string() | binary()) -> boolean().
+validate_base64uri(Str) when ?IS_STRING(Str) ->
     catch begin
               [begin
                    case lists:member(C, ?BASE64_URI_CHARS) of
@@ -43,8 +49,8 @@ validate_base64uri(Str) when is_list(Str) ->
               string:is_empty(Str) == false
           end.
 
--spec to_base64uri(string()) -> string().
-to_base64uri(Str) when is_list(Str) ->
+-spec to_base64uri(string() | binary()) -> string().
+to_base64uri(Str) when ?IS_STRING(Str) ->
     lists:foldr(fun(G, Acc) ->
                    case lists:member(G, ?BASE64_URI_CHARS) of
                        true -> [G | Acc];
@@ -136,7 +142,7 @@ replication_over_tls_configuration(InitArgs, FileConsultFun, LogFun) ->
                 {error, Error} ->
                     LogFun(warn,
                            "Error while reading TLS "
-                           ++ "distributon option file ~s: ~p",
+                           ++ "distributon option file ~ts: ~0p",
                            [OptFile, Error]),
                     LogFun(warn,
                            "Stream replication over TLS will NOT be enabled",
@@ -145,7 +151,7 @@ replication_over_tls_configuration(InitArgs, FileConsultFun, LogFun) ->
                 R ->
                     LogFun(warn,
                            "Unexpected result while reading TLS distributon "
-                           "option file ~s: ~p",
+                           "option file ~ts: ~0p",
                            [OptFile, R]),
                     LogFun(warn,
                            "Stream replication over TLS will NOT be enabled",
@@ -260,4 +266,49 @@ collect([{{Pid, MRef}, E} | Next], {Left, Right}, Timeout) ->
             collect(Next, {Left, [E | Right]}, Timeout)
     after Timeout ->
               exit(partition_parallel_timeout)
+    end.
+
+normalise_name(Name) when is_binary(Name) ->
+    Name;
+normalise_name(Name) when is_list(Name) ->
+    list_to_binary(Name).
+
+get_reader_context(Pid)
+  when is_pid(Pid) andalso node(Pid) == node() ->
+    case ets:lookup(osiris_reader_context_cache, Pid) of
+        [] ->
+            {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context, infinity),
+            Ctx0;
+        [{_Pid, Dir, Name, Shared, Ref, ReadersCountersFun}] ->
+            #{dir => Dir,
+              name => Name,
+              shared => Shared,
+              reference => Ref,
+              readers_counter_fun => ReadersCountersFun}
+    end.
+
+cache_reader_context(Pid, Dir, Name, Shared, Ref, ReadersCounterFun)
+  when is_pid(Pid) andalso
+       ?IS_STRING(Dir) andalso
+       is_function(ReadersCounterFun) ->
+    true = ets:insert(osiris_reader_context_cache,
+                      {Pid, Dir, Name, Shared, Ref, ReadersCounterFun}),
+    ok.
+
+is_dir(Dir) ->
+    case prim_file:read_file_info(Dir) of
+        {ok, #file_info{type=directory}} ->
+            true;
+        _ ->
+            false
+    end.
+
+is_file(File) ->
+    case prim_file:read_file_info(File) of
+        {ok, #file_info{type = directory}} ->
+            true;
+        {ok, #file_info{type = regular}} ->
+            true;
+        _ ->
+            false
     end.

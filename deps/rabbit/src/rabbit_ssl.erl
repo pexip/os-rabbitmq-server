@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_ssl).
@@ -10,14 +10,15 @@
 -include_lib("public_key/include/public_key.hrl").
 
 -export([peer_cert_issuer/1, peer_cert_subject/1, peer_cert_validity/1]).
--export([peer_cert_subject_items/2, peer_cert_auth_name/1]).
+-export([peer_cert_subject_items/2, peer_cert_auth_name/1, peer_cert_auth_name/2]).
 -export([cipher_suites_erlang/2, cipher_suites_erlang/1,
          cipher_suites_openssl/2, cipher_suites_openssl/1,
          cipher_suites/1]).
+-export([info/2, cert_info/2]).
 
 %%--------------------------------------------------------------------------
 
--export_type([certificate/0]).
+-export_type([certificate/0, ssl_cert_login_type/0]).
 
 % Due to API differences between OTP releases.
 -dialyzer(no_missing_calls).
@@ -108,30 +109,53 @@ peer_cert_subject_alternative_names(Cert, Type) ->
 peer_cert_validity(Cert) ->
     rabbit_cert_info:validity(Cert).
 
+-type ssl_cert_login_type() :: 
+    {subject_alternative_name | subject_alt_name, atom(), integer()} | 
+    {distinguished_name | common_name, undefined, undefined }.
+
+-spec extract_ssl_cert_login_settings() -> none | ssl_cert_login_type().
+extract_ssl_cert_login_settings() ->
+    case application:get_env(rabbit, ssl_cert_login_from) of 
+        {ok, Mode} ->
+            case Mode of 
+                subject_alternative_name -> extract_san_login_type(Mode);
+                subject_alt_name -> extract_san_login_type(Mode);
+                _ -> {Mode, undefined, undefined}
+            end;
+        undefined -> none 
+    end.
+
+extract_san_login_type(Mode) ->
+    {Mode,
+        application:get_env(rabbit, ssl_cert_login_san_type, dns),
+        application:get_env(rabbit, ssl_cert_login_san_index, 0)
+    }.
+
 %% Extract a username from the certificate
 -spec peer_cert_auth_name(certificate()) -> binary() | 'not_found' | 'unsafe'.
 peer_cert_auth_name(Cert) ->
-    {ok, Mode} = application:get_env(rabbit, ssl_cert_login_from),
-    peer_cert_auth_name(Mode, Cert).
+    case extract_ssl_cert_login_settings() of 
+        none -> 'not_found';
+        Settings -> peer_cert_auth_name(Settings, Cert)        
+    end.
 
--spec peer_cert_auth_name(atom(), certificate()) -> binary() | 'not_found' | 'unsafe'.
-peer_cert_auth_name(distinguished_name, Cert) ->
+-spec peer_cert_auth_name(ssl_cert_login_type(), certificate()) -> binary() | 'not_found' | 'unsafe'.
+peer_cert_auth_name({distinguished_name, _, _}, Cert) ->
     case auth_config_sane() of
         true  -> iolist_to_binary(peer_cert_subject(Cert));
         false -> unsafe
     end;
 
-peer_cert_auth_name(subject_alt_name, Cert) ->
-    peer_cert_auth_name(subject_alternative_name, Cert);
+peer_cert_auth_name({subject_alt_name, Type, Index0}, Cert) ->
+    peer_cert_auth_name({subject_alternative_name, Type, Index0}, Cert);
 
-peer_cert_auth_name(subject_alternative_name, Cert) ->
+peer_cert_auth_name({subject_alternative_name, Type, Index0}, Cert) ->
     case auth_config_sane() of
         true  ->
-            Type   = application:get_env(rabbit, ssl_cert_login_san_type,  dns),
             %% lists:nth/2 is 1-based
-            Index  = application:get_env(rabbit, ssl_cert_login_san_index, 0) + 1,
+            Index  = Index0 + 1,
             OfType = peer_cert_subject_alternative_names(Cert, otp_san_type(Type)),
-            rabbit_log:debug("Peer certificate SANs of type ~s: ~p, index to use with lists:nth/2: ~b", [Type, OfType, Index]),
+            rabbit_log:debug("Peer certificate SANs of type ~ts: ~tp, index to use with lists:nth/2: ~b", [Type, OfType, Index]),
             case length(OfType) of
                 0                 -> not_found;
                 N when N < Index  -> not_found;
@@ -151,7 +175,7 @@ peer_cert_auth_name(subject_alternative_name, Cert) ->
         false -> unsafe
     end;
 
-peer_cert_auth_name(common_name, Cert) ->
+peer_cert_auth_name({common_name, _, _}, Cert) ->
     %% If there is more than one CN then we join them with "," in a
     %% vaguely DN-like way. But this is more just so we do something
     %% more intelligent than crashing, if you actually want to escape
@@ -169,8 +193,8 @@ auth_config_sane() ->
     case proplists:get_value(verify, Opts) of
         verify_peer -> true;
         V           -> rabbit_log:warning("TLS peer verification (authentication) is "
-                                          "disabled, ssl_options.verify value used: ~p. "
-                                          "See https://www.rabbitmq.com/ssl.html#peer-verification to learn more.", [V]),
+                                          "disabled, ssl_options.verify value used: ~tp. "
+                                          "See https://www.rabbitmq.com/docs/ssl#peer-verification to learn more.", [V]),
                        false
     end.
 
@@ -181,3 +205,34 @@ otp_san_type(uri)        -> uniformResourceIdentifier;
 otp_san_type(other_name) -> otherName;
 otp_san_type(Other)      -> Other.
 
+info(ssl_protocol,     Socks) -> info0(fun ({P,         _}) -> P end, Socks);
+info(ssl_key_exchange, Socks) -> info0(fun ({_, {K, _, _}}) -> K end, Socks);
+info(ssl_cipher,       Socks) -> info0(fun ({_, {_, C, _}}) -> C end, Socks);
+info(ssl_hash,         Socks) -> info0(fun ({_, {_, _, H}}) -> H end, Socks);
+info(ssl, {Sock, ProxySock})  -> rabbit_net:proxy_ssl_info(Sock, ProxySock) /= nossl.
+
+info0(F, {Sock, ProxySock}) ->
+    case rabbit_net:proxy_ssl_info(Sock, ProxySock) of
+        nossl       -> '';
+        {error, _}  -> '';
+        {ok, Items} ->
+            P = proplists:get_value(protocol, Items),
+            #{cipher := C,
+              key_exchange := K,
+              mac := H} = proplists:get_value(selected_cipher_suite, Items),
+            F({P, {K, C, H}})
+    end.
+
+cert_info(peer_cert_issuer, Sock) ->
+    cert_info0(fun peer_cert_issuer/1, Sock);
+cert_info(peer_cert_subject, Sock) ->
+    cert_info0(fun peer_cert_subject/1, Sock);
+cert_info(peer_cert_validity, Sock) ->
+    cert_info0(fun peer_cert_validity/1, Sock).
+
+cert_info0(F, Sock) ->
+    case rabbit_net:peercert(Sock) of
+        nossl      -> '';
+        {error, _} -> '';
+        {ok, Cert} -> list_to_binary(F(Cert))
+    end.
