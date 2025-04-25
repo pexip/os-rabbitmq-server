@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(vhost).
 
--include_lib("rabbit_common/include/rabbit.hrl").
 -include("vhost.hrl").
 
 -export([
@@ -20,160 +19,139 @@
   upgrade/1,
   upgrade_to/2,
   pattern_match_all/0,
+  pattern_match_names/0,
   get_name/1,
   get_limits/1,
   get_metadata/1,
   get_description/1,
   get_tags/1,
   get_default_queue_type/1,
+
   set_limits/2,
   set_metadata/2,
   merge_metadata/2,
-  is_tagged_with/2
+  new_metadata/3,
+  is_tagged_with/2,
+
+  to_map/1
 ]).
 
 -define(record_version, vhost_v2).
 
--type(name() :: binary()).
+-type(name() :: rabbit_types:vhost()).
+
+-type(limits() :: list()).
 
 -type(metadata_key() :: atom()).
 
--type(metadata() :: #{description => binary(),
-                      tags => [atom()],
+-type(metadata() :: #{description => description(),
+                      tags => [tag()],
                       metadata_key() => any()} | undefined).
 
--type vhost() :: vhost_v1:vhost_v1() | vhost_v2().
+-type(description() :: binary()).
+-type(tag() :: atom()).
+-type(tags() :: [tag()]).
+-type(unparsed_tags() :: binary() | string() | atom()).
+
+-type vhost() :: vhost_v2().
 
 -record(vhost, {
     %% name as a binary
-    virtual_host :: name() | '_',
+    virtual_host :: name() | '_' | '$1',
     %% proplist of limits configured, if any
-    limits :: list() | '_',
+    limits :: limits() | '_',
     metadata :: metadata() | '_'
 }).
 
 -type vhost_v2() :: #vhost{
                           virtual_host :: name(),
-                          limits :: list(),
+                          limits :: limits(),
                           metadata :: metadata()
                          }.
 
--type vhost_pattern() :: vhost_v1:vhost_v1_pattern() |
-                         vhost_v2_pattern().
+-type vhost_pattern() :: vhost_v2_pattern().
 -type vhost_v2_pattern() :: #vhost{
-                                  virtual_host :: name() | '_',
+                                  virtual_host :: name() | '_' | '$1',
                                   limits :: '_',
                                   metadata :: '_'
                                  }.
 
 -export_type([name/0,
+              limits/0,
               metadata_key/0,
               metadata/0,
+              description/0,
+              tag/0,
+              unparsed_tags/0,
+              tags/0,
               vhost/0,
               vhost_v2/0,
               vhost_pattern/0,
               vhost_v2_pattern/0]).
 
--spec new(name(), list()) -> vhost().
+-spec new(name(), limits()) -> vhost().
 new(Name, Limits) ->
-    case record_version_to_use() of
-        ?record_version ->
-          #vhost{virtual_host = Name, limits = Limits};
-        _ ->
-          vhost_v1:new(Name, Limits)
-    end.
+    #vhost{virtual_host = Name, limits = Limits}.
 
--spec new(name(), list(), map()) -> vhost().
+-spec new(name(), limits(), metadata()) -> vhost().
 new(Name, Limits, Metadata) ->
-    case record_version_to_use() of
-        ?record_version ->
-          #vhost{virtual_host = Name, limits = Limits, metadata = Metadata};
-        _ ->
-          vhost_v1:new(Name, Limits)
-    end.
+    #vhost{virtual_host = Name, limits = Limits, metadata = Metadata}.
 
--spec record_version_to_use() -> vhost_v1 | vhost_v2.
+-spec record_version_to_use() -> vhost_v2.
 
 record_version_to_use() ->
-    case rabbit_feature_flags:is_enabled(virtual_host_metadata) of
-        true  -> ?record_version;
-        false -> vhost_v1:record_version_to_use()
-    end.
+    ?record_version.
 
 -spec upgrade(vhost()) -> vhost().
 
-upgrade(#vhost{} = VHost) -> VHost;
-upgrade(OldVHost)         -> upgrade_to(record_version_to_use(), OldVHost).
+upgrade(#vhost{} = VHost) -> VHost.
 
--spec upgrade_to
-(vhost_v2, vhost()) -> vhost_v2();
-(vhost_v1, vhost_v1:vhost_v1()) -> vhost_v1:vhost_v1().
+-spec upgrade_to(vhost_v2, vhost()) -> vhost_v2().
 
 upgrade_to(?record_version, #vhost{} = VHost) ->
-    VHost;
-upgrade_to(?record_version, OldVHost) ->
-    Fields = erlang:tuple_to_list(OldVHost) ++ [#{description => <<"">>, tags => []}],
-    #vhost{} = erlang:list_to_tuple(Fields);
-upgrade_to(Version, OldVHost) ->
-    vhost_v1:upgrade_to(Version, OldVHost).
-
+    VHost.
 
 fields() ->
-    case record_version_to_use() of
-        ?record_version -> fields(?record_version);
-        _               -> vhost_v1:fields()
-    end.
+    fields(?record_version).
 
-fields(?record_version) -> record_info(fields, vhost);
-fields(Version)         -> vhost_v1:fields(Version).
+fields(?record_version) -> record_info(fields, vhost).
 
 info_keys() ->
-    case record_version_to_use() of
-        %% note: this reports description and tags separately even though
-        %% they are stored in the metadata map. MK.
-        ?record_version ->
-            [name,
-             description,
-             tags,
-             default_queue_type,
-             metadata,
-             tracing,
-             cluster_state];
-        _ ->
-            vhost_v1:info_keys()
-    end.
+    %% note: this reports description and tags separately even though
+    %% they are stored in the metadata map. MK.
+    [name,
+     description,
+     tags,
+     default_queue_type,
+     metadata,
+     tracing,
+     cluster_state].
 
 -spec pattern_match_all() -> vhost_pattern().
 
 pattern_match_all() ->
-    case record_version_to_use() of
-        ?record_version -> #vhost{_ = '_'};
-        _               -> vhost_v1:pattern_match_all()
-    end.
+    #vhost{_ = '_'}.
+
+-spec pattern_match_names() -> vhost_pattern().
+pattern_match_names() ->
+    #vhost{virtual_host = '$1', _ = '_'}.
 
 -spec get_name(vhost()) -> name().
-get_name(#vhost{virtual_host = Value}) -> Value;
-get_name(VHost) -> vhost_v1:get_name(VHost).
+get_name(#vhost{virtual_host = Value}) -> Value.
 
--spec get_limits(vhost()) -> list().
-get_limits(#vhost{limits = Value}) -> Value;
-get_limits(VHost) -> vhost_v1:get_limits(VHost).
+-spec get_limits(vhost()) -> limits().
+get_limits(#vhost{limits = Value}) -> Value.
 
 -spec get_metadata(vhost()) -> metadata().
-get_metadata(#vhost{metadata = Value}) -> Value;
-get_metadata(VHost) -> vhost_v1:get_metadata(VHost).
+get_metadata(#vhost{metadata = Value}) -> Value.
 
 -spec get_description(vhost()) -> binary().
 get_description(#vhost{} = VHost) ->
-    maps:get(description, get_metadata(VHost), undefined);
-get_description(VHost) ->
-    vhost_v1:get_description(VHost).
+    maps:get(description, get_metadata(VHost), undefined).
 
--spec get_tags(vhost()) -> [atom()].
+-spec get_tags(vhost()) -> [tag()].
 get_tags(#vhost{} = VHost) ->
-    maps:get(tags, get_metadata(VHost), undefined);
-get_tags(VHost) ->
-    vhost_v1:get_tags(VHost).
+    maps:get(tags, get_metadata(VHost), []).
 
 -spec get_default_queue_type(vhost()) -> binary() | undefined.
 get_default_queue_type(#vhost{} = VHost) ->
@@ -182,35 +160,52 @@ get_default_queue_type(_VHost) ->
     undefined.
 
 set_limits(VHost, Value) ->
-    case record_version_to_use() of
-      ?record_version ->
-        VHost#vhost{limits = Value};
-      _ ->
-        vhost_v1:set_limits(VHost, Value)
-    end.
+    VHost#vhost{limits = Value}.
 
 -spec set_metadata(vhost(), metadata()) -> vhost().
 set_metadata(VHost, Value) ->
-    case record_version_to_use() of
-      ?record_version ->
-        VHost#vhost{metadata = Value};
-      _ ->
-        %% the field is not available, so this is a no-op
-        VHost
-    end.
+    VHost#vhost{metadata = Value}.
 
 -spec merge_metadata(vhost(), metadata()) -> vhost().
-merge_metadata(VHost, Value) ->
-    case record_version_to_use() of
-      ?record_version ->
-        Meta0 = get_metadata(VHost),
-        NewMeta = maps:merge(Meta0, Value),
-        VHost#vhost{metadata = NewMeta};
-      _ ->
-        %% the field is not available, so this is a no-op
-        VHost
-    end.
+merge_metadata(VHost, NewVHostMeta) ->
+    CurrentVHostMeta = get_metadata(VHost),
+    FinalMeta =  maps:merge_with(
+                   fun metadata_merger/3, CurrentVHostMeta, NewVHostMeta),
+    VHost#vhost{metadata = FinalMeta}.
 
--spec is_tagged_with(vhost:vhost(), atom()) -> boolean().
+%% This is the case where the existing VHost metadata has a default queue type
+%% value and the proposed value is `undefined`. We do not want the proposed
+%% value to overwrite the current value
+metadata_merger(default_queue_type, CurrentDefaultQueueType, undefined) ->
+    CurrentDefaultQueueType;
+%% This is the case where the existing VHost metadata has any default queue
+%% type value, and the proposed value is NOT `undefined`. It is OK for any
+%% proposed value to be used.
+metadata_merger(default_queue_type, _, NewVHostDefaultQueueType) ->
+    NewVHostDefaultQueueType;
+%% This is the case for all other VHost metadata keys.
+metadata_merger(_, _, NewMetadataValue) ->
+    NewMetadataValue.
+
+-spec new_metadata(binary(), [atom()], rabbit_queue_type:queue_type() | 'undefined') -> metadata().
+new_metadata(Description, Tags, undefined) ->
+    #{description => Description,
+      tags => Tags};
+new_metadata(Description, Tags, DefaultQueueType) ->
+    #{description => Description,
+      tags => Tags,
+      default_queue_type => DefaultQueueType}.
+
+-spec is_tagged_with(vhost(), tag()) -> boolean().
 is_tagged_with(VHost, Tag) ->
     lists:member(Tag, get_tags(VHost)).
+
+-spec to_map(vhost()) -> map().
+to_map(VHost) ->
+    #{
+        name               => get_name(VHost),
+        description        => get_description(VHost),
+        tags               => get_tags(VHost),
+        default_queue_type => get_default_queue_type(VHost),
+        metadata           => get_metadata(VHost)
+    }.

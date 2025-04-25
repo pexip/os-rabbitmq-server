@@ -2,7 +2,7 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2020, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc
 %%%
 %%% @end
@@ -18,6 +18,7 @@
 -export([crypto_update_encrypt/2]).
 -export([mac/3]).
 -export([mac/4]).
+-export([mac/5]).
 
 %%====================================================================
 %% API functions
@@ -48,6 +49,9 @@ mac(Type, Key, Data) ->
 mac(Type, SubType, Key, Data) ->
     crypto:mac(Type, SubType, Key, Data).
 
+mac(Type, SubType, Key, Data, MacLength) ->
+    crypto:macN(Type, SubType, Key, Data, MacLength).
+
 -else. %% "Old API" for OTP 22 and earlier
 
 crypto_init(Cipher, Key, IV, _FlagOrOptions) ->
@@ -71,6 +75,9 @@ mac(poly1305, Key, Data) ->
 
 mac(hmac, SubType, Key, Data) ->
     crypto:hmac(SubType, Key, Data).
+
+mac(hmac, SubType, Key, Data, MacLength) ->
+    crypto:hmac(SubType, Key, Data, MacLength).
 
 -endif.
 

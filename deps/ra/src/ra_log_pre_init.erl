@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 -module(ra_log_pre_init).
 
@@ -22,6 +22,7 @@
 
 -record(state, {}).
 
+-define(ETSTBL, ra_log_snapshot_state).
 %%%===================================================================
 %%% API functions
 %%%===================================================================
@@ -38,9 +39,18 @@ init([System]) ->
     %% populated before WAL recovery begins to avoid writing unnecessary
     %% indexes to segment files.
     Regd = ra_directory:list_registered(System),
-    ?INFO("ra system '~s' running pre init for ~b registered servers",
+    ?INFO("ra system '~ts' running pre init for ~b registered servers",
           [System, length(Regd)]),
-    _ = [catch(pre_init(System, Name)) || {Name, _U} <- Regd],
+    _ = [begin
+             try pre_init(System, UId) of
+                 ok -> ok
+             catch _:Err ->
+                       ?ERROR("pre_init failed in system ~s for UId ~ts with name ~ts"
+                              " This error may need manual intervention, Error ~p",
+                              [System, UId, Name, Err]),
+                       ok
+             end
+         end|| {Name, UId} <- Regd],
     {ok, #state{} , hibernate}.
 
 handle_call(_Request, _From, State) ->
@@ -63,8 +73,37 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-pre_init(System, Name) ->
-    {ok, #{log_init_args := Log}} = ra_server_sup_sup:recover_config(System, Name),
-    _ = ra_log:pre_init(Log),
-    ok.
+pre_init(System, UId) ->
+    case ets:lookup(?ETSTBL, UId) of
+        [{_, _}] ->
+            %% already initialised
+            ok;
+        [] ->
+            case ra_system:fetch(System) of
+                undefined ->
+                    {error, system_not_started};
+                SysCfg ->
+                    %% check if the server dir exists, if not
+                    %% then just log and return instead of failing.
+                    Dir = ra_env:server_data_dir(System, UId),
+                    case ra_lib:is_dir(Dir) of
+                        true ->
+                            case ra_log:read_config(Dir) of
+                                {ok, #{log_init_args := Log}} ->
+                                    ok = ra_log:pre_init(Log#{system_config => SysCfg}),
+                                    ok;
+                                {error, Err} ->
+                                    ?ERROR("pre_init failed to read config file for UId '~ts', Err ~p",
+                                           [UId, Err]),
+                                    ok
+                            end;
+                        false ->
+                            ?INFO("pre_init UId '~ts' is registered but no data
+                                  directory was found, removing from ra directory",
+                                  [UId]),
+                            _ = catch ra_directory:unregister_name(System, UId),
+                            ok
+                    end
+            end
+    end.
 

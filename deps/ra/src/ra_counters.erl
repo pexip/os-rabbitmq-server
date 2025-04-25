@@ -2,9 +2,10 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 -module(ra_counters).
+-include("ra.hrl").
 
 -export([
          init/0,
@@ -12,25 +13,24 @@
          fetch/1,
          overview/0,
          overview/1,
+         counters/2,
          delete/1
          ]).
 
 -type name() :: term().
--type seshat_field_spec() ::
-    {Name :: atom(), Position :: pos_integer(),
-     Type :: counter | gauge, Description :: string()}.
+
 
 -spec init() -> ok.
 init() ->
     _ = application:ensure_all_started(seshat),
     _ = seshat:new_group(ra),
+    persistent_term:put(?FIELDSPEC_KEY, ?RA_COUNTER_FIELDS),
     ok.
 
--spec new(name(),  [seshat_field_spec()]) ->
+-spec new(name(), seshat:fields_spec()) ->
     counters:counters_ref().
-new(Name, Fields)
-  when is_list(Fields) ->
-    seshat:new(ra, Name, Fields).
+new(Name, FieldsSpec) ->
+    seshat:new(ra, Name, FieldsSpec).
 
 -spec fetch(name()) -> undefined | counters:counters_ref().
 fetch(Name) ->
@@ -47,3 +47,8 @@ overview() ->
 -spec overview(name()) -> #{atom() => non_neg_integer()}.
 overview(Name) ->
     seshat:overview(ra, Name).
+
+-spec counters(name(), [atom()]) ->
+    #{atom() => non_neg_integer()} | undefined.
+counters(Name, Fields) ->
+    seshat:counters(ra, Name, Fields).

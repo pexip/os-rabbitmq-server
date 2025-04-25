@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2021 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module('Elixir.RabbitMQ.CLI.Ctl.Commands.DeleteSuperStreamCommand').
 
@@ -35,7 +35,7 @@ scopes() ->
     [streams].
 
 description() ->
-    <<"Delete a super stream (experimental feature)">>.
+    <<"Delete a super stream">>.
 
 help_section() ->
     {plugin, stream}.
@@ -54,11 +54,11 @@ usage() ->
     <<"delete_super_stream <name> [--vhost <vhost>]">>.
 
 usage_additional() ->
-    [["<name>", "The name of the super stream to delete."],
-     ["--vhost <vhost>", "The virtual host of the super stream."]].
+    [[<<"<name>">>, <<"The name of the super stream to delete.">>],
+     [<<"--vhost <vhost>">>, <<"The virtual host of the super stream.">>]].
 
 usage_doc_guides() ->
-    [?STREAM_GUIDE_URL].
+    [?STREAMS_GUIDE_URL].
 
 run([SuperStream],
     #{node := NodeName,
@@ -75,14 +75,14 @@ delete_super_stream(NodeName, Timeout, VHost, SuperStream) ->
     of
         ok ->
             {ok,
-             rabbit_misc:format("Super stream ~s has been deleted",
+             rabbit_misc:format("Super stream ~ts has been deleted",
                                 [SuperStream])};
         Error ->
             Error
     end.
 
 banner(_, _) ->
-    <<"Deleting a super stream (experimental feature)...">>.
+    <<"Deleting a super stream...">>.
 
 output({error, Msg}, _Opts) ->
     {error, 'Elixir.RabbitMQ.CLI.Core.ExitCodes':exit_software(), Msg};

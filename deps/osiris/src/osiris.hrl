@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 
 %% logging shim
@@ -30,6 +30,8 @@
                                                             domain => [osiris]}),
        ok).
 
+-define(IS_STRING(S), is_list(S) orelse is_binary(S)).
+
 -define(C_NUM_LOG_FIELDS, 5).
 
 -define(MAGIC, 5).
@@ -43,6 +45,7 @@
 -define(IDX_HEADER_SIZE, 8).
 -define(LOG_HEADER_SIZE, 8).
 -define(FILE_OPTS_WRITE, [raw, binary, write, read]).
+-define(INDEX_RECORD_SIZE_B, 29).
 
 
 %% chunk types
@@ -51,3 +54,21 @@
 -define(CHNK_TRK_SNAPSHOT, 2).
 
 -define(SUP, osiris_server_sup).
+
+-define(DEFAULT_FILTER_SIZE, 16).
+
+-define(INFO_(Name, Str, Args),
+             ?INFO("~ts [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+
+-define(WARN_(Name, Str, Args),
+             ?WARN("~ts [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+
+-define(ERROR_(Name, Str, Args),
+             ?ERROR("~ts [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+
+-define(DEBUG_(Name, Str, Args),
+             ?DEBUG("~ts [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).

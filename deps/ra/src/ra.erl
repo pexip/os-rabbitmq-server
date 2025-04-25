@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 %% @doc The primary module for interacting with ra servers and clusters.
 
@@ -23,6 +23,8 @@
          %% queries
          members/1,
          members/2,
+         members_info/1,
+         members_info/2,
          initial_members/1,
          initial_members/2,
          local_query/2,
@@ -76,7 +78,11 @@
          %% auxiliary commands
          aux_command/2,
          cast_aux_command/2,
-         register_external_log_reader/1
+         register_external_log_reader/1,
+         member_overview/1,
+         member_overview/2,
+         key_metrics/1,
+         key_metrics/2
         ]).
 
 %% xref should pick these up
@@ -102,13 +108,28 @@
 
 %% export some internal types
 -type index() :: ra_index().
+-type idxterm() :: ra_idxterm().
 -type server_id() :: ra_server_id().
 -type cluster_name() :: ra_cluster_name().
 
+-type query_condition() :: {applied, idxterm()}.
+%% A condition that a query will wait for it to become true before it is
+%% evaluated.
+%%
+%% The condition is evaluated on the node that would then execute the query.
+%%
+%% Supported conditions are:
+%% <ul>
+%% <li>`{applied, {Index, Term}}': the query is executed after `Index' is
+%% applied on the node that will execute the query.</li>
+%% </ul>
+
 -export_type([index/0,
+              idxterm/0,
               server_id/0,
               cluster_name/0,
               query_fun/0,
+              query_condition/0,
               from/0]).
 
 %% @doc Starts the ra application.
@@ -173,6 +194,7 @@ restart_server(System, ServerId)
         {ok, _} -> ok;
         {ok, _, _} -> ok;
         {error, _} = Err -> Err;
+        {badrpc, Reason} -> {error, Reason};
         {'EXIT', Err} -> {error, Err}
     end.
 
@@ -195,6 +217,7 @@ restart_server(System, ServerId, AddConfig)
         {ok, _} -> ok;
         {ok, _, _} -> ok;
         {error, _} = Err -> Err;
+        {badrpc, Reason} -> {error, Reason};
         {'EXIT', Err} -> {error, Err}
     end.
 
@@ -279,7 +302,7 @@ start_or_restart_cluster(System, ClusterName, Machine, ServerIds) ->
 %% If there was no existing cluster and a new cluster could not be formed
 %% any servers that did manage to start are
 %% forcefully deleted.
-%% @see start_or_restart_cluster/3
+%% @see start_or_restart_cluster/4
 %% @end
 -spec start_or_restart_cluster(atom(), ra_cluster_name(), ra_server:machine_conf(),
                                [ra_server_id()], non_neg_integer()) ->
@@ -421,20 +444,22 @@ start_cluster(System, [#{cluster_name := ClusterName} | _] = ServerConfigs,
                   [ClusterName]),
             {error, cluster_not_formed};
         _ ->
-            StartedIds = [I || #{id := I} <- Started],
+            StartedIds = sort_by_local([I || #{id := I} <- Started], []),
             NotStartedIds = [I || #{id := I} <- NotStarted],
             %% try triggering elections until one succeeds
-            _ = lists:any(fun (N) -> ok == trigger_election(N) end,
-                          sort_by_local(StartedIds, [])),
             %% TODO: handle case where no election was successfully triggered
-            case members(hd(StartedIds),
+            {value, TriggeredId} = lists:search(fun (N) ->
+                                                        ok == trigger_election(N)
+                                                end, StartedIds),
+            %% the triggered id is likely to become the leader so try that first
+            case members(TriggeredId,
                          length(ServerConfigs) * Timeout) of
                 {ok, _, Leader} ->
-                    ?INFO("ra: started cluster ~s with ~b servers~n"
-                          "~b servers failed to start: ~w~n"
-                          "Leader: ~w", [ClusterName, length(ServerConfigs),
-                                         length(NotStarted), NotStartedIds,
-                                         Leader]),
+                    ?INFO("ra: started cluster ~ts with ~b servers~n"
+                          "~b servers failed to start: ~w~nLeader: ~w",
+                          [ClusterName, length(ServerConfigs),
+                           length(NotStarted), NotStartedIds,
+                           Leader]),
                     % we have a functioning cluster
                     {ok, StartedIds, NotStartedIds};
                 Err ->
@@ -446,36 +471,37 @@ start_cluster(System, [#{cluster_name := ClusterName} | _] = ServerConfigs,
             end
     end.
 
-%% @doc Starts a new distributed ra cluster.
-%% @param ClusterName the name of the cluster.
-%% @param ServerId the ra_server_id() of the server
-%% @param Machine The {@link ra_machine:machine/0} configuration.
-%% @param ServerIds a list of initial (seed) server configurations
-%% @returns
-%% `{ok, Started, NotStarted}'  if a cluster could be successfully
-%% started. A cluster can be successfully started if more than half of the
-%% servers provided could be started. Servers that could not be started need to
-%% be retried periodically using {@link start_server/1}
-%%
-%% `{error, cluster_not_formed}' if a cluster could not be started.
-%%
-%% If a cluster could not be formed any servers that did manage to start are
-%% forcefully deleted.
-%% @see start_server/1
+%% @doc Starts an individual ra server of a cluster.
+%% @param System the system name.
+%% @param ClusterName the name of the cluster the server belongs to.
+%% @param ServerIdOrConf the `ra_server_id()' of the server, or a map with server id and settings.
+%% @param Machine The {@link ra_server:machine_conf()} configuration.
+%% @param ServerIds a list of initial (seed) server configurations for the cluster.
+%% @returns `ok'  if the server could be successfully started or `{error, Reason}' otherwise.
+%% @see start_server/2
 %% @end
--spec start_server(atom(), ra_cluster_name(), ra_server_id(),
-                   ra_server:machine_conf(), [ra_server_id()]) ->
-    ok | {error, term()}.
-start_server(System, ClusterName, {_, _} = ServerId, Machine, ServerIds)
+-spec start_server(System, ClusterName, ServerIdOrConf, Machine, ServerIds) ->
+    Ret when
+      System :: atom(),
+      ClusterName :: ra_cluster_name(),
+      ServerIdOrConf :: ServerId | ServerConf,
+      ServerId :: ra:server_id(),
+      ServerConf :: ra_new_server(),
+      Machine :: ra_server:machine_conf(),
+      ServerIds :: [ra:server_id()],
+      Ret :: ok | {error, Reason :: term()}.
+start_server(System, ClusterName, {_, _} = ServerId, Machine, ServerIds) ->
+    start_server(System, ClusterName, #{id => ServerId}, Machine, ServerIds);
+start_server(System, ClusterName, #{id := {_, _}} = Conf0, Machine, ServerIds)
   when is_atom(System) ->
-    UId = new_uid(ra_lib:to_binary(ClusterName)),
+    UId = maps:get(uid, Conf0,
+                   new_uid(ra_lib:to_binary(ClusterName))),
     Conf = #{cluster_name => ClusterName,
-             id => ServerId,
              uid => UId,
              initial_members => ServerIds,
              log_init_args => #{uid => UId},
              machine => Machine},
-    start_server(System, Conf).
+    start_server(System, maps:merge(Conf0, Conf)).
 
 %% @doc Starts a ra server in the default system
 %% @param Conf a ra_server_config() configuration map.
@@ -551,9 +577,10 @@ delete_cluster(ServerIds, Timeout) ->
 %% affect said cluster's availability characteristics (by increasing quorum node count).
 %%
 %% @param ServerLoc the ra server or servers to try to send the command to
-%% @param ServerId the ra server id of the new server.
+%% @param ServerId the ra server id of the new server, or a map with server id and settings.
 %% @end
--spec add_member(ra_server_id() | [ra_server_id()], ra_server_id()) ->
+-spec add_member(ra_server_id() | [ra_server_id()],
+                 ra_server_id() | ra_new_server()) ->
     ra_cmd_ret() |
     {error, already_member} |
     {error, cluster_change_not_permitted}.
@@ -564,7 +591,8 @@ add_member(ServerLoc, ServerId) ->
 %% @see add_member/2
 %% @end
 -spec add_member(ra_server_id() | [ra_server_id()],
-                 ra_server_id(), timeout()) ->
+                 ra_server_id() | ra_new_server(),
+                 timeout()) ->
     ra_cmd_ret() |
     {error, already_member} |
     {error, cluster_change_not_permitted}.
@@ -572,7 +600,6 @@ add_member(ServerLoc, ServerId, Timeout) ->
     ra_server_proc:command(ServerLoc,
                            {'$ra_join', ServerId, after_log_append},
                            Timeout).
-
 
 %% @doc Removes a server from the cluster's membership configuration.
 %% This function returns after appending a cluster membership change
@@ -583,8 +610,8 @@ add_member(ServerLoc, ServerId, Timeout) ->
 %%
 %% @param ServerRef the ra server to send the command to
 %% @param ServerId the ra server id of the server to remove
-%% @see leave_and_terminate/2
-%% @see leave_and_delete_server/2
+%% @see leave_and_terminate/4
+%% @see leave_and_delete_server/4
 %% @see add_member/2
 %% @see remove_member/3
 %% @end
@@ -632,7 +659,7 @@ trigger_election(ServerId, Timeout) ->
 %% or is permanently lost.
 %% @param ServerRef the ra server to send the command to and to remove
 %% @param ServerId the ra server to remove
-%% @see leave_and_terminate/3
+%% @see leave_and_terminate/4
 %% @end
 -spec leave_and_terminate(atom(),
                           ra_server_id() | [ra_server_id()], ra_server_id()) ->
@@ -640,11 +667,11 @@ trigger_election(ServerId, Timeout) ->
 leave_and_terminate(System, ServerRef, ServerId) ->
     leave_and_terminate(System, ServerRef, ServerId, ?DEFAULT_TIMEOUT).
 
-%% @doc Same as `leave_and_terminate/2' but also accepts a timeout.
+%% @doc Same as `leave_and_terminate/3' but also accepts a timeout.
 %% @param ServerRef the ra server to send the command to and to remove
 %% @param ServerId the ra server to remove
 %% @param Timeout timeout to use
-%% @see leave_and_terminate/2
+%% @see leave_and_terminate/3
 %% @end
 -spec leave_and_terminate(atom(),
                           ra_server_id() | [ra_server_id()],
@@ -672,7 +699,7 @@ leave_and_terminate(System, ServerRef, ServerId, Timeout) ->
 %% @param System the system identifier
 %% @param ServerRef the ra server to send the command to and to remove
 %% @param ServerId the ra server to force remove
-%% @see leave_and_delete_server/3
+%% @see leave_and_delete_server/4
 %% @end
 -spec leave_and_delete_server(atom(), ra_server_id() | [ra_server_id()],
                               ra_server_id()) ->
@@ -680,11 +707,11 @@ leave_and_terminate(System, ServerRef, ServerId, Timeout) ->
 leave_and_delete_server(System, ServerRef, ServerId) ->
     leave_and_delete_server(System, ServerRef, ServerId, ?DEFAULT_TIMEOUT).
 
-%% @doc Same as `leave_and_delete_server/2' but also accepts a timeout.
+%% @doc Same as `leave_and_delete_server/3' but also accepts a timeout.
 %% @param ServerRef the ra server to send the command to and to remove
 %% @param ServerId the ra server to force remove
 %% @param Timeout timeout to use
-%% @see leave_and_delete_server/2
+%% @see leave_and_delete_server/3
 %% @end
 -spec leave_and_delete_server(atom(), ra_server_id() | [ra_server_id()],
                               ra_server_id(), timeout()) ->
@@ -706,9 +733,8 @@ leave_and_delete_server(System, ServerRef, ServerId, Timeout) ->
 %% 6 characters.
 %% @end
 new_uid(Source) when is_binary(Source) ->
-    Prefix = ra_lib:derive_safe_string(ra_lib:to_binary(Source), 6),
+    Prefix = ra_lib:derive_safe_string(Source, 6),
     ra_lib:make_uid(string:uppercase(Prefix)).
-
 
 %% @doc Returns a map of overview data of the default Ra system on the current Erlang
 %% node.
@@ -754,18 +780,52 @@ overview(System) ->
 %% If there is no majority of Ra servers online, this function will return
 %% a timeout.
 %%
+%% When `TimeoutOrOptions' is a map, it supports the following option keys:
+%% <ul>
+%% <li>`timeout': the time to wait before returning `{timeout, ServerId}'</li>
+%% <li>`reply_from': the node which should reply to the command call. The
+%% default value is `leader'. If the option is `local' or a `member' and a
+%% local node or the given member is not available, the command may be
+%% processed successfully but the caller may not receive a response, timing out
+%% instead. The following values are supported for `reply_from':
+%% <ul>
+%% <li>`leader': the cluster leader replies.</li>
+%% <li>`local': a member on the some node as the caller replies.</li>
+%% <li>`{member, ServerId}': the member for the given {@link ra_server_id()}
+%% replies.</li>
+%% </ul></li>
+%% </ul>
+%%
 %% @param ServerId the server id to send the command to
 %% @param Command an arbitrary term that the state machine can handle
-%% @param Timeout the time to wait before returning {timeout, ServerId}
+%% @param TimeoutOrOptions the time to wait before returning
+%%        `{timeout, ServerId}', or a map of options.
 %% @end
--spec process_command(ServerId :: ra_server_id() | [ra_server_id()],
-                      Command :: term(),
-                      Timeout :: timeout()) ->
-    {ok, Reply :: term(), Leader :: ra_server_id()} |
+-spec process_command(ServerId, Command, TimeoutOrOptions) ->
+    {ok, Reply, Leader} |
     {error, term()} |
-    {timeout, ra_server_id()}.
-process_command(ServerId, Cmd, Timeout) ->
-    ra_server_proc:command(ServerId, usr(Cmd, await_consensus), Timeout).
+    {timeout, ra_server_id()}
+    when
+      ServerId :: ra_server_id() | [ra_server_id()],
+      Command :: term(),
+      TimeoutOrOptions :: timeout() | Options,
+      Options :: #{timeout => timeout(),
+                   reply_from => leader | local | {member, ra_server_id()}},
+      Reply :: term(),
+      Leader :: ra_server_id().
+process_command(ServerId, Command, Timeout)
+  when Timeout =:= infinity orelse is_integer(Timeout) ->
+    process_command(ServerId, Command, #{timeout => Timeout});
+process_command(ServerId, Command, Options) when is_map(Options) ->
+    Timeout = maps:get(timeout, Options, ?DEFAULT_TIMEOUT),
+    ReplyMode = case Options of
+                    #{reply_from := ReplyFrom} ->
+                        {await_consensus, #{reply_from => ReplyFrom}};
+                    _ ->
+                        %% use plain reply mode for backwards compatibility
+                        await_consensus
+                end,
+    ra_server_proc:command(ServerId, usr(Command, ReplyMode), Timeout).
 
 %% @doc Same as `process_command/3' with the default timeout of 5000 ms.
 %% @param ServerId the server id to send the command to
@@ -884,19 +944,38 @@ pipeline_command(ServerId, Command) ->
 local_query(ServerId, QueryFun) ->
     local_query(ServerId, QueryFun, ?DEFAULT_TIMEOUT).
 
-%% @doc Same as `local_query/2' but accepts a custom timeout.
+%% @doc Same as `local_query/2' but accepts a custom timeout or a map of
+%% options.
+%%
+%% The supported options are:
+%% <ul>
+%% <li>`condition': the query will be evaluated only once the specified
+%% condition is true.</li>
+%% <li>`timeout': the maximum time to wait for the query to be evaluated.</li>
+%% </ul>
+%%
 %% @param ServerId the ra server id to send the query to
 %% @param QueryFun the query function to run
-%% @param Timeout the timeout to use
+%% @param TimeoutOrOptions the timeout to use or a map of options
 %% @see local_query/2
 %% @end
 -spec local_query(ServerId :: ra_server_id(),
                   QueryFun :: query_fun(),
-                  Timeout :: timeout()) ->
+                  TimeoutOrOptions) ->
     ra_server_proc:ra_leader_call_ret({ra_idxterm(), Reply :: term()}) |
-    {ok, {ra_idxterm(), Reply :: term()}, not_known}.
-local_query(ServerId, QueryFun, Timeout) ->
-    ra_server_proc:query(ServerId, QueryFun, local, Timeout).
+    {ok, {ra_idxterm(), Reply :: term()}, not_known}
+      when TimeoutOrOptions :: Timeout | Options,
+           Timeout :: timeout(),
+           Options :: #{condition => query_condition(),
+                        timeout => timeout()}.
+local_query(ServerId, QueryFun, Timeout)
+  when Timeout =:= infinity orelse is_integer(Timeout) ->
+    ra_server_proc:query(ServerId, QueryFun, local, #{}, Timeout);
+local_query(ServerId, QueryFun, Options) when is_map(Options) ->
+    Timeout = maps:get(timeout, Options, ?DEFAULT_TIMEOUT),
+    Options1 = maps:remove(timeout, Options),
+    ra_server_proc:query(
+      ServerId, QueryFun, local, Options1, Timeout).
 
 
 %% @doc Query the machine state on the current leader node.
@@ -915,19 +994,38 @@ local_query(ServerId, QueryFun, Timeout) ->
 leader_query(ServerId, QueryFun) ->
     leader_query(ServerId, QueryFun, ?DEFAULT_TIMEOUT).
 
-%% @doc Same as `leader_query/2' but accepts a custom timeout.
+%% @doc Same as `leader_query/2' but accepts a custom timeout or a map of
+%% options.
+%%
+%% The supported options are:
+%% <ul>
+%% <li>`condition': the query will be evaluated only once the specified
+%% condition is true.</li>
+%% <li>`timeout': the maximum time to wait for the query to be evaluated.</li>
+%% </ul>
+%%
 %% @param ServerId the ra server id(s) to send the query to
 %% @param QueryFun the query function to run
-%% @param Timeout the timeout to use
+%% @param TimeoutOrOptions the timeout to use or a map of options
 %% @see leader_query/2
 %% @end
 -spec leader_query(ServerId :: ra_server_id() | [ra_server_id()],
                    QueryFun :: query_fun(),
-                   Timeout :: timeout()) ->
+                   TimeoutOrOptions) ->
     ra_server_proc:ra_leader_call_ret({ra_idxterm(), Reply :: term()}) |
-    {ok, {ra_idxterm(), Reply :: term()}, not_known}.
-leader_query(ServerId, QueryFun, Timeout) ->
-    ra_server_proc:query(ServerId, QueryFun, leader, Timeout).
+    {ok, {ra_idxterm(), Reply :: term()}, not_known}
+      when TimeoutOrOptions :: Timeout | Options,
+           Timeout :: timeout(),
+           Options :: #{condition => query_condition(),
+                        timeout => timeout()}.
+leader_query(ServerId, QueryFun, Timeout)
+  when Timeout =:= infinity orelse is_integer(Timeout) ->
+    ra_server_proc:query(ServerId, QueryFun, leader, #{}, Timeout);
+leader_query(ServerId, QueryFun, Options) when is_map(Options) ->
+    Timeout = maps:get(timeout, Options, ?DEFAULT_TIMEOUT),
+    Options1 = maps:remove(timeout, Options),
+    ra_server_proc:query(
+      ServerId, QueryFun, leader, Options1, Timeout).
 
 %% @doc Query the state machine with a consistency guarantee.
 %% This allows the caller to query the state machine on the leader node with
@@ -955,7 +1053,7 @@ consistent_query(ServerId, QueryFun) ->
                        Timeout :: timeout()) ->
     ra_server_proc:ra_leader_call_ret(Reply :: term()).
 consistent_query(ServerId, QueryFun, Timeout) ->
-    ra_server_proc:query(ServerId, QueryFun, consistent, Timeout).
+    ra_server_proc:query(ServerId, QueryFun, consistent, #{}, Timeout).
 
 %% @doc Returns a list of cluster members
 %%
@@ -994,6 +1092,45 @@ members({local, ServerId}, Timeout) ->
     ra_server_proc:local_state_query(ServerId, members, Timeout);
 members(ServerId, Timeout) ->
     ra_server_proc:state_query(ServerId, members, Timeout).
+
+%% @doc Returns a list of cluster members and their Raft metrics
+%%
+%% Except if `{local, ServerId}' is passed, the query is sent to the specified
+%% server which may redirect it to the leader if it is a follower. It may
+%% timeout if there is currently no leader (i.e. an election is in progress).
+%%
+%% With `{local, ServerId}', the query is always handled by the specified
+%% server. It means the returned list might be out-of-date compared to what the
+%% leader would have returned.
+%%
+%% @param ServerId the Ra server(s) to send the query to
+%% @end
+-spec members_info(ra_server_id() | [ra_server_id()] | {local, ra_server_id()}) ->
+    ra_server_proc:ra_leader_call_ret(ra_cluster()).
+members_info(ServerId) ->
+    members_info(ServerId, ?DEFAULT_TIMEOUT).
+
+%% @doc Returns a list of cluster members and their Raft metrics
+%%
+%% Except if `{local, ServerId}' is passed, the query is sent to the specified
+%% server which may redirect it to the leader if it is a follower. It may
+%% timeout if there is currently no leader (i.e. an election is in progress).
+%%
+%% With `{local, ServerId}', the query is always handled by the specified
+%% server. It means the returned list might be out-of-date compared to what the
+%% leader would have returned.
+%%
+%% @param ServerId the Ra server(s) to send the query to
+%% @param Timeout the timeout to use
+%% @end
+-spec members_info(ra_server_id() | [ra_server_id()] | {local, ra_server_id()},
+              timeout()) ->
+    ra_server_proc:ra_leader_call_ret(ra_cluster()).
+members_info({local, ServerId}, Timeout) ->
+    ra_server_proc:local_state_query(ServerId, members_info, Timeout);
+members_info(ServerId, Timeout) ->
+    ra_server_proc:state_query(ServerId, members_info, Timeout).
+
 
 %% @doc Returns a list of initial (seed) cluster members.
 %%
@@ -1049,8 +1186,83 @@ register_external_log_reader({_, Node} = ServerId)
     {ok, Reader} = gen_statem:call(ServerId, {register_external_log_reader, self()}),
     Reader.
 
+%% @doc Returns a overview map of the internal server state
+%%
+%% The keys and values will typically remain stable but may
+%% change overtime and no guarantees are provided.
+%%
+%% @param ServerId the Ra server(s) to send the query to
+%% @end
+-spec member_overview(ra_server_id()) ->
+    ra_server_proc:ra_local_call_ret(map()).
+member_overview(ServerId) ->
+    member_overview(ServerId, ?DEFAULT_TIMEOUT).
+
+-spec member_overview(ra_server_id(),
+                      timeout()) ->
+    ra_server_proc:ra_local_call_ret(map()).
+member_overview(ServerId, Timeout) ->
+    ra_server_proc:local_state_query(ServerId, overview, Timeout).
+
+%% @doc Returns a map of key metrics about a Ra member
+%%
+%% The keys and values may vary depending on what state
+%% the member is in. This function will never call into the
+%% Ra process itself so is likely to return swiftly even
+%% when the Ra process is busy (such as when it is recovering)
+%%
+%% @param ServerId the Ra server to obtain key metrics for
+%% @end
+key_metrics(ServerId) ->
+    key_metrics(ServerId, ?DEFAULT_TIMEOUT).
+
+%% @doc Returns a map of key metrics about a Ra member
+%%
+%% The keys and values may vary depending on what state
+%% the member is in. This function will never call into the
+%% Ra process itself so is likely to return swiftly even
+%% when the Ra process is busy (such as when it is recovering)
+%%
+%% @param ServerId the Ra server to obtain key metrics for
+%% @param Timeout The time to wait for the server to reply
+%% @end
+key_metrics({Name, N} = ServerId, _Timeout) when N == node() ->
+    Fields = [last_applied,
+              commit_index,
+              snapshot_index,
+              last_written_index,
+              last_index,
+              commit_latency,
+              term],
+    Counters = case ra_counters:counters(ServerId, Fields) of
+                   undefined ->
+                       #{};
+                   C -> C
+               end,
+    case whereis(Name) of
+        undefined ->
+            Counters#{state => noproc,
+                      membership => unknown};
+        _ ->
+            case ets:lookup(ra_state, Name) of
+                [] ->
+                    Counters#{state => unknown,
+                              membership => unknown};
+                [{_, State, Membership}] ->
+                    Counters#{state => State,
+                              membership => Membership}
+            end
+    end;
+key_metrics({_, N} = ServerId, Timeout) ->
+    erpc:call(N, ?MODULE, ?FUNCTION_NAME, [ServerId], Timeout).
+
+
 %% internal
 
+-spec usr(UserCommand, ReplyMode) -> Command when
+      UserCommand :: term(),
+      ReplyMode :: ra_server:command_reply_mode(),
+      Command :: {ra_server:command_type(), UserCommand, ReplyMode}.
 usr(Data, Mode) ->
     {'$usr', Data, Mode}.
 

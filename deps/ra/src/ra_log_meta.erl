@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 %% @hidden
 -module(ra_log_meta).
@@ -54,7 +54,7 @@ init(#{name := System,
                                          {auto_save, ?SYNC_INTERVAL}]),
     _ = ets:new(TblName, [named_table, public, {read_concurrency, true}]),
     TblName = dets:to_ets(TblName, TblName),
-    ?INFO("ra: meta data store initialised for system ~s. ~b record(s) recovered",
+    ?INFO("ra: meta data store initialised for system ~ts. ~b record(s) recovered",
           [System, ets:info(TblName, size)]),
     {ok, #?MODULE{ref = Ref,
                   table_name = TblName}}.
@@ -68,7 +68,7 @@ handle_batch(Commands, #?MODULE{ref = Ref,
                         Inserts0#{Id => update_key(Key, Value, Data)};
                     _ ->
                         case ets:lookup(TblName, Id) of
-                            [{Id, _, _, _} = Data] ->
+                            [Data] ->
                                 Inserts0#{Id => update_key(Key, Value, Data)};
                             [] ->
                                 Data = {Id, undefined, undefined, undefined},
@@ -94,8 +94,8 @@ handle_batch(Commands, #?MODULE{ref = Ref,
                    [{reply, From, ok} | Replies], true}
           end, {#{}, [], false}, Commands),
     Objects = maps:values(Inserts),
-    ok = dets:insert(TblName, Objects),
     true = ets:insert(TblName, Objects),
+    ok = dets:insert(TblName, Objects),
     case ShouldSync of
         true ->
             ok = dets:sync(TblName);
@@ -153,8 +153,7 @@ fetch(MetaName, Id, Key, Default) ->
 %%% internal
 
 maybe_fetch(MetaName, Id, Pos) ->
-    try ets:lookup_element(MetaName, Id, Pos) of
-        E -> E
+    try ets:lookup_element(MetaName, Id, Pos)
     catch
         _:badarg ->
             undefined

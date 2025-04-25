@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2018-2023 Broadcom. All Rights Reserved. The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
 %%
 -module(aten_detector).
 
@@ -157,10 +157,18 @@ analyse_one(_Curr, _Prev, _Thresh) ->
     no_change.
 
 analyse(Curr, Prev, Thresh) ->
-    Down0 = maps:fold(fun (N, _S, Acc) ->
+    Down0 = maps:fold(fun (N, Sample, Acc) ->
                               case maps:get(N, Curr, undefined) of
                                   undefined ->
-                                      [N | Acc];
+                                      case Sample >= Thresh of
+                                          true ->
+                                              %% already down
+                                              %% this should already have been
+                                              %% been notified
+                                              Acc;
+                                          _ ->
+                                              [N | Acc]
+                                      end;
                                   _ ->
                                       Acc
                               end

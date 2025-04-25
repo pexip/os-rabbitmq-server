@@ -1,21 +1,20 @@
-IGNORE_DEPS += edown eper eunit_formatters meck node_package rebar_lock_deps_plugin rebar_vsn_plugin reltool_util
-C_SRC_DIR = /path/do/not/exist
-C_SRC_TYPE = rebar
-DRV_CFLAGS = -fPIC
-export DRV_CFLAGS
-ERLANG_ARCH = 64
-export ERLANG_ARCH
-ERLC_OPTS = +debug_info
-export ERLC_OPTS
+PROJECT = seshat
+PROJECT_DESCRIPTION = Metrics library built for RabbitMQ, with a Prometheus exposition format built-in
+PROJECT_VERSION = 0.6.1
 
+define PROJECT_ENV
+[
+]
+endef
 
+LOCAL_DEPS = sasl crypto
 
-rebar_dep: preprocess pre-deps deps pre-app app
+# TEST_DEPS=eunit_formatters looking_glass
+TEST_DEPS=eunit_formatters
 
-preprocess::
+dep_looking_glass = git https://github.com/rabbitmq/looking-glass.git master
+# PLT_APPS += eunit syntax_tools erts kernel stdlib common_test inets ssh ssl meck looking_glass gen_batch_server inet_tcp_proxy
 
-pre-deps::
-
-pre-app::
-
+DIALYZER_OPTS += --src -r test
+EUNIT_OPTS = no_tty, {report, {eunit_progress, [colored, profile]}}
 include $(if $(ERLANG_MK_FILENAME),$(ERLANG_MK_FILENAME),erlang.mk)

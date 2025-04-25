@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 %% @hidden
 -module(ra_log_segment_writer).
@@ -37,6 +37,7 @@
 -define(C_MEM_TABLES, 1).
 -define(C_SEGMENTS, 2).
 -define(C_ENTRIES, 3).
+-define(C_BYTES_WRITTEN, 4).
 
 -define(COUNTER_FIELDS,
         [{mem_tables, ?C_MEM_TABLES, counter,
@@ -44,7 +45,9 @@
          {segments, ?C_SEGMENTS, counter,
           "Number of segments written"},
          {entries, ?C_ENTRIES, counter,
-          "Number of entries written"}
+          "Number of entries written"},
+         {bytes_written, ?C_BYTES_WRITTEN, counter,
+          "Number of bytes written"}
         ]).
 
 
@@ -101,9 +104,10 @@ await(SegWriter)  ->
 %%%===================================================================
 
 init([#{data_dir := DataDir,
+        name := SegWriterName,
         system := System} = Conf]) ->
     process_flag(trap_exit, true),
-    CRef = ra_counters:new(?MODULE, ?COUNTER_FIELDS),
+    CRef = ra_counters:new(SegWriterName, ?COUNTER_FIELDS),
     SegmentConf = maps:get(segment_conf, Conf, #{}),
     {ok, #state{system = System,
                 data_dir = DataDir,
@@ -122,11 +126,6 @@ segments_for(UId, #state{data_dir = DataDir}) ->
     Dir = filename:join(DataDir, ra_lib:to_list(UId)),
     segment_files(Dir).
 
-handle_cast({mem_tables, [Table], WalFile}, State) ->
-    ok = counters:add(State#state.counter, ?C_MEM_TABLES, 1),
-    ok = do_segment(Table, State),
-    _ = prim_file:delete(WalFile),
-    {noreply, State};
 handle_cast({mem_tables, Tables, WalFile}, State) ->
     ok = counters:add(State#state.counter, ?C_MEM_TABLES, length(Tables)),
     Degree = erlang:system_info(schedulers),
@@ -150,7 +149,7 @@ handle_cast({mem_tables, Tables, WalFile}, State) ->
     % TODO: test scenario when server crashes after segments but before
     % deleting walfile
     % can we make segment writer idempotent somehow
-    ?DEBUG("segment_writer: deleting wal file: ~s",
+    ?DEBUG("segment_writer: deleting wal file: ~ts",
           [filename:basename(WalFile)]),
     %% temporarily disable wal deletion
     %% TODO: this should be a debug option config?
@@ -230,7 +229,7 @@ do_segment({ServerUId, StartIdx0, EndIdx, Tid},
 
     case open_file(Dir, SegConf) of
         enoent ->
-            ?WARN("segment_writer: skipping segment as directory ~s does "
+            ?DEBUG("segment_writer: skipping segment as directory ~ts does "
                   "not exist", [Dir]),
             %% clean up the tables for this process
             _ = ets:delete(Tid),
@@ -241,7 +240,7 @@ do_segment({ServerUId, StartIdx0, EndIdx, Tid},
                                    Segment0, State) of
                 undefined ->
                     ?WARN("segment_writer: skipping segments for ~w as
-                           directory ~s disappeared whilst writing",
+                           directory ~ts disappeared whilst writing",
                            [ServerUId, Dir]),
                     ok;
                 {Segment, Closed0} ->
@@ -280,7 +279,7 @@ send_segments(System, ServerUId, Tid, Segments) ->
         undefined ->
             ?DEBUG("ra_log_segment_writer: error sending "
                    "ra_log_event to: "
-                   "~s. Error: ~s",
+                   "~ts. Error: ~s",
                    [ServerUId, "No Pid"]),
             _ = ets:delete(Tid),
             _ = clean_closed_mem_tables(System, ServerUId, Tid),
@@ -294,7 +293,7 @@ clean_closed_mem_tables(System, UId, Tid) ->
     {ok, ClosedTbl} = ra_system:lookup_name(System, closed_mem_tbls),
     Tables = ets:lookup(ClosedTbl, UId),
     [begin
-         ?DEBUG("~w: cleaning closed table for '~s' range: ~b-~b",
+         ?DEBUG("~w: cleaning closed table for '~ts' range: ~b-~b",
                 [?MODULE, UId, From, To]),
          %% delete the entry in the closed table lookup
          true = ets:delete_object(ClosedTbl, O)
@@ -309,34 +308,57 @@ append_to_segment(_, _, StartIdx, EndIdx, Seg, Closed, _State)
   when StartIdx >= EndIdx ->
     {Seg, Closed};
 append_to_segment(UId, Tid, Idx, EndIdx, Seg0, Closed, State) ->
-    [{_, Term, Data0}] = ets:lookup(Tid, Idx),
-    Data = term_to_iovec(Data0),
-    case ra_log_segment:append(Seg0, Idx, Term, Data) of
-        {ok, Seg} ->
-            ok = counters:add(State#state.counter, ?C_ENTRIES, 1),
-            append_to_segment(UId, Tid, Idx+1, EndIdx, Seg, Closed, State);
-        {error, full} ->
-            % close and open a new segment
-            case open_successor_segment(Seg0, State#state.segment_conf) of
-                undefined ->
-                    %% a successor cannot be opened - this is most likely due
-                    %% to the directory having been deleted.
-                    %% clear close mem tables here
-                    _ = ets:delete(Tid),
-                    _ = clean_closed_mem_tables(State#state.system, UId, Tid),
-                    undefined;
-                Seg ->
-                    ok = counters:add(State#state.counter, ?C_SEGMENTS, 1),
-                    %% re-evaluate snapshot state for the server in case
-                    %% a snapshot has completed during segment flush
-                    StartIdx = start_index(UId, Idx),
-                    % recurse
-                    append_to_segment(UId, Tid, StartIdx, EndIdx, Seg,
-                                      [Seg0 | Closed], State)
+    case ets:lookup(Tid, Idx) of
+        [] ->
+            %% oh dear, an expected index was not found in the mem table.
+            ?WARN("segment_writer: missing index ~b in mem table ~s for uid ~s"
+                  "checking to see if UId has been unregistered",
+                  [Idx, Tid, UId]),
+            case ra_directory:is_registered_uid(State#state.system, UId) of
+                true ->
+                    ?ERROR("segment_writer: uid ~s is registered, exiting...",
+                           [UId]),
+                    exit({missing_index, UId, Idx});
+                false ->
+                    ?INFO("segment_writer: UId ~s was not registered, skipping",
+                          [UId]),
+                    undefined
             end;
-        {error, Posix} ->
-            FileName = ra_log_segment:filename(Seg0),
-            exit({segment_writer_append_error, FileName, Posix})
+        [{_, Term, Data0}] ->
+            Data = term_to_iovec(Data0),
+            DataSize = iolist_size(Data),
+            case ra_log_segment:append(Seg0, Idx, Term, {DataSize, Data}) of
+                {ok, Seg} ->
+                    ok = counters:add(State#state.counter, ?C_ENTRIES, 1),
+                    %% this isn't completely accurate as firstly the segment may not
+                    %% have written it to disk and it doesn't include data written to
+                    %% the segment index but is probably good enough to get comparative
+                    %% data rates for different Ra components
+                    ok = counters:add(State#state.counter, ?C_BYTES_WRITTEN, DataSize),
+                    append_to_segment(UId, Tid, Idx+1, EndIdx, Seg, Closed, State);
+                {error, full} ->
+                    % close and open a new segment
+                    case open_successor_segment(Seg0, State#state.segment_conf) of
+                        undefined ->
+                            %% a successor cannot be opened - this is most likely due
+                            %% to the directory having been deleted.
+                            %% clear close mem tables here
+                            _ = ets:delete(Tid),
+                            _ = clean_closed_mem_tables(State#state.system, UId, Tid),
+                            undefined;
+                        Seg ->
+                            ok = counters:add(State#state.counter, ?C_SEGMENTS, 1),
+                            %% re-evaluate snapshot state for the server in case
+                            %% a snapshot has completed during segment flush
+                            StartIdx = start_index(UId, Idx),
+                            % recurse
+                            append_to_segment(UId, Tid, StartIdx, EndIdx, Seg,
+                                              [Seg0 | Closed], State)
+                    end;
+                {error, Posix} ->
+                    FileName = ra_log_segment:filename(Seg0),
+                    exit({segment_writer_append_error, FileName, Posix})
+            end
     end.
 
 find_segment_files(Dir) ->
@@ -381,18 +403,18 @@ open_file(Dir, SegConf) ->
             %% a file was created by the segment header had not been
             %% synced. In this case it is typically safe to just delete
             %% and retry.
-            ?WARN("segment_writer: missing header in segment file ~s "
+            ?WARN("segment_writer: missing header in segment file ~ts "
                   "deleting file and retrying recovery", [File]),
             _ = prim_file:delete(File),
             open_file(Dir, SegConf);
         {error, enoent} ->
-            ?WARN("segment_writer: failed to open segment file ~s "
+            ?DEBUG("segment_writer: failed to open segment file ~ts "
                   "error: enoent", [File]),
             enoent;
         Err ->
             %% Any other error should be considered a hard error or else
             %% we'd risk data loss
-            ?WARN("segment_writer: failed to open segment file ~s "
+            ?WARN("segment_writer: failed to open segment file ~ts "
                   "error: ~W. Exiting", [File, Err, 10]),
             exit(Err)
     end.

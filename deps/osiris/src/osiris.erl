@@ -2,14 +2,15 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 
 -module(osiris).
 
 -include("osiris.hrl").
 
--export([write/4,
+-export([write/2,
+         write/4,
          write_tracking/3,
          read_tracking/1,
          read_tracking/2,
@@ -22,24 +23,24 @@
          update_retention/2,
          start_cluster/1,
          stop_cluster/1,
+
          start_writer/1,
          start_replica/2,
+         stop_member/2,
+         delete_member/2,
+
          delete_cluster/1,
          configure_logger/1,
          get_stats/1]).
 
-%% holds static or rarely changing fields
--record(cfg, {}).
--record(?MODULE, {cfg :: #cfg{}}).
 
+-type name() :: string() | binary().
 -type config() ::
-    #{name := string(),
+    #{name := name(),
       reference => term(),
       event_formatter => {module(), atom(), list()},
       retention => [osiris:retention_spec()],
       atom() => term()}.
-
--opaque state() :: #?MODULE{}.
 
 -type mfarg() :: {module(), atom(), list()}.
 -type offset() :: non_neg_integer().
@@ -68,16 +69,23 @@
 -type retention_spec() ::
     {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
 -type writer_id() :: binary().
--type data() :: iodata() | {batch,
-                            NumRecords :: non_neg_integer(),
-                            compression_type(),
-                            UncompressedDataSize :: non_neg_integer(),
-                            iodata()}.
+-type batch() :: {batch, NumRecords :: non_neg_integer(),
+                  compression_type(),
+                  UncompressedDataSize :: non_neg_integer(),
+                  iodata()}.
+-type filter_value() :: binary().
+-type data() :: iodata() |
+                batch() |
+                {filter_value(), iodata() | batch()}.
+
+%% returned when reading
+-type entry() :: binary() | batch().
 -type reader_options() :: #{transport => tcp | ssl,
-                            chunk_selector => all | user_data
+                            chunk_selector => all | user_data,
+                            filter_spec => osiris_bloom:filter_spec()
                            }.
 
--export_type([state/0,
+-export_type([name/0,
               config/0,
               offset/0,
               epoch/0,
@@ -87,17 +95,19 @@
               retention_spec/0,
               timestamp/0,
               writer_id/0,
-              data/0]).
+              data/0,
+             entry/0]).
 
 -spec start_cluster(config()) ->
-                       {ok, config()} | {error, term()} |
-                       {error, term(), config()}.
+    {ok, config()} |
+    {error, term()} |
+    {error, term(), config()}.
 start_cluster(Config00 = #{name := Name}) ->
-    ?DEBUG("osiris: starting new cluster ~s", [Name]),
+    ?DEBUG("osiris: starting new cluster ~ts", [Name]),
     true = osiris_util:validate_base64uri(Name),
     %% ensure reference is set
     Config0 = maps:merge(#{reference => Name}, Config00),
-    case osiris_writer:start(Config0) of
+    case start_writer(Config0) of
         {ok, Pid} ->
             Config = Config0#{leader_pid => Pid},
             case start_replicas(Config) of
@@ -109,28 +119,50 @@ start_cluster(Config00 = #{name := Name}) ->
     end.
 
 stop_cluster(Config) ->
-    ok = osiris_writer:stop(Config),
-    [ok = osiris_replica:stop(N, Config)
+    WriterNode = maps:get(leader_node, Config),
+    ok = stop_member(WriterNode, Config),
+    [ok = stop_member(N, Config)
      || N <- maps:get(replica_nodes, Config)],
     ok.
 
 -spec delete_cluster(config()) -> ok.
 delete_cluster(Config) ->
-    [ok = osiris_replica:delete(R, Config)
-     || R <- maps:get(replica_nodes, Config)],
-    ok = osiris_writer:delete(Config).
+    [ok = delete_member(N, Config)
+     || N <- maps:get(replica_nodes, Config)],
+    WriterNode = maps:get(leader_node, Config),
+    ok = delete_member(WriterNode, Config).
 
+-spec start_writer(osiris:config()) ->
+    supervisor:startchild_ret().
 start_writer(Config) ->
-    osiris_writer:start(Config).
+    Mod = get_writer_module(Config),
+    Node = maps:get(leader_node, Config),
+    osiris_member:start(Mod, Node, Config).
 
-start_replica(Replica, Config) ->
-    osiris_replica:start(Replica, Config).
+-spec start_replica(node(), osiris:config()) ->
+    supervisor:startchild_ret().
+start_replica(Node, Config) ->
+    Mod = maps:get(replica_mod, Config, osiris_replica),
+    osiris_member:start(Mod, Node, Config).
+
+-spec stop_member(node(), osiris:config()) -> ok.
+stop_member(Node, Config) ->
+    osiris_member:stop(Node, Config).
+
+-spec delete_member(node(), osiris:config()) ->
+    ok | {error, not_found}.
+delete_member(Node, Config) ->
+    osiris_member:delete(Node, Config).
+
+-spec write(Pid :: pid(), Data :: data()) -> ok.
+write(Pid, Data) ->
+    osiris_writer:write(Pid, Data).
 
 -spec write(Pid :: pid(),
             WriterId :: binary() | undefined,
             CorrOrSeq :: non_neg_integer() | term(),
             Data :: data()) ->
-               ok.
+    ok.
 write(Pid, WriterId, Corr, Data) ->
     osiris_writer:write(Pid, self(), WriterId, Corr, Data).
 
@@ -191,16 +223,15 @@ init_reader(Pid, OffsetSpec, CounterSpec) ->
     init_reader(Pid, OffsetSpec, CounterSpec, #{transport => tcp,
                                                 chunk_selector => user_data}).
 
--spec init_reader(pid(), offset_spec(), osiris_log:counter_spec(), reader_options()) ->
-                     {ok, osiris_log:state()} |
-                     {error,
-                      {offset_out_of_range, empty | {offset(), offset()}}} |
-                     {error, {invalid_last_offset_epoch, offset(), offset()}}.
+-spec init_reader(pid(), offset_spec(), osiris_log:counter_spec(),
+                  reader_options()) ->
+    {ok, osiris_log:state()} |
+    {error, {offset_out_of_range, empty | {offset(), offset()}}} |
+    {error, {invalid_last_offset_epoch, offset(), offset()}}.
 init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
-    {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context),
-    % CntId = {?MODULE, Ref, Tag, Pid},
+    Ctx0 = osiris_util:get_reader_context(Pid),
     Ctx = Ctx0#{counter_spec => CounterSpec,
                 options => Options},
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
@@ -228,7 +259,7 @@ register_offset_listener(Pid, Offset, EvtFormatter) ->
     ok.
 
 -spec update_retention(pid(), [osiris:retention_spec()]) ->
-                          ok | {error, term()}.
+    ok | {error, term()}.
 update_retention(Pid, Retention)
     when is_pid(Pid) andalso is_list(Retention) ->
     Msg = {update_retention, Retention},
@@ -249,7 +280,7 @@ start_replicas(_Config, [], ReplicaPids) ->
     {ok, ReplicaPids};
 start_replicas(Config, [Node | Nodes], ReplicaPids) ->
     try
-        case osiris_replica:start(Node, Config) of
+        case start_replica(Node, Config) of
             {ok, Pid} ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
             {ok, Pid, _} ->
@@ -258,7 +289,7 @@ start_replicas(Config, [Node | Nodes], ReplicaPids) ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
             {error, Reason} ->
                 Name = maps:get(name, Config, undefined),
-                error_logger:info_msg("osiris:start_replicas for ~s failed to start replica "
+                error_logger:info_msg("osiris:start_replicas for ~ts failed to start replica "
                                       "on ~w, reason: ~w",
                                       [Name, Node, Reason]),
                 %% coordinator might try to start this replica in the future
@@ -277,9 +308,13 @@ configure_logger(Module) ->
 -spec get_stats(pid()) -> #{committed_chunk_id => integer(),
                             first_chunk_id => integer()}.
 get_stats(Pid)
-    when node(Pid) =:= node() ->
-    {ok, #{offset_ref := ORef}} = gen:call(Pid, '$gen_call', get_reader_context),
-    #{committed_chunk_id => atomics:get(ORef, 1),
-      first_chunk_id => atomics:get(ORef, 2)};
+  when node(Pid) =:= node() ->
+    #{shared := Shared} = osiris_util:get_reader_context(Pid),
+    #{committed_chunk_id => osiris_log_shared:committed_chunk_id(Shared),
+      first_chunk_id => osiris_log_shared:first_chunk_id(Shared),
+      last_chunk_id => osiris_log_shared:last_chunk_id(Shared)};
 get_stats(Pid) when is_pid(Pid) ->
     erpc:call(node(Pid), ?MODULE, ?FUNCTION_NAME, [Pid]).
+
+get_writer_module(Config) ->
+    maps:get(writer_mod, Config, osiris_writer).

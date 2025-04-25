@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @private
@@ -10,7 +10,7 @@
 
 -include("amqp_client.hrl").
 
--behaviour(supervisor2).
+-behaviour(supervisor).
 
 -export([start_link/1]).
 -export([init/1]).
@@ -20,22 +20,36 @@
 %%---------------------------------------------------------------------------
 
 start_link(AMQPParams) ->
-    {ok, Sup} = supervisor2:start_link(?MODULE, []),
-    {ok, TypeSup}    = supervisor2:start_child(
-                         Sup, {connection_type_sup,
-                               {amqp_connection_type_sup, start_link, []},
-                               transient, ?SUPERVISOR_WAIT, supervisor,
-                               [amqp_connection_type_sup]}),
-    {ok, Connection} = supervisor2:start_child(
-                         Sup, {connection, {amqp_gen_connection, start_link,
-                                            [TypeSup, AMQPParams]},
-                               intrinsic, brutal_kill, worker,
-                               [amqp_gen_connection]}),
+    {ok, Sup} = supervisor:start_link(?MODULE, []),
+
+    StartMFA0 = {amqp_connection_type_sup, start_link, []},
+    ChildSpec0 = #{id => connection_type_sup,
+                   start => StartMFA0,
+                   restart => transient,
+                   shutdown => ?SUPERVISOR_WAIT,
+                   type => supervisor,
+                   modules => [amqp_connection_type_sup]},
+    {ok, TypeSup} = supervisor:start_child(Sup, ChildSpec0),
+
+    StartMFA1 = {amqp_gen_connection, start_link, [TypeSup, AMQPParams]},
+    ChildSpec1 = #{id => connection,
+                   start => StartMFA1,
+                   restart => transient,
+                   significant => true,
+                   shutdown => brutal_kill,
+                   type => worker,
+                   modules => [amqp_gen_connection]},
+    {ok, Connection} = supervisor:start_child(Sup, ChildSpec1),
+
     {ok, Sup, Connection}.
 
 %%---------------------------------------------------------------------------
-%% supervisor2 callbacks
+%% supervisor callbacks
 %%---------------------------------------------------------------------------
 
 init([]) ->
-    {ok, {{one_for_all, 0, 1}, []}}.
+    SupFlags = #{strategy => one_for_all,
+                 intensity => 0,
+                 period => 1,
+                 auto_shutdown => any_significant},
+    {ok, {SupFlags, []}}.

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_vm).
@@ -20,7 +20,7 @@ memory() ->
     {Sums, _Other} = sum_processes(
                        lists:append(All), distinguishers(), [memory]),
 
-    [Qs, QsSlave, Qqs, DlxWorkers, Ssqs, Srqs, SCoor, ConnsReader, ConnsWriter, ConnsChannel,
+    [Qs, Qqs, DlxWorkers, Ssqs, Srqs, SCoor, ConnsReader, ConnsWriter, ConnsChannel,
      ConnsOther, MsgIndexProc, MgmtDbProc, Plugins] =
         [aggregate(Names, Sums, memory, fun (X) -> X end)
          || Names <- distinguished_interesting_sups()],
@@ -36,7 +36,15 @@ memory() ->
                        error:badarg ->
                            0
                    end,
+    MetadataStoreProc = try
+                            [{_, MS}] = process_info(whereis(rabbit_khepri:get_ra_cluster_name()), [memory]),
+                            MS
+                        catch
+                            error:badarg ->
+                                0
+                        end,
     MgmtDbETS           = ets_memory([rabbit_mgmt_storage]),
+    MetadataStoreETS    = ets_memory([rabbitmq_metadata]),
     [{total,     ErlangTotal},
      {processes, Processes},
      {ets,       ETS},
@@ -55,9 +63,8 @@ memory() ->
 
     OtherProc = Processes
         - ConnsReader - ConnsWriter - ConnsChannel - ConnsOther
-        - Qs - QsSlave - Qqs - DlxWorkers - Ssqs - Srqs - SCoor - MsgIndexProc - Plugins
-        - MgmtDbProc - MetricsProc,
-
+        - Qs - Qqs - DlxWorkers - Ssqs - Srqs - SCoor - MsgIndexProc - Plugins
+        - MgmtDbProc - MetricsProc - MetadataStoreProc,
     [
      %% Connections
      {connection_readers,   ConnsReader},
@@ -67,7 +74,6 @@ memory() ->
 
      %% Queues
      {queue_procs,          Qs},
-     {queue_slave_procs,    QsSlave},
      {quorum_queue_procs,   Qqs},
      {quorum_queue_dlx_procs, DlxWorkers},
      {stream_queue_procs,   Ssqs},
@@ -76,6 +82,7 @@ memory() ->
 
      %% Processes
      {plugins,              Plugins},
+     {metadata_store,       MetadataStoreProc},
      {other_proc,           lists:max([0, OtherProc])}, %% [1]
 
      %% Metrics
@@ -85,7 +92,8 @@ memory() ->
      %% ETS
      {mnesia,               MnesiaETS},
      {quorum_ets,           QuorumETS},
-     {other_ets,            ETS - MnesiaETS - MetricsETS - MgmtDbETS - MsgIndexETS - QuorumETS},
+     {metadata_store_ets,   MetadataStoreETS},
+     {other_ets,            ETS - MnesiaETS - MetricsETS - MgmtDbETS - MsgIndexETS - QuorumETS - MetadataStoreETS},
 
      %% Messages (mostly, some binaries are not messages)
      {binary,               Bin},
@@ -119,25 +127,34 @@ binary() ->
                                       sets:add_element({Ptr, Sz}, Acc0)
                               end, Acc, Info)
           end, distinguishers(), [{binary, sets:new()}]),
-    [Other, Qs, QsSlave, Qqs, DlxWorkers, Ssqs, Srqs, Scoor, ConnsReader, ConnsWriter,
+    [Other, Qs, Qqs, DlxWorkers, Ssqs, Srqs, Scoor, ConnsReader, ConnsWriter,
      ConnsChannel, ConnsOther, MsgIndexProc, MgmtDbProc, Plugins] =
         [aggregate(Names, [{other, Rest} | Sums], binary, fun sum_binary/1)
          || Names <- [[other] | distinguished_interesting_sups()]],
+    MetadataStoreProc = try
+                            [{_, B}] = process_info(whereis(rabbit_khepri:get_ra_cluster_name()), [binary]),
+                            lists:foldl(fun({_, Sz, _}, Acc) ->
+                                                Sz + Acc
+                                        end, 0, B)
+                        catch
+                            error:badarg ->
+                                0
+                        end,
     [{connection_readers,  ConnsReader},
      {connection_writers,  ConnsWriter},
      {connection_channels, ConnsChannel},
      {connection_other,    ConnsOther},
      {queue_procs,         Qs},
-     {queue_slave_procs,   QsSlave},
      {quorum_queue_procs,  Qqs},
      {quorum_queue_dlx_procs, DlxWorkers},
      {stream_queue_procs,  Ssqs},
      {stream_queue_replica_reader_procs, Srqs},
      {stream_queue_coordinator_procs, Scoor},
+     {metadata_store,      MetadataStoreProc},
      {plugins,             Plugins},
      {mgmt_db,             MgmtDbProc},
      {msg_index,           MsgIndexProc},
-     {other,               Other}].
+     {other,               Other - MetadataStoreProc}].
 
 %%----------------------------------------------------------------------------
 
@@ -177,26 +194,19 @@ bytes(Words) ->  try
                  end.
 
 interesting_sups() ->
-    [queue_sups(), quorum_sups(), dlx_sups(), stream_server_sups(), stream_reader_sups(),
+    [queue_sups(), quorum_sups(), dlx_sups(),
+     stream_server_sups(), stream_reader_sups(), stream_coordinator(),
      conn_sups() | interesting_sups0()].
 
 queue_sups() ->
     all_vhosts_children(rabbit_amqqueue_sup_sup).
 
-quorum_sups() ->
-    %% TODO: in the future not all ra servers may be queues and we needs
-    %% some way to filter this
-    case whereis(ra_server_sup_sup) of
-        undefined ->
-            [];
-        _ ->
-            [Pid || {_, Pid, _, _} <-
-                    supervisor:which_children(ra_server_sup_sup)]
-    end.
+quorum_sups() -> [ra_server_sup_sup].
 
 dlx_sups() -> [rabbit_fifo_dlx_sup].
 stream_server_sups() -> [osiris_server_sup].
 stream_reader_sups() -> [osiris_replica_reader_sup].
+stream_coordinator() -> [rabbit_stream_coordinator].
 
 msg_stores() ->
     all_vhosts_children(msg_store_transient)
@@ -209,11 +219,11 @@ all_vhosts_children(Name) ->
         Pid when is_pid(Pid) ->
             lists:filtermap(
                 fun({_, VHostSupWrapper, _, _}) ->
-                    case supervisor2:find_child(VHostSupWrapper,
+                    case rabbit_misc:find_child(VHostSupWrapper,
                                                 rabbit_vhost_sup) of
                         []         -> false;
                         [VHostSup] ->
-                            case supervisor2:find_child(VHostSup, Name) of
+                            case rabbit_misc:find_child(VHostSup, Name) of
                                 [QSup] -> {true, QSup};
                                 []     -> false
                             end
@@ -242,19 +252,16 @@ ranch_server_sups() ->
 
 with(Sups, With) -> [{Sup, With} || Sup <- Sups].
 
-distinguishers() -> with(queue_sups(), fun queue_type/1) ++
-                    with(conn_sups(), fun conn_type/1) ++
-                    with(quorum_sups(), fun ra_type/1).
+distinguishers() -> with(conn_sups(), fun conn_type/1).
 
 distinguished_interesting_sups() ->
     [
-     with(queue_sups(), master),
-     with(queue_sups(), slave),
-     with(quorum_sups(), quorum),
+     queue_sups(),
+     quorum_sups(),
      dlx_sups(),
      stream_server_sups(),
      stream_reader_sups(),
-     with(quorum_sups(), stream),
+     stream_coordinator(),
      with(conn_sups(), reader),
      with(conn_sups(), writer),
      with(conn_sups(), channel),
@@ -297,24 +304,12 @@ extract(Name, Sums, Key, Fun) ->
 sum_binary(Set) ->
     sets:fold(fun({_Pt, Sz}, Acc) -> Acc + Sz end, 0, Set).
 
-queue_type(PDict) ->
-    case keyfind(process_name, PDict) of
-        {value, {rabbit_mirror_queue_slave, _}} -> slave;
-        _                                       -> master
-    end.
-
 conn_type(PDict) ->
     case keyfind(process_name, PDict) of
         {value, {rabbit_reader,  _}} -> reader;
         {value, {rabbit_writer,  _}} -> writer;
         {value, {rabbit_channel, _}} -> channel;
         _                            -> other
-    end.
-
-ra_type(PDict) ->
-    case keyfind('$rabbit_vm_category', PDict) of
-        {value, rabbit_stream_coordinator} -> stream;
-        _                                  -> quorum
     end.
 
 %%----------------------------------------------------------------------------

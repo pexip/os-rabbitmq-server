@@ -2,7 +2,7 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2015, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc
 %%%
 %%% @end
@@ -56,8 +56,8 @@ end).
 block_decrypt(Cipher, Key, CipherText)
 		when is_binary(CipherText) ->
 	case block_cipher(Cipher) of
-		{crypto, aes_ecb} ->
-			<< << (jose_crypto_compat:crypto_one_time(aes_128_ecb, Key, Block, false))/binary >> || << Block:128/bitstring >> <= CipherText >>;
+		{crypto, BlockCipher} ->
+			jose_crypto_compat:crypto_one_time(BlockCipher, Key, CipherText, false);
 		{Module, BlockCipher} ->
 			Module:block_decrypt(BlockCipher, Key, CipherText)
 	end.
@@ -65,32 +65,48 @@ block_decrypt(Cipher, Key, CipherText)
 block_encrypt(Cipher, Key, PlainText)
 		when is_binary(PlainText) ->
 	case block_cipher(Cipher) of
-		{crypto, aes_ecb} ->
-			<< << (jose_crypto_compat:crypto_one_time(aes_128_ecb, Key, Block, true))/binary >> || << Block:128/bitstring >> <= PlainText >>;
+		{crypto, BlockCipher} ->
+			jose_crypto_compat:crypto_one_time(BlockCipher, Key, PlainText, true);
 		{Module, BlockCipher} ->
 			Module:block_encrypt(BlockCipher, Key, PlainText)
 	end.
 
 block_decrypt(Cipher, Key, IV, CipherText)
 		when is_binary(CipherText) ->
-	{Module, BlockCipher} = block_cipher(Cipher),
-	Module:block_decrypt(BlockCipher, Key, IV, CipherText);
+	case block_cipher(Cipher) of
+		{crypto, BlockCipher} ->
+			jose_crypto_compat:crypto_one_time(BlockCipher, Key, IV, CipherText, false);
+		{Module, BlockCipher} ->
+			Module:block_decrypt(BlockCipher, Key, IV, CipherText)
+	end;
 block_decrypt(Cipher, Key, IV, {AAD, CipherText, CipherTag})
 		when is_binary(AAD)
 		andalso is_binary(CipherText)
 		andalso is_binary(CipherTag) ->
-	{Module, BlockCipher} = block_cipher(Cipher),
-	Module:block_decrypt(BlockCipher, Key, IV, {AAD, CipherText, CipherTag}).
+	case block_cipher(Cipher) of
+		{crypto, BlockCipher} ->
+			jose_crypto_compat:crypto_one_time(BlockCipher, Key, IV, {AAD, CipherText, CipherTag}, false);
+		{Module, BlockCipher} ->
+			Module:block_decrypt(BlockCipher, Key, IV, {AAD, CipherText, CipherTag})
+	end.
 
 block_encrypt(Cipher, Key, IV, PlainText)
 		when is_binary(PlainText) ->
-	{Module, BlockCipher} = block_cipher(Cipher),
-	Module:block_encrypt(BlockCipher, Key, IV, PlainText);
+	case block_cipher(Cipher) of
+		{crypto, BlockCipher} ->
+			jose_crypto_compat:crypto_one_time(BlockCipher, Key, IV, PlainText, true);
+		{Module, BlockCipher} ->
+			Module:block_encrypt(BlockCipher, Key, IV, PlainText)
+	end;
 block_encrypt(Cipher, Key, IV, {AAD, PlainText})
 		when is_binary(AAD)
 		andalso is_binary(PlainText) ->
-	{Module, BlockCipher} = block_cipher(Cipher),
-	Module:block_encrypt(BlockCipher, Key, IV, {AAD, PlainText}).
+	case block_cipher(Cipher) of
+		{crypto, BlockCipher} ->
+			jose_crypto_compat:crypto_one_time(BlockCipher, Key, IV, {AAD, PlainText}, true);
+		{Module, BlockCipher} ->
+			Module:block_encrypt(BlockCipher, Key, IV, {AAD, PlainText})
+	end.
 
 %%====================================================================
 %% Public Key API functions
@@ -278,6 +294,15 @@ supports() ->
 		<<"ECDH-ES+A256KW">>,
 		{<<"ECDH-ES+C20PKW">>, ciphers, {chacha20_poly1305, 256}},
 		{<<"ECDH-ES+XC20PKW">>, ciphers, {xchacha20_poly1305, 256}},
+		<<"ECDH-SS">>,
+		{<<"ECDH-SS+A128GCMKW">>, ciphers, {aes_gcm, 128}},
+		{<<"ECDH-SS+A192GCMKW">>, ciphers, {aes_gcm, 192}},
+		{<<"ECDH-SS+A256GCMKW">>, ciphers, {aes_gcm, 256}},
+		<<"ECDH-SS+A128KW">>,
+		<<"ECDH-SS+A192KW">>,
+		<<"ECDH-SS+A256KW">>,
+		{<<"ECDH-SS+C20PKW">>, ciphers, {chacha20_poly1305, 256}},
+		{<<"ECDH-SS+XC20PKW">>, ciphers, {xchacha20_poly1305, 256}},
 		{<<"PBES2-HS256+A128GCMKW">>, ciphers, {aes_gcm, 128}},
 		{<<"PBES2-HS384+A192GCMKW">>, ciphers, {aes_gcm, 192}},
 		{<<"PBES2-HS512+A256GCMKW">>, ciphers, {aes_gcm, 256}},
@@ -324,7 +349,9 @@ supports() ->
 		{<<"Ed25519ph">>, public_keys, ed25519ph},
 		{<<"Ed448">>, public_keys, ed448},
 		{<<"Ed448ph">>, public_keys, ed448ph},
+		{<<"EdDSA">>, public_keys, ed25519},
 		{<<"ES256">>, public_keys, ecdsa},
+		{<<"ES256K">>, public_keys, ecdsa},
 		{<<"ES384">>, public_keys, ecdsa},
 		{<<"ES512">>, public_keys, ecdsa},
 		<<"HS256">>,
@@ -334,6 +361,7 @@ supports() ->
 		{<<"PS384">>, rsa_sign, rsa_pkcs1_pss_padding},
 		{<<"PS512">>, rsa_sign, rsa_pkcs1_pss_padding},
 		{<<"Poly1305">>, hashs, poly1305},
+		{<<"RS1">>, rsa_sign, rsa_pkcs1_padding},
 		{<<"RS256">>, rsa_sign, rsa_pkcs1_padding},
 		{<<"RS384">>, rsa_sign, rsa_pkcs1_padding},
 		{<<"RS512">>, rsa_sign, rsa_pkcs1_padding},
@@ -352,7 +380,7 @@ supports() ->
 	].
 
 unsecured_signing() ->
-	application:get_env(jose, unsecured_signing, false).
+	jose:unsecured_signing().
 
 unsecured_signing(Boolean) when is_boolean(Boolean) ->
 	application:set_env(jose, unsecured_signing, Boolean),

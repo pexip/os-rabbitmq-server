@@ -2,14 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_federation_parameters).
 -behaviour(rabbit_runtime_parameter).
 -behaviour(rabbit_policy_validator).
-
--include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([validate/5, notify/5, notify_clear/4]).
 -export([register/0, unregister/0, validate_policy/1, adjust/1]).
@@ -54,7 +52,7 @@ validate(_VHost, <<"federation-upstream">>, Name, Term0, _User) ->
             shared_validation()], Term);
 
 validate(_VHost, _Component, Name, _Term, _User) ->
-    {error, "name not recognised: ~p", [Name]}.
+    {error, "name not recognised: ~tp", [Name]}.
 
 notify(_VHost, <<"federation-upstream-set">>, Name, _Term, _Username) ->
     adjust({upstream_set, Name});
@@ -89,7 +87,8 @@ shared_validation() ->
                               ['no-ack', 'on-publish', 'on-confirm']), optional},
      {<<"resource-cleanup-mode">>, rabbit_parameter_validation:enum(
                               ['default', 'never']), optional},
-     {<<"ha-policy">>,      fun rabbit_parameter_validation:binary/2, optional},
+     {<<"queue-type">>,       rabbit_parameter_validation:enum(
+                              ['classic', 'quorum']), optional},
      {<<"bind-nowait">>,    fun rabbit_parameter_validation:boolean/2, optional},
      {<<"channel-use-mode">>, rabbit_parameter_validation:enum(
                               ['multiple', 'single']), optional}].
@@ -98,7 +97,7 @@ validate_uri(Name, Term) when is_binary(Term) ->
     case rabbit_parameter_validation:binary(Name, Term) of
         ok -> case amqp_uri:parse(binary_to_list(Term)) of
                   {ok, _}    -> ok;
-                  {error, E} -> {error, "\"~s\" not a valid URI: ~p", [Term, E]}
+                  {error, E} -> {error, "\"~ts\" not a valid URI: ~tp", [Term, E]}
               end;
         E  -> E
     end;
@@ -119,23 +118,23 @@ validate_policy([{<<"federation-upstream-set">>, Value}])
   when is_binary(Value) ->
     ok;
 validate_policy([{<<"federation-upstream-set">>, Value}]) ->
-    {error, "~p is not a valid federation upstream set name", [Value]};
+    {error, "~tp is not a valid federation upstream set name", [Value]};
 
 validate_policy([{<<"federation-upstream-pattern">>, Value}])
   when is_binary(Value) ->
     case re:compile(Value) of
         {ok, _}         -> ok;
-        {error, Reason} -> {error, "could not compile pattern ~s to a regular expression. "
-                                   "Error: ~p", [Value, Reason]}
+        {error, Reason} -> {error, "could not compile pattern ~ts to a regular expression. "
+                                   "Error: ~tp", [Value, Reason]}
     end;
 validate_policy([{<<"federation-upstream-pattern">>, Value}]) ->
-    {error, "~p is not a valid federation upstream pattern name", [Value]};
+    {error, "~tp is not a valid federation upstream pattern name", [Value]};
 
 validate_policy([{<<"federation-upstream">>, Value}])
   when is_binary(Value) ->
     ok;
 validate_policy([{<<"federation-upstream">>, Value}]) ->
-    {error, "~p is not a valid federation upstream name", [Value]};
+    {error, "~tp is not a valid federation upstream name", [Value]};
 
 validate_policy(L) when length(L) >= 2 ->
     {error, "cannot specify federation-upstream, federation-upstream-set "

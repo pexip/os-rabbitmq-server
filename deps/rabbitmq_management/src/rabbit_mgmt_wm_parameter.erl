@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_parameter).
@@ -40,8 +40,7 @@ resource_exists(ReqData, Context) ->
      end, ReqData, Context}.
 
 to_json(ReqData, Context) ->
-    rabbit_mgmt_util:reply(rabbit_mgmt_format:parameter(
-        rabbit_mgmt_wm_parameters:fix_shovel_publish_properties(parameter(ReqData))),
+    rabbit_mgmt_util:reply(rabbit_mgmt_format:parameter(parameter(ReqData)),
                            ReqData, Context).
 
 accept_content(ReqData0, Context = #context{user = User}) ->
@@ -71,8 +70,18 @@ accept_content(ReqData0, Context = #context{user = User}) ->
     end.
 
 delete_resource(ReqData, Context = #context{user = #user{username = Username}}) ->
-    ok = rabbit_runtime_parameters:clear(
-           rabbit_mgmt_util:vhost(ReqData), component(ReqData), name(ReqData), Username),
+    VHostName = rabbit_mgmt_util:vhost(ReqData),
+    Comp = component(ReqData),
+    Name = name(ReqData),
+    if
+        VHostName =/= not_found andalso
+        Comp =/= none andalso
+        Name =/= none ->
+            ok = rabbit_runtime_parameters:clear(
+                   VHostName, Comp, Name, Username);
+        true ->
+            ok
+    end,
     {true, ReqData, Context}.
 
 is_authorized(ReqData, Context) ->
@@ -81,8 +90,17 @@ is_authorized(ReqData, Context) ->
 %%--------------------------------------------------------------------
 
 parameter(ReqData) ->
-    rabbit_runtime_parameters:lookup(
-      rabbit_mgmt_util:vhost(ReqData), component(ReqData), name(ReqData)).
+    VHostName = rabbit_mgmt_util:vhost(ReqData),
+    Comp = component(ReqData),
+    Name = name(ReqData),
+    if
+        VHostName =/= not_found andalso
+        Comp =/= none andalso
+        Name =/= none ->
+            rabbit_runtime_parameters:lookup(VHostName, Comp, Name);
+        true ->
+            not_found
+    end.
 
 component(ReqData) -> rabbit_mgmt_util:id(component, ReqData).
 name(ReqData)      -> rabbit_mgmt_util:id(name, ReqData).

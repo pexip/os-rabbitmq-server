@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2016-2022 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 defmodule RabbitMQ.CLI.Core.DocGuide.Macros do
   @moduledoc """
@@ -18,7 +18,7 @@ defmodule RabbitMQ.CLI.Core.DocGuide.Macros do
 
     quote do
       def unquote(fn_name)() do
-        unquote("https://#{domain}/#{path_segment}.html")
+        unquote("https://#{domain}/docs/#{path_segment}/")
       end
     end
   end
@@ -47,21 +47,23 @@ defmodule RabbitMQ.CLI.Core.DocGuide do
   Macros.defguide("erlang_versions", path_segment: "which-erlang")
   Macros.defguide("feature_flags")
   Macros.defguide("firehose")
-  Macros.defguide("mirroring", path_segment: "ha")
   Macros.defguide("logging")
   Macros.defguide("management")
   Macros.defguide("memory_use")
   Macros.defguide("monitoring")
   Macros.defguide("networking")
   Macros.defguide("parameters")
-  Macros.defguide("publishers")
+  Macros.defguide("passwords")
   Macros.defguide("plugins")
+  Macros.defguide("prometheus")
+  Macros.defguide("publishers")
   Macros.defguide("queues")
   Macros.defguide("quorum_queues")
+  Macros.defguide("stream_plugin", path_segment: "stream")
   Macros.defguide("streams")
   Macros.defguide("runtime_tuning", path_segment: "runtime")
   Macros.defguide("tls", path_segment: "ssl")
   Macros.defguide("troubleshooting")
-  Macros.defguide("virtual_hosts", path_segments: "vhosts")
+  Macros.defguide("virtual_hosts", path_segment: "vhosts")
   Macros.defguide("upgrade")
 end

@@ -2,12 +2,10 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_authz_backend).
-
--include("rabbit.hrl").
 
 %% Check that a user can log in, when this backend is being used for
 %% authorisation only. Authentication has already taken place
@@ -50,7 +48,7 @@
 %%     Something went wrong. Log and die.
 -callback check_resource_access(rabbit_types:auth_user(),
                                 rabbit_types:r(atom()),
-                                rabbit_access_control:permission_atom(),
+                                rabbit_types:permission_atom(),
                                 rabbit_types:authz_context()) ->
     boolean() | {'error', any()}.
 
@@ -63,12 +61,9 @@
 %%     Something went wrong. Log and die.
 -callback check_topic_access(rabbit_types:auth_user(),
     rabbit_types:r(atom()),
-    rabbit_access_control:permission_atom(),
+    rabbit_types:permission_atom(),
     rabbit_types:topic_access_context()) ->
     boolean() | {'error', any()}.
-
-%% Returns true for backends that support state or credential expiration (e.g. use JWTs).
--callback state_can_expire() -> boolean().
 
 %% Updates backend state that has expired.
 %%
@@ -84,5 +79,15 @@
     {'ok', rabbit_types:auth_user()} |
     {'refused', string(), [any()]} |
     {'error', any()}.
+
+%% Get expiry timestamp for the user.
+%%
+%% Possible responses:
+%% never
+%%     The user token/credentials never expire.
+%% Timestamp
+%%     The expiry time (POSIX) in seconds of the token/credentials.
+-callback expiry_timestamp(AuthUser :: rabbit_types:auth_user()) ->
+    integer() | never.
 
 -optional_callbacks([update_state/2]).

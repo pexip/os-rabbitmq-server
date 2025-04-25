@@ -2,9 +2,9 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
--type 'maybe'(T) :: undefined | T.
+-type option(T) :: undefined | T.
 
 %%
 %% Most of the records here are covered on Figure 2
@@ -39,7 +39,25 @@
 %% after node restart). Pids are not stable in this sense.
 -type ra_server_id() :: {Name :: atom(), Node :: node()}.
 
--type ra_peer_status() :: normal | {sending_snapshot, pid()} | suspended.
+%% Specifies server configuration for a new cluster member.
+%% Subset of  ra_server:ra_server_config().
+%% Both `ra:add_member` and `ra:start_server` must be called with the same values.
+-type ra_new_server() :: #{id := ra_server_id(),
+                           % Defaults to `voter` if absent.
+                           membership => ra_membership(),
+                           % Required for `promotable` in the above.
+                           uid => ra_uid()}.
+
+-type ra_peer_status() :: normal |
+                          {sending_snapshot, pid()} |
+                          suspended |
+                          disconnected.
+
+-type ra_membership() :: voter | promotable | non_voter | unknown.
+
+-type ra_voter_status() :: #{membership => ra_membership(),
+                             uid => ra_uid(),
+                             target => ra_index()}.
 
 -type ra_peer_state() :: #{next_index := non_neg_integer(),
                            match_index := non_neg_integer(),
@@ -47,13 +65,19 @@
                            % the commit index last sent
                            % used for evaluating pipeline status
                            commit_index_sent := non_neg_integer(),
+                           %% Whether the peer is part of the consensus.
+                           %% Defaults to "yes" if absent.
+                           voter_status => ra_voter_status(),
                            %% indicates that a snapshot is being sent
                            %% to the peer
                            status := ra_peer_status()}.
 
 -type ra_cluster() :: #{ra_server_id() => ra_peer_state()}.
 
--type ra_cluster_servers() :: [ra_server_id()].
+%% Dehydrated cluster:
+-type ra_cluster_servers() :: [ra_server_id()].  % Deprecated
+-type ra_peer_snapshot() :: #{voter_status => ra_voter_status()}.
+-type ra_cluster_snapshot() :: #{ra_server_id() => ra_peer_snapshot()}.
 
 %% represent a unique entry in the ra log
 -type log_entry() :: {ra_index(), ra_term(), term()}.
@@ -62,9 +86,12 @@
 
 -type consistent_query_ref() :: {From :: term(), Query :: ra:query_fun(), ConmmitIndex :: ra_index()}.
 
--type safe_call_ret(T) :: timeout | {error, noproc | nodedown} | T.
+-type safe_call_ret(T) :: timeout | {error, noproc | nodedown | shutdown} | T.
 
 -type states() :: leader | follower | candidate | await_condition.
+
+%% A member of the cluster from which replies should be sent.
+-type ra_reply_from() :: leader | local | {member, ra_server_id()}.
 
 -define(RA_PROTO_VERSION, 1).
 %% the protocol version should be incremented whenever extensions need to be
@@ -132,7 +159,7 @@
 
 -type snapshot_meta() :: #{index := ra_index(),
                            term := ra_term(),
-                           cluster := ra_cluster_servers(),
+                           cluster := ra_cluster_snapshot(),
                            machine_version := ra_machine:version()}.
 
 -record(install_snapshot_rpc,
@@ -163,12 +190,17 @@
 %% WAL defaults
 -define(WAL_DEFAULT_MAX_SIZE_BYTES, 256 * 1000 * 1000).
 -define(WAL_DEFAULT_MAX_BATCH_SIZE, 8192).
+-define(MIN_BIN_VHEAP_SIZE, 46422).
+-define(MIN_HEAP_SIZE, 233).
 %% define a minimum allowable wal size. If anyone tries to set a really small
 %% size that is smaller than the logical block size the pre-allocation code may
 %% fail
 -define(WAL_MIN_SIZE, 65536).
 %% The size of each WAL file chunk that is processed at a time during recovery
 -define(WAL_RECOVERY_CHUNK_SIZE, 33554432).
+%% segment defaults
+-define(SEGMENT_MAX_ENTRIES, 4096).
+-define(SEGMENT_MAX_PENDING, 1024).
 
 %% logging shim
 -define(DEBUG_IF(Bool, Fmt, Args),
@@ -199,6 +231,8 @@
 
 -define(DEFAULT_SNAPSHOT_MODULE, ra_log_snapshot).
 
+-define(DEFAULT_MAX_CHECKPOINTS, 10).
+
 -define(RA_LOG_COUNTER_FIELDS,
         [{write_ops, ?C_RA_LOG_WRITE_OPS, counter,
           "Total number of write ops"},
@@ -220,6 +254,15 @@
           "Total number of snapshots written"},
          {snapshot_installed, ?C_RA_LOG_SNAPSHOTS_INSTALLED, counter,
           "Total number of snapshots installed"},
+         {snapshot_bytes_written, ?C_RA_LOG_SNAPSHOT_BYTES_WRITTEN, counter,
+          "Number of snapshot bytes written (not installed)"},
+         {open_segments, ?C_RA_LOG_OPEN_SEGMENTS, gauge, "Number of open segments"},
+         {checkpoints_written, ?C_RA_LOG_CHECKPOINTS_WRITTEN, counter,
+          "Total number of checkpoints written"},
+         {checkpoint_bytes_written, ?C_RA_LOG_CHECKPOINT_BYTES_WRITTEN, counter,
+          "Number of checkpoint bytes written"},
+         {checkpoints_promoted, ?C_RA_LOG_CHECKPOINTS_PROMOTED, counter,
+          "Number of checkpoints promoted to snapshots"},
          {reserved_1, ?C_RA_LOG_RESERVED, counter, "Reserved counter"}
          ]).
 -define(C_RA_LOG_WRITE_OPS, 1).
@@ -232,7 +275,12 @@
 -define(C_RA_LOG_FETCH_TERM, 8).
 -define(C_RA_LOG_SNAPSHOTS_WRITTEN, 9).
 -define(C_RA_LOG_SNAPSHOTS_INSTALLED, 10).
--define(C_RA_LOG_RESERVED, 11).
+-define(C_RA_LOG_SNAPSHOT_BYTES_WRITTEN, 11).
+-define(C_RA_LOG_OPEN_SEGMENTS, 12).
+-define(C_RA_LOG_CHECKPOINTS_WRITTEN, 13).
+-define(C_RA_LOG_CHECKPOINT_BYTES_WRITTEN, 14).
+-define(C_RA_LOG_CHECKPOINTS_PROMOTED, 15).
+-define(C_RA_LOG_RESERVED, 16).
 
 -define(C_RA_SRV_AER_RECEIVED_FOLLOWER, ?C_RA_LOG_RESERVED + 1).
 -define(C_RA_SRV_AER_REPLIES_SUCCESS, ?C_RA_LOG_RESERVED + 2).
@@ -253,6 +301,9 @@
 -define(C_RA_SRV_AER_RECEIVED_FOLLOWER_EMPTY, ?C_RA_LOG_RESERVED + 17).
 -define(C_RA_SRV_TERM_AND_VOTED_FOR_UPDATES, ?C_RA_LOG_RESERVED + 18).
 -define(C_RA_SRV_LOCAL_QUERIES, ?C_RA_LOG_RESERVED + 19).
+-define(C_RA_SRV_INVALID_REPLY_MODE_COMMANDS, ?C_RA_LOG_RESERVED + 20).
+-define(C_RA_SRV_CHECKPOINTS, ?C_RA_LOG_RESERVED + 21).
+-define(C_RA_SRV_RESERVED, ?C_RA_LOG_RESERVED + 22).
 
 
 -define(RA_SRV_COUNTER_FIELDS,
@@ -294,7 +345,48 @@
          {term_and_voted_for_updates, ?C_RA_SRV_TERM_AND_VOTED_FOR_UPDATES, counter,
           "Total number of updates of term and voted for"},
          {local_queries, ?C_RA_SRV_LOCAL_QUERIES, counter,
-          "Total number of local queries"}
+          "Total number of local queries"},
+         {invalid_reply_mode_commands, ?C_RA_SRV_INVALID_REPLY_MODE_COMMANDS, counter,
+          "Total number of commands received with an invalid reply-mode"},
+         {checkpoints, ?C_RA_SRV_CHECKPOINTS, counter,
+          "The number of checkpoint effects executed"},
+         {reserved_2, ?C_RA_SRV_RESERVED, counter, "Reserved counter"}
          ]).
 
--define(RA_COUNTER_FIELDS, ?RA_LOG_COUNTER_FIELDS ++ ?RA_SRV_COUNTER_FIELDS).
+-define(C_RA_SVR_METRIC_LAST_APPLIED, ?C_RA_SRV_RESERVED + 1).
+-define(C_RA_SVR_METRIC_COMMIT_INDEX, ?C_RA_SRV_RESERVED + 2).
+-define(C_RA_SVR_METRIC_SNAPSHOT_INDEX, ?C_RA_SRV_RESERVED + 3).
+-define(C_RA_SVR_METRIC_LAST_INDEX, ?C_RA_SRV_RESERVED + 4).
+-define(C_RA_SVR_METRIC_LAST_WRITTEN_INDEX, ?C_RA_SRV_RESERVED + 5).
+-define(C_RA_SVR_METRIC_COMMIT_LATENCY, ?C_RA_SRV_RESERVED + 6).
+-define(C_RA_SVR_METRIC_TERM, ?C_RA_SRV_RESERVED + 7).
+-define(C_RA_SVR_METRIC_CHECKPOINT_INDEX, ?C_RA_SRV_RESERVED + 8).
+-define(C_RA_SVR_METRIC_EFFECTIVE_MACHINE_VERSION, ?C_RA_SRV_RESERVED + 9).
+
+-define(RA_SRV_METRICS_COUNTER_FIELDS,
+        [
+         {last_applied, ?C_RA_SVR_METRIC_LAST_APPLIED, gauge,
+          "The last applied index. Can go backwards if a ra server is restarted."},
+         {commit_index, ?C_RA_SVR_METRIC_COMMIT_INDEX, counter,
+          "The current commit index."},
+         {snapshot_index, ?C_RA_SVR_METRIC_SNAPSHOT_INDEX, counter,
+          "The current snapshot index."},
+         {last_index, ?C_RA_SVR_METRIC_LAST_INDEX, counter,
+          "The last index of the log."},
+         {last_written_index, ?C_RA_SVR_METRIC_LAST_WRITTEN_INDEX, counter,
+          "The last fully written and fsynced index of the log."},
+         {commit_latency, ?C_RA_SVR_METRIC_COMMIT_LATENCY, gauge,
+          "Approximate time taken from an entry being written to the log until it is committed."},
+         {term, ?C_RA_SVR_METRIC_TERM, counter, "The current term."},
+         {checkpoint_index, ?C_RA_SVR_METRIC_CHECKPOINT_INDEX, counter,
+          "The current checkpoint index."},
+         {effective_machine_version, ?C_RA_SVR_METRIC_EFFECTIVE_MACHINE_VERSION,
+          gauge, "The current effective version number of the machine."}
+        ]).
+
+-define(RA_COUNTER_FIELDS,
+        ?RA_LOG_COUNTER_FIELDS ++
+        ?RA_SRV_COUNTER_FIELDS ++
+        ?RA_SRV_METRICS_COUNTER_FIELDS).
+
+-define(FIELDSPEC_KEY, ra_seshat_fields_spec).

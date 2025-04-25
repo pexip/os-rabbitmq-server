@@ -39,21 +39,20 @@ endef
 # Release artifacts are put in $(PACKAGES_DIR).
 PACKAGES_DIR ?= $(abspath PACKAGES)
 
-LOCAL_DEPS = xmerl
-DEPS = rabbit_common
+LOCAL_DEPS = xmerl ssl public_key
+DEPS = rabbit_common credentials_obfuscation
 TEST_DEPS = rabbitmq_ct_helpers rabbit meck
 
-DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-test.mk
-DEP_PLUGINS = rabbit_common/mk/rabbitmq-build.mk \
-	      rabbit_common/mk/rabbitmq-hexpm.mk \
-	      rabbit_common/mk/rabbitmq-dist.mk \
-	      rabbit_common/mk/rabbitmq-run.mk \
-	      rabbit_common/mk/rabbitmq-test.mk \
-	      rabbit_common/mk/rabbitmq-tools.mk
+DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
+# We do not depend on rabbit therefore can't run the broker;
+# however we can run a test broker in the test suites.
+DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk \
+	      rabbit_common/mk/rabbitmq-hexpm.mk
 
 PLT_APPS = ssl public_key
 
-include ../../rabbitmq-components.mk
-include ../../erlang.mk
+include rabbitmq-components.mk
+include erlang.mk
 
-HEX_TARBALL_FILES += $(DEPS_DIR)/../rabbitmq-components.mk
+HEX_TARBALL_FILES += rabbitmq-components.mk \
+		     git-revisions.txt

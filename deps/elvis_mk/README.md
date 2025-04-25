@@ -1,5 +1,5 @@
 # elvis.mk
-3rd party elrang.mk plug-in for Elvis
+3rd party erlang.mk plug-in for Elvis
 
 ## Contact Us
 If you find any **bugs** or have a **problem** while using this library, please
@@ -16,7 +16,7 @@ following in your Makefile:
 ```make
 BUILD_DEPS = elvis_mk
 
-dep_elvis_mk = git https://github.com/inaka/elvis.mk.git 1.1.1
+dep_elvis_mk = git https://github.com/inaka/elvis.mk.git 1.1.2
 
 DEP_PLUGINS = elvis_mk
 ```

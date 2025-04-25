@@ -2,13 +2,14 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 
 %% @hidden
 -module(osiris_writer).
 
 -behaviour(gen_batch_server).
+-behaviour(osiris_member).
 
 -include("osiris.hrl").
 
@@ -18,6 +19,7 @@
          init_data_reader/3,
          register_data_listener/2,
          ack/2,
+         write/2,
          write/5,
          write_tracking/3,
          read_tracking/3,
@@ -32,12 +34,19 @@
          stop/1,
          delete/1]).
 
+%% osiris_member impl
+-export([start/2,
+         stop/2,
+         delete/2]).
+
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 2).
+-define(C_EPOCH, ?C_NUM_LOG_FIELDS + 3).
 -define(ADD_COUNTER_FIELDS,
         [
          {committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
-         {readers, ?C_READERS, counter, "Number of readers"}
+         {readers, ?C_READERS, counter, "Number of readers"},
+         {epoch, ?C_EPOCH, counter, "Current epoch"}
         ]
        ).
 
@@ -47,11 +56,10 @@
 %% manages incoming max index
 
 -record(cfg,
-        {name :: string(),
+        {name :: osiris:name(),
          reference :: term(),
-         offset_ref :: atomics:atomics_ref(),
          replicas = [] :: [node()],
-         directory :: file:filename(),
+         directory :: file:filename_all(),
          counter :: counters:counters_ref(),
          event_formatter :: undefined | mfa()}).
 -record(?MODULE,
@@ -71,22 +79,38 @@
 
 -export_type([state/0]).
 
-start(Config = #{name := Name, leader_node := Leader}) ->
-    supervisor:start_child({?SUP, Leader},
-                           #{id => Name,
+-spec start(node(), Config :: osiris:config()) ->
+    supervisor:startchild_ret().
+start(Node, #{name := Name, leader_node := Node} = Config) ->
+    supervisor:start_child({?SUP, Node},
+                           #{id => osiris_util:normalise_name(Name),
                              start => {?MODULE, start_link, [Config]},
                              restart => temporary,
                              shutdown => 5000,
                              type => worker}).
 
-stop(#{name := Name, leader_node := Node}) ->
-    ?SUP:stop_child(Node, Name).
+-spec stop(node(), osiris:config()) ->
+    ok | {error, not_found}.
+stop(Node, #{leader_node := Node} = Config) ->
+    ?SUP:stop_child(Node, Config).
 
+-spec delete(node(), osiris:config()) ->
+    ok | {error, term()}.
+delete(Node, #{leader_node := Node} = Config) ->
+    ?SUP:delete_child(Node, Config).
+
+%% backwards compat
+start(#{leader_node := LeaderNode} = Config) ->
+    start(LeaderNode, Config).
+%% backwards compat
+stop(#{leader_node := Node} = Config) ->
+    stop(Node, Config).
+%% backwards compat
 delete(#{leader_node := Node} = Config) ->
     ?SUP:delete_child(Node, Config).
 
 -spec start_link(Config :: map()) ->
-                    {ok, pid()} | {error, {already_started, pid()}}.
+    {ok, pid()} | {error, {already_started, pid()}}.
 start_link(Config) ->
     Mod = ?MODULE,
     Opts = [{reversed_batch, true}],
@@ -95,7 +119,7 @@ start_link(Config) ->
 overview(Pid) when node(Pid) == node() ->
     case erlang:is_process_alive(Pid) of
         true ->
-            #{dir := Dir} = gen_batch_server:call(Pid, get_reader_context),
+            #{dir := Dir} = osiris_util:get_reader_context(Pid),
             {ok, osiris_log:overview(Dir)};
         false ->
             {error, no_process}
@@ -103,9 +127,14 @@ overview(Pid) when node(Pid) == node() ->
 
 init_data_reader(Pid, TailInfo, Config)
   when node(Pid) == node() ->
-    Ctx0 = gen_batch_server:call(Pid, get_reader_context),
-    Ctx = maps:merge(Ctx0, Config),
-    osiris_log:init_data_reader(TailInfo, Ctx).
+    case erlang:is_process_alive(Pid) of
+        true ->
+            Ctx0 = osiris_util:get_reader_context(Pid),
+            Ctx = maps:merge(Ctx0, Config),
+            osiris_log:init_data_reader(TailInfo, Ctx);
+        false ->
+            {error, no_process}
+    end.
 
 register_data_listener(Pid, Offset) ->
     ok =
@@ -116,12 +145,16 @@ ack(LeaderPid, {Offset, _} = OffsetTs)
   when is_integer(Offset) andalso Offset >= 0 ->
     gen_batch_server:cast(LeaderPid, {ack, node(), OffsetTs}).
 
+-spec write(Pid :: pid(), Data :: osiris:data()) -> ok.
+write(Pid, Data)
+    when is_pid(Pid) ->
+    gen_batch_server:cast(Pid, {write, Data}).
+
 -spec write(Pid :: pid(),
             Sender :: pid(),
             WriterId :: binary() | undefined,
             CorrOrSeq :: non_neg_integer() | term(),
-            Data :: osiris:data()) ->
-               ok.
+            Data :: osiris:data()) -> ok.
 write(Pid, Sender, WriterId, Corr, Data)
     when is_pid(Pid) andalso is_pid(Sender) ->
     gen_batch_server:cast(Pid, {write, Sender, WriterId, Corr, Data}).
@@ -148,30 +181,40 @@ query_replication_state(Pid) when is_pid(Pid) ->
 
 -spec init(osiris:config()) ->
     {ok, undefined, {continue, osiris:config()}}.
-init(Config) ->
-    {ok, undefined, {continue, Config}}.
+init(#{name := Name0,
+       reference := ExtRef} = Config0) ->
+    %% augment config
+    Name = osiris_util:normalise_name(Name0),
+    Shared = osiris_log_shared:new(),
+    Dir = osiris_log:directory(Config0),
+    CntName = {?MODULE, ExtRef},
+    Config = Config0#{name => Name,
+                      dir => Dir,
+                      shared => Shared,
+                      counter_spec => {CntName, ?ADD_COUNTER_FIELDS}},
+    CntRef = osiris_log:make_counter(Config),
+    {ok, undefined, {continue, Config#{counter => CntRef}}}.
 
 handle_continue(#{name := Name,
+                  dir := Dir,
                   epoch := Epoch,
                   reference := ExtRef,
+                  shared := Shared,
+                  counter := CntRef,
                   replica_nodes := Replicas} =
                 Config, undefined)
-    when is_list(Name) ->
-    Dir = osiris_log:directory(Config),
+  when ?IS_STRING(Name) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
-    ORef = atomics:new(2, [{signed, true}]),
-    atomics:put(ORef, 2, -1),
-    CntName = {?MODULE, ExtRef},
-    Log = osiris_log:init(Config#{dir => Dir,
-                                  first_offset_fun =>
-                                      fun (Fst) ->
-                                              atomics:put(ORef, 2, Fst)
-                                      end,
-                                  counter_spec =>
-                                      {CntName, ?ADD_COUNTER_FIELDS}}),
+    Log = osiris_log:init(Config),
+    %% reader context can only be cached _after_ log init as we need to ensure
+    %% there is at least 1 segment/index pair and also that the log has been
+    %% truncated such that only valid index / segment data remains.
+    osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
+                                     fun(Inc) ->
+                                             counters:add(CntRef, ?C_READERS, Inc)
+                                     end),
     Trk = osiris_log:recover_tracking(Log),
-    CntRef = osiris_log:counters_ref(Log),
     %% should this not be be chunk id rather than last offset?
     LastOffs = osiris_log:next_offset(Log) - 1,
     CommittedOffset =
@@ -184,10 +227,11 @@ handle_continue(#{name := Name,
             _ ->
                 -1
         end,
-    atomics:put(ORef, 1, CommittedOffset),
+    ok = osiris_log:set_committed_chunk_id(Log, CommittedOffset),
     counters:put(CntRef, ?C_COMMITTED_OFFSET, CommittedOffset),
+    counters:put(CntRef, ?C_EPOCH, Epoch),
     EvtFmt = maps:get(event_formatter, Config, undefined),
-    ?INFO("osiris_writer:init/1: name: ~s last offset: ~b "
+    ?INFO("osiris_writer:init/1: name: ~ts last offset: ~b "
           "committed chunk id: ~b epoch: ~b",
           [Name, LastOffs, CommittedOffset, Epoch]),
     {ok,
@@ -197,7 +241,6 @@ handle_continue(#{name := Name,
                        %% if not provided use the name
                        reference = ExtRef,
                        event_formatter = EvtFmt,
-                       offset_ref = ORef,
                        replicas = Replicas,
                        directory = Dir,
                        counter = CntRef},
@@ -207,7 +250,7 @@ handle_continue(#{name := Name,
               tracking = Trk}}.
 
 handle_batch(Commands,
-             #?MODULE{cfg = #cfg{counter = Cnt, offset_ref = ORef} = Cfg,
+             #?MODULE{cfg = #cfg{counter = Cnt} = Cfg,
                       duplicates = Dupes0,
                       committed_offset = COffs0,
                       tracking = Trk0} =
@@ -260,7 +303,7 @@ handle_batch(Commands,
             State = case COffs > COffs0 of
                         true ->
                             P = State2#?MODULE.pending_corrs,
-                            atomics:put(ORef, 1, COffs),
+                            ok = osiris_log:set_committed_chunk_id(Log, COffs),
                             counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
                             Pending = notify_writers(P, COffs, Cfg),
                             State2#?MODULE{committed_offset = COffs,
@@ -279,8 +322,9 @@ terminate(Reason,
           #?MODULE{log = Log,
                    data_listeners = Listeners,
                    cfg = #cfg{name = Name}}) ->
-    ?INFO("osiris_writer:terminate/2: name ~s reason: ~w",
+    ?INFO("osiris_writer:terminate/2: name ~ts reason: ~w",
           [Name, Reason]),
+    _ = ets:delete(osiris_reader_context_cache, self()),
     ok = osiris_log:close(Log),
     [osiris_replica_reader:stop(Pid) || {Pid, _} <- Listeners],
     ok.
@@ -371,6 +415,9 @@ handle_command({cast, {write, Pid, WriterId, Corr, R}},
              Trk,
              [{ChId, Pid, WriterId, Corr} | Dupes]}
     end;
+handle_command({cast, {write, R}},
+               {#?MODULE{} = State, Records, Replies, Corrs0, Trk, Dupes}) ->
+    {State, [R | Records], Replies, Corrs0, Trk, Dupes};
 handle_command({cast, {write_tracking, TrackingId, TrackingType, TrackingData}},
                {#?MODULE{log = Log} = State, Records, Replies, Corrs, Trk0, Dupes}) ->
     ChunkId = osiris_log:next_offset(Log),
@@ -434,11 +481,11 @@ handle_command({cast, {ack, ReplicaNode, {Offset, _} = OffsetTs}},
     {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command({call, From, get_reader_context},
                {#?MODULE{cfg =
-                             #cfg{offset_ref = ORef,
-                                  reference = Ref,
+                             #cfg{reference = Ref,
                                   name = Name,
                                   directory = Dir,
                                   counter = CntRef},
+                         log = Log,
                          committed_offset = COffs} =
                     State,
                 Records,
@@ -446,12 +493,13 @@ handle_command({call, From, get_reader_context},
                 Corrs,
                 Trk,
                 Dupes}) ->
+    Shared = osiris_log:get_shared(Log),
     Reply =
         {reply, From,
          #{dir => Dir,
            name => Name,
            committed_offset => max(0, COffs),
-           offset_ref => ORef,
+           shared => Shared,
            reference => Ref,
            readers_counter_fun => fun(Inc) -> counters:add(CntRef, ?C_READERS, Inc) end
           }},

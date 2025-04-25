@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_connection_helper_sup).
@@ -16,11 +16,13 @@
 %%
 %% See also rabbit_heartbeat, rabbit_channel_sup_sup, rabbit_queue_collector.
 
--behaviour(supervisor2).
+-behaviour(supervisor).
 
--export([start_link/0]).
--export([start_channel_sup_sup/1,
-         start_queue_collector/2]).
+-export([start_link/1]).
+-export([
+    start_channel_sup_sup/1,
+    start_queue_collector/2
+]).
 
 -export([init/1]).
 
@@ -28,30 +30,38 @@
 
 %%----------------------------------------------------------------------------
 
--spec start_link() -> rabbit_types:ok_pid_or_error().
-
-start_link() ->
-    supervisor2:start_link(?MODULE, []).
+-spec start_link(supervisor:sup_flags()) ->
+    supervisor:startlink_ret().
+start_link(SupFlags) ->
+    supervisor:start_link(?MODULE, SupFlags).
 
 -spec start_channel_sup_sup(pid()) -> rabbit_types:ok_pid_or_error().
 
 start_channel_sup_sup(SupPid) ->
-    supervisor2:start_child(
-          SupPid,
-          {channel_sup_sup, {rabbit_channel_sup_sup, start_link, []},
-           intrinsic, infinity, supervisor, [rabbit_channel_sup_sup]}).
+    ChildSpec = #{id => channel_sup_sup,
+                  start => {rabbit_channel_sup_sup, start_link, []},
+                  restart => transient,
+                  significant => true,
+                  shutdown => infinity,
+                  type => supervisor,
+                  modules => [rabbit_channel_sup_sup]},
+    supervisor:start_child(SupPid, ChildSpec).
 
 -spec start_queue_collector(pid(), rabbit_types:proc_name()) ->
-          rabbit_types:ok_pid_or_error().
+    rabbit_types:ok_pid_or_error().
 
 start_queue_collector(SupPid, Identity) ->
-    supervisor2:start_child(
-      SupPid,
-      {collector, {rabbit_queue_collector, start_link, [Identity]},
-       intrinsic, ?WORKER_WAIT, worker, [rabbit_queue_collector]}).
+    ChildSpec = #{id => collector,
+                  start => {rabbit_queue_collector, start_link, [Identity]},
+                  restart => transient,
+                  significant => true,
+                  shutdown => ?WORKER_WAIT,
+                  type => worker,
+                  modules => [rabbit_queue_collector]},
+    supervisor:start_child(SupPid, ChildSpec).
 
 %%----------------------------------------------------------------------------
 
-init([]) ->
+init(SupFlags) ->
     ?LG_PROCESS_TYPE(connection_helper_sup),
-    {ok, {{one_for_one, 10, 10}, []}}.
+    {ok, {SupFlags, []}}.

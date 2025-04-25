@@ -6,14 +6,13 @@ export DRV_CFLAGS
 ERLANG_ARCH = 64
 export ERLANG_ARCH
 ERLC_OPTS = +debug_info
-export ERLC_OPTS
 
 DEPS += gen_batch_server
 dep_gen_batch_server = hex 0.8.8 gen_batch_server
 DEPS += aten
-dep_aten = hex 0.5.8 aten
+dep_aten = hex 0.6.0 aten
 DEPS += seshat
-dep_seshat = hex 0.3.2 seshat
+dep_seshat = hex 0.6.0 seshat
 
 
 rebar_dep: preprocess pre-deps deps pre-app app
