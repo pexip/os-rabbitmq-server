@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_fifo_v1).
@@ -676,7 +676,6 @@ state_enter(leader, #?STATE{consumers = Cons,
                              enqueuers = Enqs,
                              waiting_consumers = WaitingConsumers,
                              cfg = #cfg{name = Name,
-                                        resource = Resource,
                                         become_leader_handler = BLH},
                              prefix_msgs = {0, [], 0, []}
                             }) ->
@@ -687,8 +686,7 @@ state_enter(leader, #?STATE{consumers = Cons,
     Mons = [{monitor, process, P} || P <- Pids],
     Nots = [{send_msg, P, leader_change, ra_event} || P <- Pids],
     NodeMons = lists:usort([{monitor, node, node(P)} || P <- Pids]),
-    FHReservation = [{mod_call, rabbit_quorum_queue, file_handle_leader_reservation, [Resource]}],
-    Effects = Mons ++ Nots ++ NodeMons ++ FHReservation,
+    Effects = Mons ++ Nots ++ NodeMons,
     case BLH of
         undefined ->
             Effects;
@@ -704,11 +702,7 @@ state_enter(eol, #?STATE{enqueuers = Enqs,
     AllConsumers = maps:merge(Custs, WaitingConsumers1),
     [{send_msg, P, eol, ra_event}
      || P <- maps:keys(maps:merge(Enqs, AllConsumers))] ++
-                   [{aux, eol},
-                    {mod_call, rabbit_quorum_queue, file_handle_release_reservation, []}];
-state_enter(State, #?STATE{cfg = #cfg{resource = _Resource}}) when State =/= leader ->
-    FHReservation = {mod_call, rabbit_quorum_queue, file_handle_other_reservation, []},
-    [FHReservation];
+                   [{aux, eol}];
  state_enter(_, _) ->
     %% catch all as not handling all states
     [].
@@ -861,7 +855,7 @@ eval_gc(Log, #?STATE{cfg = #cfg{resource = QR}} = MacState,
                Mem > ?GC_MEM_LIMIT_B ->
             garbage_collect(),
             {memory, MemAfter} = erlang:process_info(self(), memory),
-            rabbit_log:debug("~s: full GC sweep complete. "
+            rabbit_log:debug("~ts: full GC sweep complete. "
                             "Process memory changed from ~.2fMB to ~.2fMB.",
                             [rabbit_misc:rs(QR), Mem/?MB, MemAfter/?MB]),
             AuxState#aux{gc = Gc#aux_gc{last_raft_idx = Idx}};
@@ -877,7 +871,7 @@ force_eval_gc(Log, #?STATE{cfg = #cfg{resource = QR}},
         true ->
             garbage_collect(),
             {memory, MemAfter} = erlang:process_info(self(), memory),
-            rabbit_log:debug("~s: full GC sweep complete. "
+            rabbit_log:debug("~ts: full GC sweep complete. "
                             "Process memory changed from ~.2fMB to ~.2fMB.",
                              [rabbit_misc:rs(QR), Mem/?MB, MemAfter/?MB]),
             AuxState#aux{gc = Gc#aux_gc{last_raft_idx = Idx}};

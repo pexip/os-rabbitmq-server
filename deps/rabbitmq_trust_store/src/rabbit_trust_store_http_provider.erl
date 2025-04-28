@@ -2,12 +2,10 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_trust_store_http_provider).
-
--include_lib("public_key/include/public_key.hrl").
 
 -behaviour(rabbit_trust_store_certificate_provider).
 
@@ -18,11 +16,11 @@
 -record(http_state,{
     url :: string(),
     http_options :: list(),
-    headers :: httpc:headers()
+    headers :: [{[byte()], binary() | iolist()}]
 }).
 
 list_certs(Config) ->
-    init(Config),
+    _ = init(Config),
     State = init_state(Config),
     list_certs(Config, State).
 
@@ -38,7 +36,7 @@ list_certs(_, #http_state{url = Url,
         {ok, {{_,304, _}, _, _}}  -> no_change;
         {ok, {{_,Code,_}, _, Body}} -> {error, {http_error, Code, Body}};
         {error, Reason} ->
-            rabbit_log:error("Trust store HTTP[S] provider request failed: ~p", [Reason]),
+            rabbit_log:error("Trust store HTTP[S] provider request failed: ~tp", [Reason]),
             {error, Reason}
     end.
 
@@ -67,8 +65,8 @@ join_url(BaseUrl, CertPath)  ->
     string:strip(rabbit_data_coercion:to_list(CertPath), left, $/).
 
 init(Config) ->
-    inets:start(httpc, [{profile, ?PROFILE}]),
-    application:ensure_all_started(ssl),
+    _ = inets:start(httpc, [{profile, ?PROFILE}]),
+    {ok, _} = application:ensure_all_started(ssl),
     Options = proplists:get_value(proxy_options, Config, []),
     httpc:set_options(Options, ?PROFILE).
 
@@ -95,7 +93,7 @@ decode_cert_list(Body) ->
             rabbit_log:error("Trust store failed to decode an HTTP[S] response: JSON parser failed"),
             [];
           _:Error ->
-            rabbit_log:error("Trust store failed to decode an HTTP[S] response: ~p", [Error]),
+            rabbit_log:error("Trust store failed to decode an HTTP[S] response: ~tp", [Error]),
             []
     end.
 

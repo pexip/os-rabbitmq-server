@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 -module(ra_directory).
 
@@ -19,7 +19,8 @@
          pid_of/2,
          uid_of/2,
          overview/1,
-         list_registered/1
+         list_registered/1,
+         is_registered_uid/2
          ]).
 
 -export_type([
@@ -43,9 +44,9 @@ init(System) when is_atom(System) ->
 init(Dir, #{directory := Name,
             directory_rev := NameRev}) ->
     _ = ets:new(Name, [named_table,
-                          public,
-                          {read_concurrency, true}
-                         ]),
+                       public,
+                       {read_concurrency, true}
+                      ]),
     ok = ra_lib:make_dir(Dir),
     Dets = filename:join(Dir, "names.dets"),
     {ok, NameRev} = dets:open_file(NameRev,
@@ -60,17 +61,17 @@ deinit(System) when is_atom(System) ->
 deinit(#{directory := Name,
          directory_rev := NameRev}) ->
     _ = ets:delete(Name),
+    ok = dets:sync(NameRev),
     _ = dets:close(NameRev),
     ok.
 
--spec register_name(ra_system:names() | atom(), ra_uid(), pid(), 'maybe'(pid()), atom(),
+-spec register_name(ra_system:names() | atom(), ra_uid(), pid(), option(pid()), atom(),
                     ra_cluster_name()) -> ok.
 register_name(System, UId, Pid, ParentPid, ServerName, ClusterName)
   when is_atom(System) ->
     register_name(get_names(System), UId, Pid,
                   ParentPid, ServerName, ClusterName);
-register_name(#{
-                directory := Directory,
+register_name(#{directory := Directory,
                 directory_rev := DirRev} = System, UId, Pid, ParentPid,
               ServerName, ClusterName) ->
     true = ets:insert(Directory, {UId, Pid, ParentPid, ServerName,
@@ -78,8 +79,13 @@ register_name(#{
     case uid_of(System, ServerName) of
         undefined ->
             ok = dets:insert(DirRev, {ServerName, UId});
-        _ ->
+        UId ->
             %% no need to insert into dets table if already there
+            ok;
+        OtherUId ->
+            ok = dets:insert(DirRev, {ServerName, UId}),
+            ?WARN("ra server with name ~ts UId ~s replaces prior UId ~s",
+                  [ServerName, UId, OtherUId]),
             ok
     end.
 
@@ -90,10 +96,10 @@ unregister_name(#{directory := Directory,
                   directory_rev := DirRev}, UId) ->
     case ets:take(Directory, UId) of
         [{_, _, _, ServerName, _}] ->
-            _ = ets:take(Directory, UId),
             ok = dets:delete(DirRev, ServerName),
             UId;
         [] ->
+            _ = dets:select_delete(DirRev, [{{'_', UId}, [], [true]}]),
             UId
     end.
 
@@ -131,7 +137,7 @@ where_is_parent(#{directory := Dir}, UId) when is_binary(UId) ->
         [] -> undefined
     end.
 
--spec name_of(atom() | ra_system:names(), ra_uid()) -> 'maybe'(atom()).
+-spec name_of(atom() | ra_system:names(), ra_uid()) -> option(atom()).
 name_of(SystemOrNames, UId) ->
     Tbl = get_name(SystemOrNames),
     case ets:lookup(Tbl, UId) of
@@ -140,7 +146,7 @@ name_of(SystemOrNames, UId) ->
     end.
 
 -spec cluster_name_of(ra_system:names() | atom(), ra_uid()) ->
-    'maybe'(ra_cluster_name()).
+    option(ra_cluster_name()).
 cluster_name_of(SystemOrNames, UId) ->
     Tbl = get_name(SystemOrNames),
     case ets:lookup(Tbl, UId) of
@@ -149,7 +155,7 @@ cluster_name_of(SystemOrNames, UId) ->
     end.
 
 
--spec pid_of(atom() | ra_system:names(), ra_uid()) -> 'maybe'(pid()).
+-spec pid_of(atom() | ra_system:names(), ra_uid()) -> option(pid()).
 pid_of(SystemOrNames, UId) ->
     case ets:lookup(get_name(SystemOrNames), UId) of
         [{_, Pid, _, _, _}] -> Pid;
@@ -171,14 +177,20 @@ overview(System) when is_atom(System) ->
     #{directory := Tbl,
       directory_rev := _TblRev} = get_names(System),
     Dir = ets:tab2list(Tbl),
-    States = maps:from_list(ets:tab2list(ra_state)),
+    Rows = lists:map(fun({K, S, V}) ->
+                             {K, {S, V}}
+                     end,
+                     ets:tab2list(ra_state)),
+    States = maps:from_list(Rows),
     Snaps = maps:from_list(ets:tab2list(ra_log_snapshot_state)),
     lists:foldl(fun ({UId, Pid, Parent, ServerName, ClusterName}, Acc) ->
+                        {S, V} = maps:get(ServerName, States, {undefined, undefined}),
                         Acc#{ServerName =>
                              #{uid => UId,
                                pid => Pid,
                                parent => Parent,
-                               state => maps:get(ServerName, States, undefined),
+                               state => S,
+                               membership => V,
                                cluster_name => ClusterName,
                                snapshot_state => maps:get(UId, Snaps,
                                                           undefined)}}
@@ -188,6 +200,13 @@ overview(System) when is_atom(System) ->
 list_registered(System) when is_atom(System) ->
     Tbl = get_reverse(System),
     dets:select(Tbl, [{'_', [], ['$_']}]).
+
+-spec is_registered_uid(atom(), ra_uid()) -> boolean().
+is_registered_uid(System, UId)
+  when is_atom(System) andalso
+       is_binary(UId) ->
+    Tbl = get_reverse(System),
+    [] =/= dets:select(Tbl, [{{'_', UId}, [], ['$_']}]).
 
 get_name(#{directory := Tbl}) ->
     Tbl;

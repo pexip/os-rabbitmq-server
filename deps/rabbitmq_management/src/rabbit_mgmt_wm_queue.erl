@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_queue).
@@ -14,8 +14,6 @@
 -export([variances/2]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
--include_lib("amqp_client/include/amqp_client.hrl").
-
 %%--------------------------------------------------------------------
 
 init(Req, _State) ->
@@ -50,8 +48,13 @@ to_json(ReqData, Context) ->
                             rabbit_mgmt_format:strip_pids(Q)),
                 rabbit_mgmt_util:reply(ensure_defaults(Payload), ReqData, Context);
             true ->
-                rabbit_mgmt_util:reply(rabbit_mgmt_format:strip_pids(queue(ReqData)),
-                                       ReqData, Context)
+                Q = case rabbit_mgmt_util:enable_queue_totals(ReqData) of
+                    false -> queue(ReqData);
+                    true  -> queue_with_totals(ReqData)
+                end,
+                rabbit_mgmt_util:reply(
+                    rabbit_mgmt_format:strip_pids(Q),
+                    ReqData, Context)
         end
     catch
         {error, invalid_range_parameters, Reason} ->
@@ -66,7 +69,7 @@ accept_content(ReqData, Context) ->
             rabbit_mgmt_util:direct_request(
             'queue.declare',
             fun rabbit_mgmt_format:format_accept_content/1,
-            [{queue, Name}], "Declare queue error: ~s", ReqData, Context);
+            [{queue, Name}], "Declare queue error: ~ts", ReqData, Context);
         {error, F, A} ->
             rabbit_mgmt_util:bad_request(iolist_to_binary(io_lib:format(F ++ "~n", A)), ReqData, Context)
     end.
@@ -82,7 +85,7 @@ delete_resource(ReqData, Context) ->
       fun rabbit_mgmt_format:format_accept_content/1,
       [{queue, Name},
        {if_unused, IfUnused},
-       {if_empty, IfEmpty}], "Delete queue error: ~s", ReqData, Context).
+       {if_empty, IfEmpty}], "Delete queue error: ~ts", ReqData, Context).
 
 is_authorized(ReqData, Context) ->
     rabbit_mgmt_util:is_authorized_vhost(ReqData, Context).
@@ -110,10 +113,26 @@ queue(ReqData) ->
         VHost     -> queue(VHost, rabbit_mgmt_util:id(queue, ReqData))
     end.
 
-
 queue(VHost, QName) ->
     Name = rabbit_misc:r(VHost, queue, QName),
     case rabbit_amqqueue:lookup(Name) of
         {ok, Q}            -> rabbit_mgmt_format:queue(Q);
+        {error, not_found} -> not_found
+    end.
+
+queue_with_totals(ReqData) ->
+    case rabbit_mgmt_util:vhost(ReqData) of
+        not_found -> not_found;
+        VHost     -> queue_with_totals(VHost, rabbit_mgmt_util:id(queue, ReqData))
+    end. 
+
+queue_with_totals(VHost, QName) ->
+    Name = rabbit_misc:r(VHost, queue, QName),
+    case rabbit_amqqueue:lookup(Name) of
+        {ok, Q}            -> QueueInfo = rabbit_amqqueue:info(Q,
+                                    [name, durable, auto_delete, exclusive,
+                                    owner_pid, arguments, type, state,
+                                    policy, totals, online, type_specific]),
+                              rabbit_mgmt_format:queue_info(QueueInfo);
         {error, not_found} -> not_found
     end.

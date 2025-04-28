@@ -139,7 +139,7 @@ if Code.ensure_loaded?(Poison) do
   defimpl JOSE.Poison.LexicalEncoder, for: BitString do
     alias JOSE.Poison.LexicalEncodeError
 
-    use Bitwise
+    import Bitwise
 
     def encode("", _), do: "\"\""
 
@@ -149,7 +149,7 @@ if Code.ensure_loaded?(Poison) do
 
     defp escape("", _), do: []
 
-    for {char, seq} <- Enum.zip('"\\\n\t\r\f\b', '"\\ntrfb') do
+    for {char, seq} <- Enum.zip(~c"\"\\\n\t\r\f\b", ~c"\"\\ntrfb") do
       defp escape(<<unquote(char)>> <> rest, mode) do
         [unquote("\\" <> <<seq>>) | escape(rest, mode)]
       end
@@ -181,7 +181,7 @@ if Code.ensure_loaded?(Poison) do
     end
 
     defp escape(<<char::utf8>> <> rest, mode)
-        when mode in [:html_safe, :javascript] and char in [0x2028, 0x2029] do
+         when mode in [:html_safe, :javascript] and char in [0x2028, 0x2029] do
       [seq(char) | escape(rest, mode)]
     end
 
@@ -196,7 +196,7 @@ if Code.ensure_loaded?(Poison) do
     end
 
     defp chunk_size(<<char>> <> _, _mode, acc)
-        when char <= 0x1F or char in '"\\' do
+         when char <= 0x1F or char in ~c"\"\\" do
       acc
     end
 
@@ -213,7 +213,7 @@ if Code.ensure_loaded?(Poison) do
     end
 
     defp chunk_size(<<char::utf8>> <> _, mode, acc)
-        when mode in [:html_safe, :javascript] and char in [0x2028, 0x2029] do
+         when mode in [:html_safe, :javascript] and char in [0x2028, 0x2029] do
       acc
     end
 

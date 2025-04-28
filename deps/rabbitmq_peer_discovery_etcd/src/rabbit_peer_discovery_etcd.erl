@@ -4,13 +4,12 @@
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2022 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved. All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_etcd).
 -behaviour(rabbit_peer_discovery_backend).
 
--include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbitmq_peer_discovery_common/include/rabbit_peer_discovery.hrl").
 -include("rabbit_peer_discovery_etcd.hrl").
 
@@ -26,21 +25,21 @@
 init() ->
     %% We cannot start this plugin yet since it depends on the rabbit app,
     %% which is in the process of being started by the time this function is called
-    application:load(rabbitmq_peer_discovery_common),
-    application:load(rabbitmq_peer_discovery_etcd),
+    _ = application:load(rabbitmq_peer_discovery_common),
+    _ = application:load(rabbitmq_peer_discovery_etcd),
 
     %% Here we start the client very early on, before plugins have initialized.
     %% We need to do it conditionally, however.
     NoOp = fun() -> ok end,
     Run  = fun(_) ->
             rabbit_log:debug("Peer discovery etcd: initialising..."),
-            application:ensure_all_started(eetcd),
+            _ = application:ensure_all_started(eetcd),
             Formation = application:get_env(rabbit, cluster_formation, []),
             Opts = maps:from_list(proplists:get_value(peer_discovery_etcd, Formation, [])),
             {ok, Pid} = rabbitmq_peer_discovery_etcd_v3_client:start_link(Opts),
             %% unlink so that this supervisor's lifecycle does not affect RabbitMQ core
             unlink(Pid),
-            rabbit_log:debug("etcd peer discovery: v3 client pid: ~p", [whereis(rabbitmq_peer_discovery_etcd_v3_client)])
+            rabbit_log:debug("etcd peer discovery: v3 client pid: ~tp", [whereis(rabbitmq_peer_discovery_etcd_v3_client)])
            end,
     rabbit_peer_discovery_util:maybe_backend_configured(?BACKEND_CONFIG_KEY, NoOp, NoOp, Run),
 
@@ -52,7 +51,7 @@ init() ->
 list_nodes() ->
     Fun0 = fun() -> {ok, {[], disc}} end,
     Fun1 = fun() ->
-                   rabbit_log:warning("Peer discovery backend is set to ~s "
+                   rabbit_log:warning("Peer discovery backend is set to ~ts "
                                       "but final config does not contain "
                                       "rabbit.cluster_formation.peer_discovery_etcd. "
                                       "Cannot discover any nodes because etcd cluster details are not configured!",
@@ -60,9 +59,13 @@ list_nodes() ->
                    {ok, {[], disc}}
            end,
     Fun2 = fun(_Proplist) ->
-                   %% error logging will be done by the client
-                   Nodes = rabbitmq_peer_discovery_etcd_v3_client:list_nodes(),
-                   {ok, {Nodes, disc}}
+                   %% nodes are returned sorted with the create_revision as
+                   %% the first element in the tuple.
+                   %% The node with the lowest create_revision is thus selected
+                   %% based on the assumption that the create_revision remains
+                   %% consistent throughout the lifetime of the etcd key.
+                   [{_, Node} | _] = rabbitmq_peer_discovery_etcd_v3_client:list_nodes(),
+                   {ok, {Node, disc}}
            end,
     rabbit_peer_discovery_util:maybe_backend_configured(?BACKEND_CONFIG_KEY, Fun0, Fun1, Fun2).
 
@@ -93,9 +96,11 @@ unregister() ->
 post_registration() ->
     ok.
 
--spec lock(Node :: atom()) -> {ok, Data :: term()} | {error, Reason :: string()}.
+-spec lock(Nodes :: [node()]) ->
+    {ok, Data :: term()} | {error, Reason :: string()}.
 
-lock(Node) when is_atom(Node) ->
+lock(Nodes) when is_list(Nodes) ->
+    Node = node(),
     case rabbitmq_peer_discovery_etcd_v3_client:lock(Node) of
         {ok, GeneratedKey} -> {ok, GeneratedKey};
         {error, _} = Error -> Error

@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.EncodeCommand do
   alias RabbitMQ.CLI.Core.{DocGuide, Helpers, Input}
@@ -17,16 +17,22 @@ defmodule RabbitMQ.CLI.Ctl.Commands.EncodeCommand do
       iterations: :integer
     ]
   end
+
   @atomized_keys [:cipher, :hash]
 
   def distribution(_), do: :none
 
   def merge_defaults(args, opts) do
-    with_defaults = Map.merge(%{
-         cipher: :rabbit_pbe.default_cipher(),
-         hash: :rabbit_pbe.default_hash(),
-         iterations: :rabbit_pbe.default_iterations()
-       }, opts)
+    with_defaults =
+      Map.merge(
+        %{
+          cipher: :rabbit_pbe.default_cipher(),
+          hash: :rabbit_pbe.default_hash(),
+          iterations: :rabbit_pbe.default_iterations()
+        },
+        opts
+      )
+
     {args, Helpers.atomize_values(with_defaults, @atomized_keys)}
   end
 
@@ -52,17 +58,26 @@ defmodule RabbitMQ.CLI.Ctl.Commands.EncodeCommand do
 
   def run([], %{cipher: cipher, hash: hash, iterations: iterations} = opts) do
     case Input.consume_single_line_string_with_prompt("Value to encode: ", opts) do
-      :eof  -> {:error, :not_enough_args}
+      :eof ->
+        {:error, :not_enough_args}
+
       value ->
         case Input.consume_single_line_string_with_prompt("Passphrase: ", opts) do
-          :eof  -> {:error, :not_enough_args}
+          :eof ->
+            {:error, :not_enough_args}
+
           passphrase ->
             try do
               term_value = Helpers.evaluate_input_as_term(value)
-              result = {:encrypted, _} = :rabbit_pbe.encrypt_term(cipher, hash, iterations, passphrase, term_value)
+
+              result =
+                {:encrypted, _} =
+                :rabbit_pbe.encrypt_term(cipher, hash, iterations, passphrase, term_value)
+
               {:ok, result}
             catch
               _, _ ->
+                IO.inspect(__STACKTRACE__)
                 {:error, "Error during cipher operation"}
             end
         end
@@ -71,14 +86,21 @@ defmodule RabbitMQ.CLI.Ctl.Commands.EncodeCommand do
 
   def run([value], %{cipher: cipher, hash: hash, iterations: iterations} = opts) do
     case Input.consume_single_line_string_with_prompt("Passphrase: ", opts) do
-      :eof -> {:error, :not_enough_args}
+      :eof ->
+        {:error, :not_enough_args}
+
       passphrase ->
         try do
           term_value = Helpers.evaluate_input_as_term(value)
-          result = {:encrypted, _} = :rabbit_pbe.encrypt_term(cipher, hash, iterations, passphrase, term_value)
+
+          result =
+            {:encrypted, _} =
+            :rabbit_pbe.encrypt_term(cipher, hash, iterations, passphrase, term_value)
+
           {:ok, result}
         catch
           _, _ ->
+            IO.inspect(__STACKTRACE__)
             {:error, "Error during cipher operation"}
         end
     end
@@ -87,10 +109,15 @@ defmodule RabbitMQ.CLI.Ctl.Commands.EncodeCommand do
   def run([value, passphrase], %{cipher: cipher, hash: hash, iterations: iterations}) do
     try do
       term_value = Helpers.evaluate_input_as_term(value)
-      result = {:encrypted, _} = :rabbit_pbe.encrypt_term(cipher, hash, iterations, passphrase, term_value)
+
+      result =
+        {:encrypted, _} =
+        :rabbit_pbe.encrypt_term(cipher, hash, iterations, passphrase, term_value)
+
       {:ok, result}
     catch
       _, _ ->
+        IO.inspect(__STACKTRACE__)
         {:error, "Error during cipher operation"}
     end
   end
@@ -98,14 +125,15 @@ defmodule RabbitMQ.CLI.Ctl.Commands.EncodeCommand do
   def formatter(), do: RabbitMQ.CLI.Formatters.Erlang
 
   def banner(_, _) do
-    "Encrypting value ..."
+    "Encrypting value to be used in advanced.config..."
   end
 
-  def usage, do: "encode value passphrase [--cipher <cipher>] [--hash <hash>] [--iterations <iterations>]"
+  def usage,
+    do: "encode value passphrase [--cipher <cipher>] [--hash <hash>] [--iterations <iterations>]"
 
   def usage_additional() do
     [
-      ["<value>", "config value to encode"],
+      ["<value>", "value to encode, to be used in advanced.config"],
       ["<passphrase>", "passphrase to use with the config value encryption key"],
       ["--cipher <cipher>", "cipher suite to use"],
       ["--hash <hash>", "hashing function to use"],
@@ -121,7 +149,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.EncodeCommand do
 
   def help_section(), do: :configuration
 
-  def description(), do: "Encrypts a sensitive configuration value"
+  def description(), do: "Encrypts a sensitive configuration value to be used in the advanced.config file"
 
   #
   # Implementation

@@ -2,13 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2020-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -include("resource.hrl").
 
 %% Passed around most places
--record(user, {username,
+-record(user, {username :: rabbit_types:option(rabbit_types:username()),
                tags,
                authz_backends}). %% List of {Module, AuthUserImpl} pairs
 
@@ -93,6 +93,7 @@
 %% mnesia doesn't like unary records, so we add a dummy 'value' field
 -record(route, {binding, value = const}).
 -record(reverse_route, {reverse_binding, value = const}).
+-record(index_route, {source_key, destination, args = []}).
 
 -record(binding, {source, key, destination, args = []}).
 -record(reverse_binding, {destination, key, source, args = []}).
@@ -120,7 +121,7 @@
         {mandatory,  %% Whether the message was published as mandatory
          confirm,    %% Whether the message needs confirming
          sender,     %% The pid of the process that created the delivery
-         message,    %% The #basic_message record
+         message,    %% The message container
          msg_seq_no, %% Msg Sequence Number from the channel publish_seqno field
          flow}).     %% Should flow control be used for this delivery
 
@@ -209,7 +210,7 @@
         }).
 %%----------------------------------------------------------------------------
 
--define(COPYRIGHT_MESSAGE, "Copyright (c) 2007-2022 VMware, Inc. or its affiliates.").
+-define(COPYRIGHT_MESSAGE, "Copyright (c) 2007-2024 Broadcom Inc and/or its subsidiaries").
 -define(INFORMATION_MESSAGE, "Licensed under the MPL 2.0. Website: https://rabbitmq.com").
 
 %% EMPTY_FRAME_SIZE, 8 = 1 + 2 + 4 + 1
@@ -225,11 +226,11 @@
 -define(SUPERVISOR_WAIT,
         rabbit_misc:get_env(rabbit, supervisor_shutdown_timeout, infinity)).
 -define(WORKER_WAIT,
-        rabbit_misc:get_env(rabbit, worker_shutdown_timeout, 300000)).
+        rabbit_misc:get_env(rabbit, worker_shutdown_timeout, 300_000)).
 -define(MSG_STORE_WORKER_WAIT,
-        rabbit_misc:get_env(rabbit, msg_store_shutdown_timeout, 600000)).
+        rabbit_misc:get_env(rabbit, msg_store_shutdown_timeout, 600_000)).
 -define(CLASSIC_QUEUE_WORKER_WAIT,
-        rabbit_misc:get_env(rabbit, classic_queue_shutdown_timeout, 600000)).
+        rabbit_misc:get_env(rabbit, classic_queue_shutdown_timeout, 600_000)).
 
 -define(HIBERNATE_AFTER_MIN,        1000).
 -define(DESIRED_HIBERNATE,         10000).
@@ -253,7 +254,7 @@
 %% Max message size is hard limited to 512 MiB.
 %% If user configures a greater rabbit.max_message_size,
 %% this value is used instead.
--define(MAX_MSG_SIZE, 536870912).
+-define(MAX_MSG_SIZE, 536_870_912).
 
 -define(store_proc_name(N), rabbit_misc:store_proc_name(?MODULE, N)).
 

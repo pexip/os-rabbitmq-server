@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 %% @hidden
 -module(ra_lib).
@@ -39,8 +39,11 @@
          retry/2,
          retry/3,
          write_file/2,
+         write_file/3,
+         sync_file/1,
          lists_chunk/2,
          lists_detect_sort/1,
+         lists_shuffle/1,
          is_dir/1,
          is_file/1,
          ensure_dir/1,
@@ -48,6 +51,10 @@
          maps_foreach/2,
          maps_merge_with/3
         ]).
+
+-type file_err() :: file:posix() | badarg | terminated | system_limit.
+
+-export_type([file_err/0]).
 
 -include_lib("kernel/include/file.hrl").
 
@@ -135,15 +142,20 @@ zpad_hex(Num) ->
     lists:flatten(io_lib:format("~16.16.0B", [Num])).
 
 zpad_filename("", Ext, Num) ->
-    lists:flatten(io_lib:format("~8..0B.~s", [Num, Ext]));
+    lists:flatten(io_lib:format("~8..0B.~ts", [Num, Ext]));
 zpad_filename(Prefix, Ext, Num) ->
-    lists:flatten(io_lib:format("~s_~8..0B.~s", [Prefix, Num, Ext])).
+    lists:flatten(io_lib:format("~ts_~8..0B.~ts", [Prefix, Num, Ext])).
 
 zpad_filename_incr(Fn) ->
-    case re:run(Fn, "(.*)([0-9]{8})(.*)", [{capture, all_but_first, list}]) of
+    Base = filename:basename(Fn),
+    Dir = filename:dirname(Fn),
+    case re:run(Base, "(.*)([0-9]{8})(.*)",
+                [{capture, all_but_first, list}]) of
         {match, [Prefix, NumStr, Ext]} ->
             Num = list_to_integer(NumStr),
-            lists:flatten(io_lib:format("~s~8..0B~s", [Prefix, Num+1, Ext]));
+            filename:join(Dir,
+                          lists:flatten(
+                            io_lib:format("~ts~8..0B~ts", [Prefix, Num+1, Ext])));
         _ ->
             undefined
     end.
@@ -308,24 +320,50 @@ retry(Func, Attempt, Sleep) ->
             retry(Func, Attempt - 1)
     end.
 
-
+-spec write_file(file:name_all(), iodata()) ->
+    ok | {error, file_err()}.
 write_file(Name, IOData) ->
+    write_file(Name, IOData, true).
+
+-spec write_file(file:name_all(), iodata(), Sync :: boolean()) ->
+    ok | {error, file_err()}.
+write_file(Name, IOData, Sync) ->
     case file:open(Name, [binary, write, raw]) of
         {ok, Fd} ->
             case file:write(Fd, IOData) of
                 ok ->
-                    case file:sync(Fd) of
-                        ok ->
-                            file:close(Fd);
-                        Err ->
-                            _ = file:close(Fd),
-                            Err
+                    case Sync of
+                        true ->
+                            sync_and_close_fd(Fd);
+                        false ->
+                            ok
                     end;
                 Err ->
                     _ = file:close(Fd),
                     Err
             end;
         Err ->
+            Err
+    end.
+
+-spec sync_file(file:name_all()) ->
+    ok | {error, file_err()}.
+sync_file(Name) ->
+    case file:open(Name, [binary, read, write, raw]) of
+        {ok, Fd} ->
+            sync_and_close_fd(Fd);
+        Err ->
+            Err
+    end.
+
+-spec sync_and_close_fd(file:fd()) ->
+    ok | {error, file_err()}.
+sync_and_close_fd(Fd) ->
+    case ra_file:sync(Fd) of
+        ok ->
+            file:close(Fd);
+        Err ->
+            _ = file:close(Fd),
             Err
     end.
 
@@ -376,6 +414,12 @@ do_ascending(A, [B | Rem])
     do_ascending(B, Rem);
 do_ascending(_A, _) ->
     unsorted.
+
+%% Reorder a list randomly.
+-spec lists_shuffle(list()) -> list().
+lists_shuffle(List0) ->
+    List1 = [{rand:uniform(), Elem} || Elem <- List0],
+    [Elem || {_, Elem} <- lists:keysort(1, List1)].
 
 is_dir(Dir) ->
     case prim_file:read_file_info(Dir) of
@@ -485,7 +529,7 @@ merge_with_1(none, Result, _, _) ->
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
-lists_chink_test() ->
+lists_chunk_test() ->
     ?assertError(invalid_size, lists_chunk(0, [a])),
     ?assertMatch([], lists_chunk(2, [])),
     ?assertMatch([[a]], lists_chunk(2, [a])),
@@ -497,7 +541,7 @@ lists_chink_test() ->
 make_uid_test() ->
     U1 = make_uid(),
     U2 = make_uid(),
-    ?debugFmt("U1 ~s U2 ~s", [U1, U2]),
+    ?debugFmt("U1 ~ts U2 ~s", [U1, U2]),
     ?assertNotEqual(U1, U2),
     <<"ABCD", _/binary>> = make_uid("ABCD"),
     <<"ABCD", _/binary>> = make_uid(<<"ABCD">>),
@@ -506,6 +550,13 @@ make_uid_test() ->
 zpad_filename_incr_test() ->
     Fn = "/lib/blah/prefix_00000001.segment",
     Ex = "/lib/blah/prefix_00000002.segment",
+    Ex = zpad_filename_incr(Fn),
+    undefined = zpad_filename_incr("0000001"),
+    ok.
+
+zpad_filename_incr_utf8_test() ->
+    Fn = "/lib/🐰/prefix/00000001.segment",
+    Ex = "/lib/🐰/prefix/00000002.segment",
     Ex = zpad_filename_incr(Fn),
     undefined = zpad_filename_incr("0000001"),
     ok.

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 -module(ra_monitors).
 
@@ -135,10 +135,11 @@ basics_test() ->
     M1 = add(self(), machine, M0),
     [machine] = components(self(), M1),
     M2 = add(self(), aux, M1),
-    [aux, machine] = components(self(), M2),
+    [aux, machine] = lists:sort(components(self(), M2)),
     M3 = remove(self(), machine, M2),
     [aux] = components(self(), M3),
-    {[aux, machine], M5} = handle_down(self(), M2),
+    {Components, M5} = handle_down(self(), M2),
+    [aux, machine] = lists:sort(Components),
     [] = components(self(), M5),
     ok.
 

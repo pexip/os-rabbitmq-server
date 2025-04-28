@@ -1,4 +1,4 @@
-%% Copyright (c) 2018, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2018-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -31,7 +31,9 @@
 -export([reset_stream/2]).
 -export([get_connection_local_buffer_size/1]).
 -export([get_local_setting/2]).
+-export([get_remote_settings/1]).
 -export([get_last_streamid/1]).
+-export([set_last_streamid/1]).
 -export([get_stream_local_buffer_size/2]).
 -export([get_stream_local_state/2]).
 -export([get_stream_remote_state/2]).
@@ -47,9 +49,11 @@
 	max_concurrent_streams => non_neg_integer() | infinity,
 	max_decode_table_size => non_neg_integer(),
 	max_encode_table_size => non_neg_integer(),
+	max_fragmented_header_block_size => 16384..16#7fffffff,
 	max_frame_size_received => 16384..16777215,
 	max_frame_size_sent => 16384..16777215 | infinity,
 	max_stream_window_size => 0..16#7fffffff,
+	message_tag => any(),
 	preface_timeout => timeout(),
 	settings_timeout => timeout(),
 	stream_window_data_threshold => 0..16#7fffffff,
@@ -143,6 +147,7 @@
 	%% Stream identifiers.
 	local_streamid :: pos_integer(), %% The next streamid to be used.
 	remote_streamid = 0 :: non_neg_integer(), %% The last streamid received.
+	last_remote_streamid = 16#7fffffff :: non_neg_integer(), %% Used in GOAWAY.
 
 	%% Currently active HTTP/2 streams. Streams may be initiated either
 	%% by the client or by the server through PUSH_PROMISE frames.
@@ -211,6 +216,13 @@ init(server, Opts) ->
 		local_streamid=2
 	}).
 
+%% @todo In Cowlib 3.0 we should always include MessageTag in the message.
+%% It can be set to 'undefined' if the option is missing.
+start_timer(Name, Opts=#{message_tag := MessageTag}) ->
+	case maps:get(Name, Opts, 5000) of
+		infinity -> undefined;
+		Timeout -> erlang:start_timer(Timeout, self(), {?MODULE, MessageTag, Name})
+	end;
 start_timer(Name, Opts) ->
 	case maps:get(Name, Opts, 5000) of
 		infinity -> undefined;
@@ -300,11 +312,11 @@ frame(Frame, State=#http2_machine{state=settings, preface_timer=TRef}) ->
 	end,
 	settings_frame(Frame, State#http2_machine{state=normal, preface_timer=undefined});
 frame(Frame, State=#http2_machine{state={continuation, _, _}}) ->
-	continuation_frame(Frame, State);
+	maybe_discard_result(continuation_frame(Frame, State));
 frame(settings_ack, State=#http2_machine{state=normal}) ->
 	settings_ack_frame(State);
 frame(Frame, State=#http2_machine{state=normal}) ->
-	case element(1, Frame) of
+	Result = case element(1, Frame) of
 		data -> data_frame(Frame, State);
 		headers -> headers_frame(Frame, State);
 		priority -> priority_frame(Frame, State);
@@ -317,7 +329,26 @@ frame(Frame, State=#http2_machine{state=normal}) ->
 		window_update -> window_update_frame(Frame, State);
 		continuation -> unexpected_continuation_frame(Frame, State);
 		_ -> ignored_frame(State)
-	end.
+	end,
+	maybe_discard_result(Result).
+
+%% RFC7540 6.9. After sending a GOAWAY frame, the sender can discard frames for
+%% streams initiated by the receiver with identifiers higher than the identified
+%% last stream. However, any frames that alter connection state cannot be
+%% completely ignored. For instance, HEADERS, PUSH_PROMISE, and CONTINUATION
+%% frames MUST be minimally processed to ensure the state maintained for header
+%% compression is consistent.
+maybe_discard_result(FrameResult={ok, Result, State=#http2_machine{mode=Mode,
+		last_remote_streamid=MaxID}})
+		when element(1, Result) =/= goaway ->
+	case element(2, Result) of
+		StreamID when StreamID > MaxID, not ?IS_LOCAL(Mode, StreamID) ->
+			{ok, State};
+		_StreamID ->
+			FrameResult
+	end;
+maybe_discard_result(FrameResult) ->
+	FrameResult.
 
 %% DATA frame.
 
@@ -1019,31 +1050,60 @@ unexpected_continuation_frame(#continuation{}, State) ->
 continuation_frame(#continuation{id=StreamID, head=head_fin, data=HeaderFragment1},
 		State=#http2_machine{state={continuation, Type,
 			Frame=#headers{id=StreamID, data=HeaderFragment0}}}) ->
-	HeaderData = <<HeaderFragment0/binary, HeaderFragment1/binary>>,
-	headers_decode(Frame#headers{head=head_fin, data=HeaderData},
-		State#http2_machine{state=normal}, Type, stream_get(StreamID, State));
+	case continuation_frame_append(HeaderFragment0, HeaderFragment1, State) of
+		{ok, HeaderData} ->
+			headers_decode(Frame#headers{head=head_fin, data=HeaderData},
+				State#http2_machine{state=normal}, Type, stream_get(StreamID, State));
+		Error ->
+			Error
+	end;
 continuation_frame(#continuation{id=StreamID, head=head_fin, data=HeaderFragment1},
 		State=#http2_machine{state={continuation, Type, #push_promise{
 			id=StreamID, promised_id=PromisedStreamID, data=HeaderFragment0}}}) ->
-	HeaderData = <<HeaderFragment0/binary, HeaderFragment1/binary>>,
-	headers_decode(#headers{id=PromisedStreamID, fin=fin, head=head_fin, data=HeaderData},
-		State#http2_machine{state=normal}, Type, undefined);
+	case continuation_frame_append(HeaderFragment0, HeaderFragment1, State) of
+		{ok, HeaderData} ->
+			headers_decode(#headers{id=PromisedStreamID, fin=fin,
+				head=head_fin, data=HeaderData},
+				State#http2_machine{state=normal}, Type, undefined);
+		Error ->
+			Error
+	end;
 continuation_frame(#continuation{id=StreamID, data=HeaderFragment1},
-		State=#http2_machine{state={continuation, Type, ContinuedFrame0}})
-		when element(2, ContinuedFrame0) =:= StreamID ->
-	ContinuedFrame = case ContinuedFrame0 of
+		State=#http2_machine{state={continuation, Type, ContinuedFrame}})
+		when element(2, ContinuedFrame) =:= StreamID ->
+	case ContinuedFrame of
 		#headers{data=HeaderFragment0} ->
-			HeaderData = <<HeaderFragment0/binary, HeaderFragment1/binary>>,
-			ContinuedFrame0#headers{data=HeaderData};
+			case continuation_frame_append(HeaderFragment0, HeaderFragment1, State) of
+				{ok, HeaderData} ->
+					{ok, State#http2_machine{state={continuation, Type,
+						ContinuedFrame#headers{data=HeaderData}}}};
+				Error ->
+					Error
+			end;
 		#push_promise{data=HeaderFragment0} ->
-			HeaderData = <<HeaderFragment0/binary, HeaderFragment1/binary>>,
-			ContinuedFrame0#push_promise{data=HeaderData}
-	end,
-	{ok, State#http2_machine{state={continuation, Type, ContinuedFrame}}};
+			case continuation_frame_append(HeaderFragment0, HeaderFragment1, State) of
+				{ok, HeaderData} ->
+					{ok, State#http2_machine{state={continuation, Type,
+						ContinuedFrame#push_promise{data=HeaderData}}}};
+				Error ->
+					Error
+			end
+	end;
 continuation_frame(_F, State) ->
 	{error, {connection_error, protocol_error,
 		'An invalid frame was received in the middle of a header block. (RFC7540 6.2)'},
 		State}.
+
+continuation_frame_append(Fragment0, Fragment1, State=#http2_machine{opts=Opts}) ->
+	MaxSize = maps:get(max_fragmented_header_block_size, Opts, 32768),
+	case byte_size(Fragment0) + byte_size(Fragment1) =< MaxSize of
+		true ->
+			{ok, <<Fragment0/binary, Fragment1/binary>>};
+		false ->
+			{error, {connection_error, enhance_your_calm,
+				'Larger fragmented header block size than we are willing to accept.'},
+				State}
+	end.
 
 %% Ignored frames.
 
@@ -1487,6 +1547,24 @@ get_connection_local_buffer_size(#http2_machine{streams=Streams}) ->
 get_local_setting(Key, #http2_machine{local_settings=Settings}) ->
 	maps:get(Key, Settings, default_setting_value(Key)).
 
+-spec get_remote_settings(http2_machine()) -> map().
+get_remote_settings(#http2_machine{mode=Mode, remote_settings=Settings}) ->
+	Defaults0 = #{
+		header_table_size => default_setting_value(header_table_size),
+		enable_push => default_setting_value(enable_push),
+		max_concurrent_streams => default_setting_value(max_concurrent_streams),
+		initial_window_size => default_setting_value(initial_window_size),
+		max_frame_size => default_setting_value(max_frame_size),
+		max_header_list_size => default_setting_value(max_header_list_size)
+	},
+	Defaults = case Mode of
+		server ->
+			Defaults0#{enable_connect_protocol => default_setting_value(enable_connect_protocol)};
+		client ->
+			Defaults0
+	end,
+	maps:merge(Defaults, Settings).
+
 default_setting_value(header_table_size) -> 4096;
 default_setting_value(enable_push) -> true;
 default_setting_value(max_concurrent_streams) -> infinity;
@@ -1501,6 +1579,14 @@ default_setting_value(enable_connect_protocol) -> false.
 -spec get_last_streamid(http2_machine()) -> cow_http2:streamid().
 get_last_streamid(#http2_machine{remote_streamid=RemoteStreamID}) ->
 	RemoteStreamID.
+
+%% Set last accepted streamid to the last known streamid, for the purpose
+%% ignoring frames for remote streams created after sending GOAWAY.
+
+-spec set_last_streamid(http2_machine()) -> {cow_http2:streamid(), http2_machine()}.
+set_last_streamid(State=#http2_machine{remote_streamid=StreamID,
+		last_remote_streamid=LastStreamID}) when StreamID =< LastStreamID->
+	{StreamID, State#http2_machine{last_remote_streamid = StreamID}}.
 
 %% Retrieve the local buffer size for a stream.
 

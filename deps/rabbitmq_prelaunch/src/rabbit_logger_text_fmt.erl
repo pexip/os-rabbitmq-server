@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2021 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_logger_text_fmt).
@@ -49,11 +49,11 @@ format_var(time, #{meta := #{time := Timestamp}}, Config) ->
 format_var(Var, #{meta := Meta}, _) ->
     case maps:get(Var, Meta, undefined) of
         undefined ->
-            io_lib:format("<unknown ~s>", [Var]);
+            io_lib:format("<unknown ~ts>", [Var]);
         Value ->
             case io_lib:char_list(Value) of
-                true  -> io_lib:format("~s", [Value]);
-                false -> io_lib:format("~p", [Value])
+                true  -> io_lib:format("~ts", [Value]);
+                false -> io_lib:format("~tp", [Value])
             end
     end.
 

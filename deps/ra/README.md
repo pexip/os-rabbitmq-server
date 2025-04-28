@@ -28,12 +28,17 @@ The following Raft features are implemented:
 
 ![Actions](https://github.com/rabbitmq/ra/actions/workflows/erlang.yml/badge.svg)
 
+### Safety Verification
+
+Ra is [continuously tested](https://github.com/rabbitmq/ra-kv-store#jepsen-test) with the [Jepsen](https://github.com/jepsen-io/jepsen)
+distributed system verification framework.
+
 ## Supported Erlang/OTP Versions
 
 Ra supports the following Erlang/OTP versions:
 
- * `24.x`
- * `23.x`
+ * `26.x`
+ * `25.x`
 
 Modern Erlang releases provide [distribution traffic fragmentation](https://www.erlang.org/blog/otp-22-highlights/#fragmented-distribution-messages)
 which algorithms such as Raft significantly benefit from.
@@ -47,8 +52,11 @@ which algorithms such as Raft significantly benefit from.
 
 ## Use Cases
 
-This library is primarily developed as the foundation for replication layer for
-replicated queues in a future version of RabbitMQ. The design it aims to replace uses
+This library was primarily developed as the foundation of a replication layer for
+[quorum queues](https://rabbitmq.com/quorum-queues.html) in RabbitMQ, and today
+also powers [RabbitMQ streams](https://rabbitmq.com/streams.html) and [Khepri](https://github.com/rabbitmq/khepri). 
+
+The design it aims to replace uses
 a variant of [Chain Based Replication](https://www.cs.cornell.edu/home/rvr/papers/OSDI04.pdf)
 which has two major shortcomings:
 
@@ -265,7 +273,7 @@ ra:members({dyn_members, node()}).
 If a node wants to leave the cluster, it can use `ra:leave_and_terminate/3`
 and specify itself as the target:
 
-Temporarily add a new ndde, say `ra4@hostname.local`, to the cluster:
+Temporarily add a new node, say `ra4@hostname.local`, to the cluster:
 
 ``` erlang
 % Add a new member
@@ -290,8 +298,8 @@ See [Ra state machine tutorial](docs/internals/STATE_MACHINE_TUTORIAL.md)
 for how to write more sophisticated state machines by implementing
 the `ra_machine` behaviour.
 
-A [Ra-based key/value store example](https://github.com/rabbitmq/ra-kv-store) is available
-in a separate repository.
+A [Ra-based key/value store example](https://github.com/rabbitmq/ra-kv-store)
+is available in a separate repository.
 
 
 ## Documentation
@@ -419,7 +427,8 @@ in a separate repository.
 
 ## Logging
 
-Ra will use default OTP `logger` by default, unless `logger_module` configuration key is used to override.
+Ra will use default OTP `logger` by default, unless `logger_module`
+configuration key is used to override.
 
 To change log level to `debug` for all applications, use
 
@@ -427,10 +436,24 @@ To change log level to `debug` for all applications, use
 logger:set_primary_config(level, debug).
 ```
 
+## Ra versioning
+
+Ra attempts to follow [Semantic Versioning](https://semver.org/).
+
+The modules that form part of the public API are:
+* `ra`
+* `ra_machine` (behaviour callbacks only)
+* `ra_aux`
+* `ra_system`
+* `ra_counters`
+* `ra_leaderboard`
+* `ra_env`
+* `ra_directory`
 
 ## Copyright and License
 
-(c) 2017-2022, VMware Inc or its affiliates.
+(c) 2017-2024 Broadcom. All Rights Reserved. The term "Broadcom" refers to
+Broadcom Inc. and/or its subsidiaries.
 
 Dual licensed under the Apache License Version 2.0 and
 Mozilla Public License Version 2.0.

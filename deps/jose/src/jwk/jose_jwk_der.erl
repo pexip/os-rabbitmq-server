@@ -2,7 +2,7 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2020, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc
 %%%
 %%% @end
@@ -10,7 +10,7 @@
 %%%-------------------------------------------------------------------
 -module(jose_jwk_der).
 
--include_lib("jose_public_key.hrl").
+-include("jose_public_key.hrl").
 
 %% API
 -export([from_binary/1]).

@@ -6,10 +6,9 @@ export DRV_CFLAGS
 ERLANG_ARCH = 64
 export ERLANG_ARCH
 ERLC_OPTS = +debug_info
-export ERLC_OPTS
 
 DEPS += getopt
-dep_getopt = hex 1.0.2 getopt
+dep_getopt = hex 1.0.3 getopt
 
 
 rebar_dep: preprocess pre-deps deps pre-app app

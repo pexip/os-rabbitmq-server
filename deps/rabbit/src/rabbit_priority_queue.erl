@@ -2,13 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Copyright (c) 2015-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%%  Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_priority_queue).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
--include_lib("rabbit_common/include/rabbit_framing.hrl").
 -include("amqqueue.hrl").
 
 -behaviour(rabbit_backing_queue).
@@ -27,15 +26,14 @@
 
 -export([init/3, terminate/2, delete_and_terminate/2, delete_crashed/1,
          purge/1, purge_acks/1,
-         publish/6, publish_delivered/5, discard/4, drain_confirmed/1,
-         batch_publish/4, batch_publish_delivered/4,
+         publish/5, publish_delivered/4, discard/3, drain_confirmed/1,
          dropwhile/2, fetchwhile/4, fetch/2, drop/2, ack/2, requeue/2,
          ackfold/4, fold/3, len/1, is_empty/1, depth/1,
-         set_ram_duration_target/2, ram_duration/1, needs_timeout/1, timeout/1,
+         update_rates/1, needs_timeout/1, timeout/1,
          handle_pre_hibernate/1, resume/1, msg_rates/1,
          info/2, invoke/3, is_duplicate/2, set_queue_mode/2,
          set_queue_version/2,
-         zip_msgs_and_acks/4, handle_info/2]).
+         zip_msgs_and_acks/4]).
 
 -record(state, {bq, bqss, max_priority}).
 -record(passthrough, {bq, bqs}).
@@ -68,7 +66,7 @@ enable() ->
     {ok, RealBQ} = application:get_env(rabbit, backing_queue_module),
     case RealBQ of
         ?MODULE -> ok;
-        _       -> rabbit_log:info("Priority queues enabled, real BQ is ~s",
+        _       -> rabbit_log:info("Priority queues enabled, real BQ is ~ts",
                                    [RealBQ]),
                    application:set_env(
                      rabbitmq_priority_queue, backing_queue_module, RealBQ),
@@ -106,11 +104,11 @@ mutate_name_bin(P, NameBin) ->
     <<NameBin/binary, 0, P:8>>.
 
 expand_queues(QNames) ->
-    lists:unzip(
-      lists:append([expand_queue(QName) || QName <- QNames])).
+    Qs = rabbit_db_queue:get_many_durable(QNames),
+    lists:unzip(lists:append([expand_queue(Q) || Q <- Qs])).
 
-expand_queue(QName = #resource{name = QNameBin}) ->
-    {ok, Q} = rabbit_misc:dirty_read({rabbit_durable_queue, QName}),
+expand_queue(Q) ->
+    #resource{name = QNameBin} = QName = amqqueue:get_name(Q),
     case priorities(Q) of
         none -> [{QName, QName}];
         Ps   -> [{QName, QName#resource{name = mutate_name_bin(P, QNameBin)}}
@@ -131,7 +129,9 @@ priorities(Q) when ?is_amqqueue(Q) ->
             case lists:member(Type, Ints) of
                 false -> none;
                 true  ->
-                    Max = min(RequestedMax, ?MAX_SUPPORTED_PRIORITY),
+                    %% make sure the value is no greater than ?MAX_SUPPORTED_PRIORITY but
+                    %% also is not negative
+                    Max = max(1, min(RequestedMax, ?MAX_SUPPORTED_PRIORITY)),
                     lists:reverse(lists:seq(0, Max))
             end;
         _                    -> none
@@ -200,54 +200,23 @@ purge_acks(State = #state{bq = BQ}) ->
 purge_acks(State = #passthrough{bq = BQ, bqs = BQS}) ->
     ?passthrough1(purge_acks(BQS)).
 
-publish(Msg, MsgProps, IsDelivered, ChPid, Flow, State = #state{bq = BQ}) ->
+publish(Msg, MsgProps, IsDelivered, ChPid, State = #state{bq = BQ}) ->
     pick1(fun (_P, BQSN) ->
-                  BQ:publish(Msg, MsgProps, IsDelivered, ChPid, Flow, BQSN)
+                  BQ:publish(Msg, MsgProps, IsDelivered, ChPid, BQSN)
           end, Msg, State);
-publish(Msg, MsgProps, IsDelivered, ChPid, Flow,
+publish(Msg, MsgProps, IsDelivered, ChPid,
         State = #passthrough{bq = BQ, bqs = BQS}) ->
-    ?passthrough1(publish(Msg, MsgProps, IsDelivered, ChPid, Flow, BQS)).
+    ?passthrough1(publish(Msg, MsgProps, IsDelivered, ChPid, BQS)).
 
-batch_publish(Publishes, ChPid, Flow, State = #state{bq = BQ, bqss = [{MaxP, _} |_]}) ->
-    PubMap = partition_publish_batch(Publishes, MaxP),
-    lists:foldl(
-      fun ({Priority, Pubs}, St) ->
-              pick1(fun (_P, BQSN) ->
-                            BQ:batch_publish(Pubs, ChPid, Flow, BQSN)
-                    end, Priority, St)
-      end, State, maps:to_list(PubMap));
-batch_publish(Publishes, ChPid, Flow,
-              State = #passthrough{bq = BQ, bqs = BQS}) ->
-    ?passthrough1(batch_publish(Publishes, ChPid, Flow, BQS)).
-
-publish_delivered(Msg, MsgProps, ChPid, Flow, State = #state{bq = BQ}) ->
+publish_delivered(Msg, MsgProps, ChPid, State = #state{bq = BQ}) ->
     pick2(fun (P, BQSN) ->
                   {AckTag, BQSN1} = BQ:publish_delivered(
-                                      Msg, MsgProps, ChPid, Flow, BQSN),
+                                      Msg, MsgProps, ChPid, BQSN),
                   {{P, AckTag}, BQSN1}
           end, Msg, State);
-publish_delivered(Msg, MsgProps, ChPid, Flow,
+publish_delivered(Msg, MsgProps, ChPid,
                   State = #passthrough{bq = BQ, bqs = BQS}) ->
-    ?passthrough2(publish_delivered(Msg, MsgProps, ChPid, Flow, BQS)).
-
-batch_publish_delivered(Publishes, ChPid, Flow, State = #state{bq = BQ, bqss = [{MaxP, _} |_]}) ->
-    PubMap = partition_publish_delivered_batch(Publishes, MaxP),
-    {PrioritiesAndAcks, State1} =
-        lists:foldl(
-          fun ({Priority, Pubs}, {PriosAndAcks, St}) ->
-                  {PriosAndAcks1, St1} =
-                      pick2(fun (P, BQSN) ->
-                                    {AckTags, BQSN1} =
-                                        BQ:batch_publish_delivered(
-                                          Pubs, ChPid, Flow, BQSN),
-                                    {priority_on_acktags(P, AckTags), BQSN1}
-                            end, Priority, St),
-                  {[PriosAndAcks1 | PriosAndAcks], St1}
-          end, {[], State}, maps:to_list(PubMap)),
-    {lists:reverse(PrioritiesAndAcks), State1};
-batch_publish_delivered(Publishes, ChPid, Flow,
-                        State = #passthrough{bq = BQ, bqs = BQS}) ->
-    ?passthrough2(batch_publish_delivered(Publishes, ChPid, Flow, BQS)).
+    ?passthrough2(publish_delivered(Msg, MsgProps, ChPid, BQS)).
 
 %% TODO this is a hack. The BQ api does not give us enough information
 %% here - if we had the Msg we could look at its priority and forward
@@ -257,14 +226,14 @@ batch_publish_delivered(Publishes, ChPid, Flow,
 %% are talking to VQ*. discard/4 is used by HA, but that's "above" us
 %% (if in use) so we don't break that either, just some hypothetical
 %% alternate BQ implementation.
-discard(_MsgId, _ChPid, _Flow, State = #state{}) ->
+discard(_MsgId, _ChPid, State = #state{}) ->
     State;
     %% We should have something a bit like this here:
     %% pick1(fun (_P, BQSN) ->
-    %%               BQ:discard(MsgId, ChPid, Flow, BQSN)
+    %%               BQ:discard(MsgId, ChPid, BQSN)
     %%       end, Msg, State);
-discard(MsgId, ChPid, Flow, State = #passthrough{bq = BQ, bqs = BQS}) ->
-    ?passthrough1(discard(MsgId, ChPid, Flow, BQS)).
+discard(MsgId, ChPid, State = #passthrough{bq = BQ, bqs = BQS}) ->
+    ?passthrough1(discard(MsgId, ChPid, BQS)).
 
 drain_confirmed(State = #state{bq = BQ}) ->
     fold_append2(fun (_P, BQSN) -> BQ:drain_confirmed(BQSN) end, State);
@@ -359,18 +328,10 @@ depth(#state{bq = BQ, bqss = BQSs}) ->
 depth(#passthrough{bq = BQ, bqs = BQS}) ->
     BQ:depth(BQS).
 
-set_ram_duration_target(DurationTarget, State = #state{bq = BQ}) ->
-    foreach1(fun (_P, BQSN) ->
-                     BQ:set_ram_duration_target(DurationTarget, BQSN)
-             end, State);
-set_ram_duration_target(DurationTarget,
-                        State = #passthrough{bq = BQ, bqs = BQS}) ->
-    ?passthrough1(set_ram_duration_target(DurationTarget, BQS)).
-
-ram_duration(State = #state{bq = BQ}) ->
-    fold_min2(fun (_P, BQSN) -> BQ:ram_duration(BQSN) end, State);
-ram_duration(State = #passthrough{bq = BQ, bqs = BQS}) ->
-    ?passthrough2(ram_duration(BQS)).
+update_rates(State = #state{bq = BQ}) ->
+    foreach1(fun (_P, BQSN) -> BQ:update_rates(BQSN) end, State);
+update_rates(State = #passthrough{bq = BQ, bqs = BQS}) ->
+    ?passthrough1(update_rates(BQS)).
 
 needs_timeout(#state{bq = BQ, bqss = BQSs}) ->
     fold0(fun (_P, _BQSN, timed) -> timed;
@@ -395,11 +356,6 @@ handle_pre_hibernate(State = #state{bq = BQ}) ->
 handle_pre_hibernate(State = #passthrough{bq = BQ, bqs = BQS}) ->
     ?passthrough1(handle_pre_hibernate(BQS)).
 
-handle_info(Msg, State = #state{bq = BQ}) ->
-    foreach1(fun (_P, BQSN) -> BQ:handle_info(Msg, BQSN) end, State);
-handle_info(Msg, State = #passthrough{bq = BQ, bqs = BQS}) ->
-    ?passthrough1(handle_info(Msg, BQS)).
-
 resume(State = #state{bq = BQ}) ->
     foreach1(fun (_P, BQSN) -> BQ:resume(BQSN) end, State);
 resume(State = #passthrough{bq = BQ, bqs = BQS}) ->
@@ -419,6 +375,8 @@ info(backing_queue_status, #state{bq = BQ, bqss = BQSs}) ->
           end, nothing, BQSs);
 info(head_message_timestamp, #state{bq = BQ, bqss = BQSs}) ->
     find_head_message_timestamp(BQ, BQSs, '');
+info(oldest_message_received_timestamp, #state{bq = BQ, bqss = BQSs}) ->
+    find_oldest_message_received_timestamp(BQ, BQSs);
 info(online, _) ->
     '';
 info(Item, #state{bq = BQ, bqss = BQSs}) ->
@@ -532,13 +490,6 @@ fold_add2(Fun, State) ->
                   {add_maybe_infinity(Res, Acc), BQSN1}
           end, 0, State).
 
-%% Fold over results assuming results are numbers and we want the minimum
-fold_min2(Fun, State) ->
-    fold2(fun (P, BQSN, Acc) ->
-                  {Res, BQSN1} = Fun(P, BQSN),
-                  {erlang:min(Res, Acc), BQSN1}
-          end, infinity, State).
-
 %% Fold over results assuming results are lists and we want to append
 %% them, and also that we have some AckTags we want to pass in to each
 %% invocation.
@@ -603,10 +554,6 @@ a(State = #state{bqss = BQSs}) ->
     end.
 
 %%----------------------------------------------------------------------------
-partition_publish_batch(Publishes, MaxP) ->
-    partition_publishes(
-      Publishes, fun ({Msg, _, _}) -> Msg end, MaxP).
-
 partition_publish_delivered_batch(Publishes, MaxP) ->
     partition_publishes(
       Publishes, fun ({Msg, _}) -> Msg end, MaxP).
@@ -633,11 +580,8 @@ priority(Priority, MaxP) when is_integer(Priority), Priority =< MaxP ->
     Priority;
 priority(Priority, MaxP) when is_integer(Priority), Priority > MaxP ->
     MaxP;
-priority(#basic_message{content = Content}, MaxP) ->
-    priority(rabbit_binary_parser:ensure_content_decoded(Content), MaxP);
-priority(#content{properties = Props}, MaxP) ->
-    #'P_basic'{priority = Priority0} = Props,
-    priority(Priority0, MaxP).
+priority(Msg, MaxP) ->
+    priority(mc:priority(Msg), MaxP).
 
 add_maybe_infinity(infinity, _) -> infinity;
 add_maybe_infinity(_, infinity) -> infinity;
@@ -661,7 +605,13 @@ priority_on_acktags(P, AckTags) ->
 combine_status(P, New, nothing) ->
     [{priority_lengths, [{P, proplists:get_value(len, New)}]} | New];
 combine_status(P, New, Old) ->
-    Combined = [{K, cse(V, proplists:get_value(K, Old))} || {K, V} <- New],
+    Combined = [case K of
+                    version ->
+                        {K, proplists:get_value(version, Old)};
+                    _ ->
+                        {K, cse(V, proplists:get_value(K, Old))}
+                end
+                || {K, V} <- New],
     Lens = [{P, proplists:get_value(len, New)} |
             proplists:get_value(priority_lengths, Old)],
     [{priority_lengths, Lens} | Combined].
@@ -692,8 +642,31 @@ find_head_message_timestamp(BQ, [{_, BQSN} | Rest], Timestamp) ->
 find_head_message_timestamp(_, [], Timestamp) ->
     Timestamp.
 
+find_oldest_message_received_timestamp(BQ, BQs) ->
+    %% Oldest message timestamp among all priority queues
+    Timestamps =
+        lists:foldl(
+          fun({_, BQSN}, Acc) ->
+                  case oldest_message_received_timestamp(BQ, BQSN) of
+                      '' -> Acc;
+                      Ts -> [Ts | Acc]
+                  end
+          end, [], BQs),
+    case Timestamps of
+        [] -> '';
+        _ -> lists:min(Timestamps)
+    end.
+
+oldest_message_received_timestamp(BQ, BQSN) ->
+    MsgCount = BQ:len(BQSN) + BQ:info(messages_unacknowledged_ram, BQSN),
+    if
+        MsgCount =/= 0 -> BQ:info(oldest_message_received_timestamp, BQSN);
+        true -> ''
+    end.
+
 zip_msgs_and_acks(Pubs, AckTags) ->
     lists:zipwith(
-      fun ({#basic_message{ id = Id }, _Props}, AckTag) ->
-                  {Id, AckTag}
+      fun ({Msg, _Props}, AckTag) ->
+              Id = mc:get_annotation(id, Msg),
+              {Id, AckTag}
       end, Pubs, AckTags).

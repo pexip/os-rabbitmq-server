@@ -2,7 +2,7 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2016, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc
 %%%
 %%% @end
@@ -13,7 +13,7 @@
 -behaviour(jose_jwk_kty).
 -behaviour(jose_jwk_use_sig).
 
--include_lib("jose_public_key.hrl").
+-include("jose_public_key.hrl").
 
 %% jose_jwk callbacks
 -export([from_map/1]).

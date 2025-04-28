@@ -2,7 +2,7 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2016, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc
 %%%
 %%% @end
@@ -49,20 +49,20 @@ eddsa_secret_to_public(SecretKey)
 ed448_sign(Message, SecretKey)
 		when is_binary(Message)
 		andalso is_binary(SecretKey) ->
-	jose_jwa_ed448:sign(Message, SecretKey).
+	jose_jwa_ed448:ed448_sign(Message, SecretKey).
 
 ed448_sign(Message, SecretKey, Context)
 		when is_binary(Message)
 		andalso is_binary(SecretKey)
 		andalso is_binary(Context) ->
-	jose_jwa_ed448:sign(Message, SecretKey, Context).
+	jose_jwa_ed448:ed448_sign(Message, SecretKey, Context).
 
 ed448_verify(Signature, Message, PublicKey)
 		when is_binary(Signature)
 		andalso is_binary(Message)
 		andalso is_binary(PublicKey) ->
 	try
-		jose_jwa_ed448:verify(Signature, Message, PublicKey)
+		jose_jwa_ed448:ed448_verify(Signature, Message, PublicKey)
 	catch
 		_:_ ->
 			false
@@ -74,7 +74,7 @@ ed448_verify(Signature, Message, PublicKey, Context)
 		andalso is_binary(PublicKey)
 		andalso is_binary(Context) ->
 	try
-		jose_jwa_ed448:verify(Signature, Message, PublicKey, Context)
+		jose_jwa_ed448:ed448_verify(Signature, Message, PublicKey, Context)
 	catch
 		_:_ ->
 			false
@@ -84,20 +84,20 @@ ed448_verify(Signature, Message, PublicKey, Context)
 ed448ph_sign(Message, SecretKey)
 		when is_binary(Message)
 		andalso is_binary(SecretKey) ->
-	jose_jwa_ed448:sign_with_prehash(Message, SecretKey).
+	jose_jwa_ed448:ed448ph_sign(Message, SecretKey).
 
 ed448ph_sign(Message, SecretKey, Context)
 		when is_binary(Message)
 		andalso is_binary(SecretKey)
 		andalso is_binary(Context) ->
-	jose_jwa_ed448:sign_with_prehash(Message, SecretKey, Context).
+	jose_jwa_ed448:ed448ph_sign(Message, SecretKey, Context).
 
 ed448ph_verify(Signature, Message, PublicKey)
 		when is_binary(Signature)
 		andalso is_binary(Message)
 		andalso is_binary(PublicKey) ->
 	try
-		jose_jwa_ed448:verify_with_prehash(Signature, Message, PublicKey)
+		jose_jwa_ed448:ed448ph_verify(Signature, Message, PublicKey)
 	catch
 		_:_ ->
 			false
@@ -109,7 +109,7 @@ ed448ph_verify(Signature, Message, PublicKey, Context)
 		andalso is_binary(PublicKey)
 		andalso is_binary(Context) ->
 	try
-		jose_jwa_ed448:verify_with_prehash(Signature, Message, PublicKey, Context)
+		jose_jwa_ed448:ed448ph_verify(Signature, Message, PublicKey, Context)
 	catch
 		_:_ ->
 			false

@@ -2,7 +2,7 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2015, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc
 %%%
 %%% @end
@@ -10,7 +10,7 @@
 %%%-------------------------------------------------------------------
 -module(jose_jwk_kty).
 
--include_lib("jose_public_key.hrl").
+-include("jose_public_key.hrl").
 
 -callback generate_key(Parameters) -> KTY
 	when

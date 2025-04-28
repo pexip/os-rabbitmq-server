@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 
 -module(osiris_log).
@@ -19,6 +19,7 @@
          recover_tracking/1,
          accept_chunk/2,
          next_offset/1,
+         can_read_next/1,
          first_offset/1,
          first_timestamp/1,
          tail_info/1,
@@ -28,13 +29,20 @@
          init_data_reader/2,
          init_offset_reader/2,
          read_header/1,
+         chunk_iterator/1,
+         chunk_iterator/2,
+         iterator_next/1,
          read_chunk/1,
          read_chunk_parsed/1,
          read_chunk_parsed/2,
          committed_offset/1,
+         committed_chunk_id/1,
+         set_committed_chunk_id/2,
+         last_chunk_id/1,
          get_current_epoch/1,
          get_directory/1,
          get_name/1,
+         get_shared/1,
          get_default_max_segment_size_bytes/0,
          counters_ref/1,
          close/1,
@@ -43,17 +51,26 @@
          update_retention/2,
          evaluate_retention/2,
          directory/1,
-         delete_directory/1]).
+         delete_directory/1,
+         make_counter/1]).
 
--ifdef(TEST).
--export([part_test/0]).
--endif.
+-export([dump_init/1,
+         dump_init_idx/1,
+         dump_chunk/1,
+         dump_index/1,
+         dump_crc_check/1]).
+%% for testing
+-export([
+         sorted_index_files/1,
+         index_files_unsorted/1,
+         make_chunk/7,
+         orphaned_segments/1
+        ]).
 
 % maximum size of a segment in bytes
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
 % maximum number of chunks per segment
 -define(DEFAULT_MAX_SEGMENT_SIZE_C, 256_000).
--define(INDEX_RECORD_SIZE_B, 29).
 -define(C_OFFSET, 1).
 -define(C_FIRST_OFFSET, 2).
 -define(C_FIRST_TIMESTAMP, 3).
@@ -61,14 +78,32 @@
 -define(C_SEGMENTS, 5).
 -define(COUNTER_FIELDS,
         [
-         {offset, ?C_OFFSET, counter, "The last offset (not chunk id) in the log for writers. The last offset read for readers"
-         },
+         {offset, ?C_OFFSET, counter,
+          "The last offset (not chunk id) in the log for writers. The last offset read for readers" },
          {first_offset, ?C_FIRST_OFFSET, counter, "First offset, not updated for readers"},
          {first_timestamp, ?C_FIRST_TIMESTAMP, counter, "First timestamp, not updated for readers"},
          {chunks, ?C_CHUNKS, counter, "Number of chunks read or written, incremented even if a reader only reads the header"},
          {segments, ?C_SEGMENTS, counter, "Number of segments"}
         ]
        ).
+
+-define(ZERO_IDX_MATCH(Rem),
+        <<0:64/unsigned,
+          0:64/signed,
+          0:64/unsigned,
+          0:32/unsigned,
+          0:8/unsigned,
+         Rem/binary>>).
+
+-define(IDX_MATCH(ChId, Epoch, FilePos),
+        <<ChId:64/unsigned,
+          _:64/signed,
+          Epoch:64/unsigned,
+          FilePos:32/unsigned,
+          _:8/unsigned,
+        _/binary>>).
+
+-define(SKIP_SEARCH_JUMP, 2048).
 
 %% Specification of the Log format.
 %%
@@ -119,7 +154,10 @@
 %%   +---------------------------------------------------------------+
 %%   | Trailer length                                                |
 %%   +---------------------------------------------------------------+
-%%   | Reserved                                                      |
+%%   | Bloom Size    | Reserved                                      |
+%%   +---------------------------------------------------------------+
+%%   | Bloom filter data                                             |
+%%   : (<bloom size> bytes)                                          :
 %%   +---------------------------------------------------------------+
 %%   | Contiguous list of Data entries                               |
 %%   : (<data length> bytes)                                         :
@@ -325,20 +363,27 @@
     ?CHNK_TRK_SNAPSHOT.
 -type config() ::
     osiris:config() |
-    #{dir := file:filename(),
+    #{dir := file:filename_all(),
       epoch => non_neg_integer(),
-      first_offset_fun => fun((integer()) -> ok),
+      % first_offset_fun => fun((integer()) -> ok),
+      shared => atomics:atomics_ref(),
       max_segment_size_bytes => non_neg_integer(),
       %% max number of writer ids to keep around
       tracking_config => osiris_tracking:config(),
+      %% if the counter is created before init is passed here
+      counter => counters:counters_ref(),
+      %% spec for creating the counter
       counter_spec => counter_spec(),
       %% used when initialising a log from an offset other than 0
       initial_offset => osiris:offset(),
       %% a cached list of the index files for a given log
       %% avoids scanning disk for files multiple times if already know
       %% e.g. in init_acceptor
-      index_files => [filename:filename()]}.
--type record() :: {offset(), osiris:data()}.
+      index_files => [file:filename_all()],
+      filter_size => osiris_bloom:filter_size()
+     }.
+-type record() :: {offset(), osiris:entry()}.
+-type offset_entry() :: {offset(), osiris:entry()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
 -type header_map() ::
@@ -351,14 +396,16 @@
       timestamp => osiris:timestamp(),
       data_size => non_neg_integer(),
       trailer_size => non_neg_integer(),
+      filter_size => 16..255,
       header_data => binary(),
-      position => non_neg_integer()}.
+      position => non_neg_integer(),
+      next_position => non_neg_integer()}.
 -type transport() :: tcp | ssl.
 
 %% holds static or rarely changing fields
 -record(cfg,
-        {directory :: file:filename(),
-         name :: string(),
+        {directory :: file:filename_all(),
+         name :: osiris:name(),
          max_segment_size_bytes = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
          max_segment_size_chunks = ?DEFAULT_MAX_SEGMENT_SIZE_C :: non_neg_integer(),
          tracking_config = #{} :: osiris_tracking:config(),
@@ -368,29 +415,26 @@
          %% the maximum number of active writer deduplication sessions
          %% that will be included in snapshots written to new segments
          readers_counter_fun = fun(_) -> ok end :: function(),
-         first_offset_fun :: fun ((integer()) -> ok)}).
+         shared :: atomics:atomics_ref(),
+         filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size()
+         }).
 -record(read,
         {type :: data | offset,
-         offset_ref :: undefined | atomics:atomics_ref(),
-         last_offset = 0 :: offset(),
          next_offset = 0 :: offset(),
          transport :: transport(),
-         chunk_selector :: all | user_data}).
+         chunk_selector :: all | user_data,
+         position = 0 :: non_neg_integer(),
+         filter :: undefined | osiris_bloom:mstate()}).
 -record(write,
         {type = writer :: writer | acceptor,
          segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
          current_epoch :: non_neg_integer(),
          tail_info = {0, empty} :: osiris:tail_info()
         }).
-% -record(segment,
-%         {
-%          current_file :: undefined | file:filename(),
-%          index_fd :: undefined | file:io_device(),
-%          fd :: undefined | file:io_device()}).
 -record(?MODULE,
         {cfg :: #cfg{},
          mode :: #read{} | #write{},
-         current_file :: undefined | file:filename(),
+         current_file :: undefined | file:filename_all(),
          index_fd :: undefined | file:io_device(),
          fd :: undefined | file:io_device()
         }).
@@ -401,32 +445,34 @@
          epoch :: epoch(),
          num :: non_neg_integer(),
          type :: chunk_type(),
-         %% size of data + trailer
+         %% size of data + filter + trailer
          size :: non_neg_integer(),
          %% position in segment file
          pos :: integer()
         }).
 -record(seg_info,
-        {file :: file:filename(),
+        {file :: file:filename_all(),
          size = 0 :: non_neg_integer(),
-         index :: file:filename(),
+         index :: file:filename_all(),
          first :: undefined | #chunk_info{},
          last :: undefined | #chunk_info{}}).
 
 -opaque state() :: #?MODULE{}.
 
 -export_type([state/0,
+              chunk_iterator/0,
               range/0,
               config/0,
-              counter_spec/0]).
+              counter_spec/0,
+              transport/0]).
 
--spec directory(osiris:config() | list()) -> file:filename().
+-spec directory(osiris:config() | list()) -> file:filename_all().
 directory(#{name := Name, dir := Dir}) ->
     filename:join(Dir, Name);
 directory(#{name := Name}) ->
     {ok, Dir} = application:get_env(osiris, data_dir),
     filename:join(Dir, Name);
-directory(Name) when is_list(Name) ->
+directory(Name) when ?IS_STRING(Name) ->
     {ok, Dir} = application:get_env(osiris, data_dir),
     filename:join(Dir, Name).
 
@@ -440,16 +486,17 @@ init(#{dir := Dir,
        epoch := Epoch} = Config,
      WriterType) ->
     %% scan directory for segments if in write mode
-    MaxSizeBytes =
-        maps:get(max_segment_size_bytes, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
+    MaxSizeBytes = maps:get(max_segment_size_bytes, Config,
+                            ?DEFAULT_MAX_SEGMENT_SIZE_B),
     MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
                                         ?DEFAULT_MAX_SEGMENT_SIZE_C),
     Retention = maps:get(retention, Config, []),
-    ?INFO("Stream: ~s will use ~s for osiris log data directory",
+    FilterSize = maps:get(filter_size, Config, ?DEFAULT_FILTER_SIZE),
+    ?INFO("Stream: ~ts will use ~ts for osiris log data directory",
           [Name, Dir]),
-    ?DEBUG("osiris_log:init/1 stream ~s max_segment_size_bytes: ~b,
-           max_segment_size_chunks ~b, retention ~w",
-          [Name, MaxSizeBytes, MaxSizeChunks, Retention]),
+    ?DEBUG_(Name, "max_segment_size_bytes: ~b,
+           max_segment_size_chunks ~b, retention ~w, filter size ~b",
+            [MaxSizeBytes, MaxSizeChunks, Retention, FilterSize]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
         ok ->
@@ -466,7 +513,12 @@ init(#{dir := Dir,
     %% is initialised to 0 however and will be updated after each retention run.
     counters:put(Cnt, ?C_OFFSET, -1),
     counters:put(Cnt, ?C_SEGMENTS, 0),
-    FirstOffsetFun = maps:get(first_offset_fun, Config, fun (_) -> ok end),
+    Shared = case Config of
+                 #{shared := S} ->
+                     S;
+                 _ ->
+                     osiris_log_shared:new()
+             end,
     Cfg = #cfg{directory = Dir,
                name = Name,
                max_segment_size_bytes = MaxSizeBytes,
@@ -475,22 +527,25 @@ init(#{dir := Dir,
                retention = Retention,
                counter = Cnt,
                counter_id = counter_id(Config),
-               first_offset_fun = FirstOffsetFun},
+               shared = Shared,
+               filter_size = FilterSize},
     ok = maybe_fix_corrupted_files(Config),
+    DefaultNextOffset = case Config of
+                            #{initial_offset := IO}
+                              when WriterType == acceptor ->
+                                IO;
+                            _ ->
+                                0
+                        end,
     case first_and_last_seginfos(Config) of
         none ->
-            NextOffset = case Config of
-                             #{initial_offset := IO}
-                               when WriterType == acceptor ->
-                                 IO;
-                             _ ->
-                                 0
-                         end,
-            FirstOffsetFun(NextOffset - 1),
+            osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
+            osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
             open_new_segment(#?MODULE{cfg = Cfg,
                                       mode =
                                           #write{type = WriterType,
-                                                 tail_info = {NextOffset, empty},
+                                                 tail_info = {DefaultNextOffset,
+                                                              empty},
                                                  current_epoch = Epoch}});
         {NumSegments,
          #seg_info{first = #chunk_info{id = FstChId,
@@ -498,11 +553,10 @@ init(#{dir := Dir,
          #seg_info{file = Filename,
                    index = IdxFilename,
                    size = Size,
-                   last =
-                   #chunk_info{epoch = LastEpoch,
-                               timestamp = LastTs,
-                               id = LastChId,
-                               num = LastNum}}} ->
+                   last = #chunk_info{epoch = LastEpoch,
+                                      timestamp = LastTs,
+                                      id = LastChId,
+                                      num = LastNum}}} ->
             %% assert epoch is same or larger
             %% than last known epoch
             case LastEpoch > Epoch of
@@ -518,18 +572,17 @@ init(#{dir := Dir,
             counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
             counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
             counters:put(Cnt, ?C_SEGMENTS, NumSegments),
-            FirstOffsetFun(FstChId),
-            ?DEBUG("~s:~s/~b: ~s next offset ~b first offset ~b",
-                   [?MODULE,
-                    ?FUNCTION_NAME,
-                    ?FUNCTION_ARITY,
-                    Name,
-                    element(1, TailInfo),
-                    FstChId]),
+            osiris_log_shared:set_first_chunk_id(Shared, FstChId),
+            osiris_log_shared:set_last_chunk_id(Shared, LastChId),
+            ?DEBUG_(Name, " next offset ~b first offset ~b",
+                    [element(1, TailInfo),
+                     FstChId]),
             {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, Size} = file:position(SegFd, Size),
-            %% maybe_fix_corrupted_files has truncated the index to the last record poiting
-            %% at a valid chunk we can now truncate the segment to size in case there is trailing data
+            %% maybe_fix_corrupted_files has truncated the index to the last
+            %% record pointing
+            %% at a valid chunk we can now truncate the segment to size in
+            %% case there is trailing data
             ok = file:truncate(SegFd),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, IdxEof} = file:position(IdxFd, eof),
@@ -549,15 +602,19 @@ init(#{dir := Dir,
             %% the empty log case
             {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
-            %% TODO: do we potentially need to truncate the segment
-            %% here too?
-            {ok, _} = file:position(SegFd, eof),
-            {ok, _} = file:position(IdxFd, eof),
-            FirstOffsetFun(-1),
+            {ok, _} = file:position(SegFd, ?LOG_HEADER_SIZE),
+            counters:put(Cnt, ?C_SEGMENTS, 1),
+            %% the segment could potentially have trailing data here so we'll
+            %% do a truncate just in case. The index would have been truncated
+            %% earlier
+            ok = file:truncate(SegFd),
+            {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
+            osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
+            osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
-                                tail_info = {0, empty},
+                                tail_info = {DefaultNextOffset, empty},
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
                      fd = SegFd,
@@ -567,10 +624,19 @@ init(#{dir := Dir,
 maybe_fix_corrupted_files([]) ->
     ok;
 maybe_fix_corrupted_files(#{dir := Dir}) ->
-    ok = maybe_fix_corrupted_files(sorted_index_files(Dir));
+    ok = maybe_fix_corrupted_files(sorted_index_files(Dir)),
+    %% dangling segments can be left behind if the server process crashes
+    %% after the retention evaluator process deleted the index but
+    %% before it deleted the corresponding segment
+    [begin
+         ?INFO("deleting left over segment '~s' in directory ~s",
+               [F, Dir]),
+         ok = prim_file:delete(filename:join(Dir, F))
+     end|| F <- orphaned_segments(Dir)],
+    ok;
 maybe_fix_corrupted_files([IdxFile]) ->
     SegFile = segment_from_index_file(IdxFile),
-    ok = truncate_invalid_idx_records(IdxFile, file_size(SegFile)),
+    ok = truncate_invalid_idx_records(IdxFile, file_size_or_zero(SegFile)),
     case file_size(IdxFile) =< ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
         true ->
             % the only index doesn't contain a single valid record
@@ -581,7 +647,7 @@ maybe_fix_corrupted_files([IdxFile]) ->
         false ->
             ok
     end,
-    case file_size(SegFile) =< ?LOG_HEADER_SIZE + ?HEADER_SIZE_B of
+    case file_size_or_zero(SegFile) =< ?LOG_HEADER_SIZE + ?HEADER_SIZE_B of
         true ->
             % the only segment doesn't contain a single valid chunk
             % make sure it has a valid header
@@ -594,15 +660,21 @@ maybe_fix_corrupted_files([IdxFile]) ->
 maybe_fix_corrupted_files(IdxFiles) ->
     LastIdxFile = lists:last(IdxFiles),
     LastSegFile = segment_from_index_file(LastIdxFile),
-    case file_size(LastSegFile) of
+    try file_size(LastSegFile) of
         N when N =< ?HEADER_SIZE_B ->
             % if the segment doesn't contain any chunks, just delete it
-            ?WARNING("deleting an empty segment file: ~p", [LastSegFile]),
+            ?WARNING("deleting an empty segment file: ~0p", [LastSegFile]),
             ok = prim_file:delete(LastIdxFile),
             ok = prim_file:delete(LastSegFile),
             maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile]);
         LastSegFileSize ->
             ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
+    catch missing_file ->
+            % if the last segment is missing, just delete its index
+            ?WARNING("deleting index of the missing last segment file: ~0p",
+                     [LastSegFile]),
+            ok = prim_file:delete(LastIdxFile),
+            maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile])
     end.
 
 non_empty_index_files([]) ->
@@ -637,15 +709,11 @@ skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos) ->
         true ->
             {ok, _} = file:position(IdxFd, Pos - ?INDEX_RECORD_SIZE_B),
             case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
-                {ok, <<0:(?INDEX_RECORD_SIZE_B*8)>>} ->
+                {ok, ?ZERO_IDX_MATCH(_)} ->
                     % trailing zeros found
                     skip_invalid_idx_records(IdxFd, SegFile, SegSize,
                                              Pos - ?INDEX_RECORD_SIZE_B);
-                {ok, <<_ChunkId:64/unsigned,
-                       _Timestamp:64/signed,
-                       _Epoch:64/unsigned,
-                       ChunkPos:32/unsigned,
-                       _ChType:8/unsigned>>} ->
+                {ok, ?IDX_MATCH(_, _, ChunkPos)} ->
                     % a non-zero index record
                     case ChunkPos < SegSize andalso
                          is_valid_chunk_on_disk(SegFile, ChunkPos) of
@@ -653,7 +721,8 @@ skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos) ->
                             ok;
                         false ->
                             % this chunk doesn't exist in the segment or is invalid
-                            skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos - ?INDEX_RECORD_SIZE_B)
+                            skip_invalid_idx_records(IdxFd, SegFile, SegSize,
+                                                     Pos - ?INDEX_RECORD_SIZE_B)
                     end;
                 Err ->
                     Err
@@ -674,27 +743,23 @@ write(Entries, Now, #?MODULE{mode = #write{}} = State)
     when is_integer(Now) ->
     write(Entries, ?CHNK_USER, Now, <<>>, State).
 
--spec write([osiris:data()],
-            chunk_type(),
-            osiris:timestamp(),
-            iodata(),
-            state()) ->
-               state().
+-spec write([osiris:data()], chunk_type(), osiris:timestamp(),
+            iodata(), state()) -> state().
 write([_ | _] = Entries,
       ChType,
       Now,
       Trailer,
-      #?MODULE{cfg = #cfg{},
+      #?MODULE{cfg = #cfg{filter_size = FilterSize},
                mode =
                    #write{current_epoch = Epoch, tail_info = {Next, _}} =
                        _Write0} =
           State0)
-    when is_integer(Now)
-         andalso is_integer(ChType) ->
+    when is_integer(Now) andalso
+         is_integer(ChType) ->
     %% The osiris writer always pass Entries in the reversed order
     %% in order to avoid unnecessary lists rev|trav|ersals
     {ChunkData, NumRecords} =
-        make_chunk(Entries, Trailer, ChType, Now, Epoch, Next),
+        make_chunk(Entries, Trailer, ChType, Now, Epoch, Next, FilterSize),
     write_chunk(ChunkData, ChType, Now, Epoch, NumRecords, State0);
 write([], _ChType, _Now, _Trailer, #?MODULE{} = State) ->
     State.
@@ -711,7 +776,9 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 Crc:32/integer,
                 DataSize:32/unsigned,
                 _TrailerSize:32/unsigned,
-                _Reserved:32,
+                FilterSize:8/unsigned,
+                _Reserved:24,
+                _Filter:FilterSize/binary,
                 Data/binary>>
               | DataParts] =
                  Chunk,
@@ -799,8 +866,7 @@ init_acceptor(Range, EpochOffsets0,
 
     %% then truncate to
     IdxFiles = sorted_index_files(Dir),
-    ?DEBUG("~s: ~s ~s from epoch offsets: ~w range ~w",
-           [?MODULE, ?FUNCTION_NAME, Name, EpochOffsets, Range]),
+    ?DEBUG_(Name, "from epoch offsets: ~w range ~w", [EpochOffsets, Range]),
     RemIdxFiles = truncate_to(Name, Range, EpochOffsets, IdxFiles),
     %% after truncation we can do normal init
     InitOffset = case Range  of
@@ -810,19 +876,15 @@ init_acceptor(Range, EpochOffsets0,
     init(Conf#{initial_offset => InitOffset,
                index_files => RemIdxFiles}, acceptor).
 
-chunk_id_index_scan(IdxFile, ChunkId) when is_list(IdxFile) ->
+chunk_id_index_scan(IdxFile, ChunkId)
+  when ?IS_STRING(IdxFile) ->
     Fd = open_index_read(IdxFile),
     chunk_id_index_scan0(Fd, ChunkId).
 
 chunk_id_index_scan0(Fd, ChunkId) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
-        {ok,
-         <<ChunkId:64/unsigned,
-           _Timestamp:64/signed,
-           Epoch:64/unsigned,
-           FilePos:32/unsigned,
-           _ChType:8/unsigned>>} ->
-	    {ok, IdxPos} = file:position(Fd, cur),
+        {ok, ?IDX_MATCH(ChunkId, Epoch, FilePos)} ->
+            {ok, IdxPos} = file:position(Fd, cur),
             ok = file:close(Fd),
             {ChunkId, Epoch, FilePos, IdxPos - ?INDEX_RECORD_SIZE_B};
         {ok, _} ->
@@ -834,7 +896,7 @@ chunk_id_index_scan0(Fd, ChunkId) ->
 
 delete_segment_from_index(Index) ->
     File = segment_from_index_file(Index),
-    ?DEBUG("osiris_log: deleting segment ~s", [File]),
+    ?DEBUG("osiris_log: deleting segment ~ts", [File]),
     ok = prim_file:delete(Index),
     ok = prim_file:delete(File),
     ok.
@@ -848,16 +910,19 @@ truncate_to(_Name, _Range, [], IdxFiles) ->
     [];
 truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
     case find_segment_for_offset(ChId, IdxFiles) of
-        not_found ->
+        {Result, _} when Result == not_found orelse
+                         Result == end_of_log ->
+            %% both not_found and end_of_log needs to be treated as not found
+            %% as they are...
             case build_seg_info(lists:last(IdxFiles)) of
                 {ok, #seg_info{last = #chunk_info{epoch = E,
                                                   id = LastChId,
                                                   num = Num}}}
-                when ChId > LastChId + Num ->
+                when ChId > LastChId ->
                     %% the last available local chunk id is smaller than the
-                    %% sources last chunk id but is in the same epoch
+                    %% source's last chunk id but is in the same epoch
                     %% check if there is any overlap
-                    LastOffsLocal = LastChId + Num,
+                    LastOffsLocal = LastChId + Num - 1,
                     FstOffsetRemote = case RemoteRange of
                                           empty -> 0;
                                           {F, _} -> F
@@ -879,12 +944,9 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                     %% TODO: what to do if error is returned from
                     %% build_seg_info/1?
             end;
-        {end_of_log, _Info} ->
-            IdxFiles;
         {found, #seg_info{file = File, index = IdxFile}} ->
-            ?DEBUG("osiris_log: ~s on node ~s truncating to chunk "
-                   "id ~b in epoch ~b",
-                   [Name, node(), ChId, E]),
+            ?DEBUG_(Name, " truncating to chunk_id ~b in epoch ~b",
+                    [ChId, E]),
             %% this is the inclusive case
             %% next offset needs to be a chunk offset
             %% if it is not found we know the offset requested isn't a chunk
@@ -898,9 +960,8 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                     _ = file:advise(Fd, 0, 0, random),
                     {ok, IdxFd} = file:open(IdxFile, [read, write, binary, raw]),
 
-                    {_ChType, ChId, E, _Num, Size, TSize} = header_info(Fd, Pos),
-                    %% position at end of chunk
-                    {ok, _Pos} = file:position(Fd, {cur, Size + TSize}),
+                    NextPos = next_chunk_pos(Fd, Pos),
+                    {ok, _} = file:position(Fd, NextPos),
                     ok = file:truncate(Fd),
 
                     {ok, _} = file:position(IdxFd, IdxPos + ?INDEX_RECORD_SIZE_B),
@@ -925,19 +986,16 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
     end.
 
 -spec init_data_reader(osiris:tail_info(), config()) ->
-                          {ok, state()} |
-                          {error,
-                           {offset_out_of_range,
-                            empty | {offset(), offset()}}} |
-                          {error,
-                           {invalid_last_offset_epoch, epoch(), offset()}}.
+    {ok, state()} |
+    {error, {offset_out_of_range, empty | {offset(), offset()}}} |
+    {error, {invalid_last_offset_epoch, epoch(), offset()}} |
+    {error, file:posix()}.
 init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
                                             name := Name} = Config) ->
     IdxFiles = sorted_index_files(Dir),
     Range = offset_range_from_idx_files(IdxFiles),
-    ?DEBUG("osiris_segment:init_data_reader/2 ~s at ~b prev "
-           "~w local range: ~w",
-           [Name, StartChunkId, PrevEOT, Range]),
+    ?DEBUG_(Name, " at ~b prev ~w local range: ~w",
+           [StartChunkId, PrevEOT, Range]),
     %% Invariant:  there is always at least one segment left on disk
     case Range of
         {FstOffs, LastOffs}
@@ -949,33 +1007,34 @@ init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
         _ when PrevEOT == empty ->
             %% this assumes the offset is in range
             %% first we need to validate PrevEO
-            {ok, init_data_reader_from(
-                   StartChunkId,
-                   find_segment_for_offset(StartChunkId, IdxFiles),
-                   Config)};
+            init_data_reader_from(StartChunkId,
+                                  find_segment_for_offset(StartChunkId,
+                                                          IdxFiles),
+                                  Config);
         _ ->
             {PrevEpoch, PrevChunkId, _PrevTs} = PrevEOT,
-            case check_chunk_has_expected_epoch(PrevChunkId, PrevEpoch, IdxFiles) of
+            case check_chunk_has_expected_epoch(Name, PrevChunkId,
+                                                PrevEpoch, IdxFiles) of
                 ok ->
-                    {ok, init_data_reader_from(
-                           StartChunkId,
-                           find_segment_for_offset(StartChunkId, IdxFiles),
-                           Config)};
+                    init_data_reader_from(StartChunkId,
+                                          find_segment_for_offset(StartChunkId,
+                                                                  IdxFiles),
+                                          Config);
                 {error, _} = Err ->
                     Err
             end
     end.
 
-check_chunk_has_expected_epoch(ChunkId, Epoch, IdxFiles) ->
+check_chunk_has_expected_epoch(Name, ChunkId, Epoch, IdxFiles) ->
     case find_segment_for_offset(ChunkId, IdxFiles) of
-        not_found ->
+        {not_found, _} ->
             %% this is unexpected and thus an error
             {error,
              {invalid_last_offset_epoch, Epoch, unknown}};
         {found, #seg_info{} = SegmentInfo} ->
             %% prev segment exists, does it have the correct
             %% epoch?
-            case offset_idx_scan(ChunkId, SegmentInfo) of
+            case offset_idx_scan(Name, ChunkId, SegmentInfo) of
                 {ChunkId, Epoch, _PrevPos} ->
                     ok;
                 {ChunkId, OtherEpoch, _} ->
@@ -986,25 +1045,32 @@ check_chunk_has_expected_epoch(ChunkId, Epoch, IdxFiles) ->
 
 init_data_reader_at(ChunkId, FilePos, File,
                     #{dir := Dir, name := Name,
+                      shared := Shared,
                       readers_counter_fun := CountersFun} = Config) ->
-    {ok, Fd} = file:open(File, [raw, binary, read]),
-    {ok, FilePos} = file:position(Fd, FilePos),
-    Cnt = make_counter(Config),
-    counters:put(Cnt, ?C_OFFSET, ChunkId - 1),
-    CountersFun(1),
-    #?MODULE{cfg =
-                 #cfg{directory = Dir,
-                      counter = Cnt,
-                      name = Name,
-                      readers_counter_fun = CountersFun,
-                      first_offset_fun = fun (_) -> ok end},
-             mode =
-                 #read{type = data,
-                       offset_ref = maps:get(offset_ref, Config, undefined),
-                       next_offset = ChunkId,
-                       chunk_selector = all,
-                       transport = maps:get(transport, Config, tcp)},
-             fd = Fd}.
+    case file:open(File, [raw, binary, read]) of
+        {ok, Fd} ->
+            Cnt = make_counter(Config),
+            counters:put(Cnt, ?C_OFFSET, ChunkId - 1),
+            CountersFun(1),
+            {ok,
+             #?MODULE{cfg =
+                      #cfg{directory = Dir,
+                           counter = Cnt,
+                           counter_id = counter_id(Config),
+                           name = Name,
+                           readers_counter_fun = CountersFun,
+                           shared = Shared
+                          },
+                      mode =
+                      #read{type = data,
+                            next_offset = ChunkId,
+                            chunk_selector = all,
+                            position = FilePos,
+                            transport = maps:get(transport, Config, tcp)},
+                      fd = Fd}};
+        Err ->
+            Err
+    end.
 
 init_data_reader_from(ChunkId,
                       {end_of_log, #seg_info{file = File,
@@ -1015,7 +1081,8 @@ init_data_reader_from(ChunkId,
 init_data_reader_from(ChunkId,
                       {found, #seg_info{file = File} = SegInfo},
                       Config) ->
-    {ChunkId, _Epoch, FilePos} = offset_idx_scan(ChunkId, SegInfo),
+    Name = maps:get(name, Config, <<>>),
+    {ChunkId, _Epoch, FilePos} = offset_idx_scan(Name, ChunkId, SegInfo),
     init_data_reader_at(ChunkId, FilePos, File, Config).
 
 %% @doc Initialise a new offset reader
@@ -1091,11 +1158,7 @@ init_offset_reader0({timestamp, Ts}, #{} = Conf) ->
                     open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
                 {first_in, IdxFile} ->
                     {ok, Fd} = file:open(IdxFile, [raw, binary, read]),
-                    {ok, <<ChunkId:64/unsigned,
-                           _Ts:64/signed,
-                           _:64/unsigned,
-                           FilePos:32/unsigned,
-                           _:8/unsigned>>} = first_idx_record(Fd),
+                    {ok, ?IDX_MATCH(ChunkId, _, FilePos)} = first_idx_record(Fd),
                     SegmentFile = segment_from_index_file(IdxFile),
                     open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
                 next ->
@@ -1137,15 +1200,14 @@ init_offset_reader0(next, #{} = Conf) ->
                     exit(Err)
             end
     end;
-init_offset_reader0(last, #{} = Conf) ->
+init_offset_reader0(last, #{name := Name} = Conf) ->
     case sorted_index_files_rev(Conf) of
         [] ->
             {error, no_index_file};
         IdxFiles ->
-            case last_user_chunk_location(IdxFiles) of
+            case last_user_chunk_location(Name, IdxFiles) of
                 not_found ->
-                    ?DEBUG("~s:~s user chunk not found, fall back to next",
-                           [?MODULE, ?FUNCTION_NAME]),
+                    ?DEBUG_(Name, "offset spec: 'last', user chunk not found, fall back to next", []),
                     %% no user chunks in stream, this is awkward, fall back to next
                     init_offset_reader0(next, Conf);
                 {ChunkId, FilePos, IdxFile} ->
@@ -1155,40 +1217,33 @@ init_offset_reader0(last, #{} = Conf) ->
     end;
 init_offset_reader0(OffsetSpec, #{} = Conf)
   when is_integer(OffsetSpec) ->
+    Name = maps:get(name, Conf, <<>>),
     case sorted_index_files(Conf) of
         [] ->
             {error, no_index_file};
         IdxFiles ->
-            Range = offset_range_from_idx_files(IdxFiles),
-            ?DEBUG("osiris_log:init_offset_reader0/2 spec ~w range ~w ",
-                   [OffsetSpec, Range]),
+            {ok, Range} = chunk_id_range_from_idx_files(IdxFiles),
+            ?DEBUG_(Name, " spec ~w chunk_id range ~w Num index files ~b ",
+                   [OffsetSpec, Range, length(IdxFiles)]),
+
             %% clamp start offset
             StartOffset = case {OffsetSpec, Range} of
                               {_, empty} ->
                                   0;
-                              {Offset, {_, LastOffs}}
-                                when Offset == LastOffs + 1 ->
-                                  %% next but we can't use `next`
-                                  %% due to race conditions
-                                  Offset;
-                              {Offset, {_, LastOffs}}
-                                when Offset > LastOffs + 1 ->
-                                  %% out of range, clamp as `next`
-                                  throw({retry_with, next, Conf});
-                              {Offset, {FirstOffs, _LastOffs}} ->
-                                  max(FirstOffs, Offset)
+                              {Offset, {FirstChId, _LastChId}} ->
+                                  max(FirstChId, Offset)
                           end,
 
             case find_segment_for_offset(StartOffset, IdxFiles) of
-                not_found ->
-                    {error, {offset_out_of_range, Range}};
+                {not_found, high} ->
+                    throw({retry_with, next, Conf});
                 {end_of_log, #seg_info{file = SegmentFile,
                                        last = LastChunk}} ->
                     {ChunkId, FilePos} = next_location(LastChunk),
                     open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
                 {found, #seg_info{file = SegmentFile} = SegmentInfo} ->
                     {ChunkId, _Epoch, FilePos} =
-                        case offset_idx_scan(StartOffset, SegmentInfo) of
+                        case offset_idx_scan(Name, StartOffset, SegmentInfo) of
                             eof ->
                                 exit(offset_out_of_range);
                             enoent ->
@@ -1200,8 +1255,8 @@ init_offset_reader0(OffsetSpec, #{} = Conf)
                             IdxResult when is_tuple(IdxResult) ->
                                 IdxResult
                         end,
-                    ?DEBUG("osiris_log:init_offset_reader0/2 resolved chunk_id ~b"
-                           " at file pos: ~w ", [ChunkId, FilePos]),
+                    ?DEBUG_(Name, "resolved chunk_id ~b"
+                            " at file pos: ~w ", [ChunkId, FilePos]),
                     open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf)
             end
     end.
@@ -1209,41 +1264,49 @@ init_offset_reader0(OffsetSpec, #{} = Conf)
 open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                       #{dir := Dir,
                         name := Name,
-                        offset_ref := OffsetRef,
+                        shared := Shared,
                         readers_counter_fun := ReaderCounterFun,
                         options := Options} =
                       Conf) ->
     {ok, Fd} = open(SegmentFile, [raw, binary, read]),
-    {ok, FilePos} = file:position(Fd, FilePos),
     Cnt = make_counter(Conf),
     ReaderCounterFun(1),
+    FilterMatcher = case Options of
+                        #{filter_spec := FilterSpec} ->
+                            osiris_bloom:init_matcher(FilterSpec);
+                        _ ->
+                            undefined
+                    end,
     {ok, #?MODULE{cfg = #cfg{directory = Dir,
                              counter = Cnt,
+                             counter_id = counter_id(Conf),
                              name = Name,
                              readers_counter_fun = ReaderCounterFun,
-                             first_offset_fun = fun (_) -> ok end
+                             shared = Shared
                             },
                   mode = #read{type = offset,
+                               position = FilePos,
                                chunk_selector = maps:get(chunk_selector, Options,
                                                          user_data),
-                               offset_ref = OffsetRef,
                                next_offset = NextChunkId,
-                               transport = maps:get(transport, Options, tcp)},
+                               transport = maps:get(transport, Options, tcp),
+                               filter = FilterMatcher},
                   fd = Fd}}.
 
 %% Searches the index files backwards for the ID of the last user chunk.
-last_user_chunk_location(RevdIdxFiles) when is_list(RevdIdxFiles) ->
+last_user_chunk_location(Name, RevdIdxFiles)
+  when is_list(RevdIdxFiles) ->
     {Time, Result} = timer:tc(
                        fun() ->
-                               last_user_chunk_id0(RevdIdxFiles)
+                               last_user_chunk_id0(Name, RevdIdxFiles)
                        end),
-    ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1_000_000]),
+    ?DEBUG_(Name, " completed in ~fms", [Time / 1000]),
     Result.
 
-last_user_chunk_id0([]) ->
+last_user_chunk_id0(_, []) ->
     %% There are no user chunks in any index files.
     not_found;
-last_user_chunk_id0([IdxFile | Rest]) ->
+last_user_chunk_id0(Name, [IdxFile | Rest]) ->
     %% Do not read-ahead since we read the index file backwards chunk by chunk.
     {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
     {ok, EofPos} = position_at_idx_record_boundary(IdxFd, eof),
@@ -1253,46 +1316,59 @@ last_user_chunk_id0([IdxFile | Rest]) ->
         {ok, Id, Pos} ->
             {Id, Pos, IdxFile};
         {error, Reason} ->
-            ?DEBUG("Could not find user chunk in index file ~s (~p)", [IdxFile, Reason]),
-            last_user_chunk_id0(Rest)
+            ?DEBUG_(Name, "Could not find user chunk in index file ~ts (~0p)",
+                   [IdxFile, Reason]),
+            last_user_chunk_id0(Name, Rest)
     end.
 
-%% Searches the index file backwards for the ID of the last user chunk.
+%% Searches the index file backwards for the chunk id of the last user chunk.
 last_user_chunk_id_in_index(NextPos, IdxFd) ->
     case file:pread(IdxFd, NextPos, ?INDEX_RECORD_SIZE_B) of
-        {ok, <<Offset:64/unsigned,
+        {ok, <<ChunkId:64/unsigned,
                _Timestamp:64/signed,
                _Epoch:64/unsigned,
                FilePos:32/unsigned,
                ?CHNK_USER:8/unsigned>>} ->
-            {ok, Offset, FilePos};
-        {ok, <<_Offset:64/unsigned,
-               _Timestamp:64/signed,
-               _Epoch:64/unsigned,
-               _FilePos:32/unsigned,
-               _ChType:8/unsigned>>} ->
+            {ok, ChunkId, FilePos};
+        {ok, ?IDX_MATCH(_, _, _)} ->
             last_user_chunk_id_in_index(NextPos - ?INDEX_RECORD_SIZE_B, IdxFd);
         {error, _} = Error ->
             Error
     end.
 
--spec committed_offset(state()) -> undefined | offset().
-committed_offset(#?MODULE{mode = #read{offset_ref = undefined}}) ->
-    undefined;
-committed_offset(#?MODULE{mode = #read{offset_ref = Ref}}) ->
-    atomics:get(Ref, 1).
+-spec committed_offset(state()) -> integer().
+committed_offset(State) ->
+    committed_chunk_id(State).
+
+-spec committed_chunk_id(state()) -> integer().
+committed_chunk_id(#?MODULE{cfg = #cfg{shared = Ref}}) ->
+    osiris_log_shared:committed_chunk_id(Ref).
+
+-spec set_committed_chunk_id(state(), offset()) -> ok.
+set_committed_chunk_id(#?MODULE{mode = #write{},
+                                cfg = #cfg{shared = Ref}}, ChunkId)
+  when is_integer(ChunkId) ->
+    osiris_log_shared:set_committed_chunk_id(Ref, ChunkId).
+
+-spec last_chunk_id(state()) -> integer().
+last_chunk_id(#?MODULE{cfg = #cfg{shared = Ref}}) ->
+    osiris_log_shared:last_chunk_id(Ref).
 
 -spec get_current_epoch(state()) -> non_neg_integer().
 get_current_epoch(#?MODULE{mode = #write{current_epoch = Epoch}}) ->
     Epoch.
 
--spec get_directory(state()) -> file:filename().
+-spec get_directory(state()) -> file:filename_all().
 get_directory(#?MODULE{cfg = #cfg{directory = Dir}}) ->
     Dir.
 
 -spec get_name(state()) -> string().
 get_name(#?MODULE{cfg = #cfg{name = Name}}) ->
     Name.
+
+-spec get_shared(state()) -> atomics:atomics_ref().
+get_shared(#?MODULE{cfg = #cfg{shared = Shared}}) ->
+    Shared.
 
 -spec get_default_max_segment_size_bytes() -> non_neg_integer().
 get_default_max_segment_size_bytes() ->
@@ -1303,61 +1379,189 @@ counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
     C.
 
 -spec read_header(state()) ->
-                     {ok, header_map(), state()} | {end_of_stream, state()} |
-                     {error, {invalid_chunk_header, term()}}.
+    {ok, header_map(), state()} | {end_of_stream, state()} |
+    {error, {invalid_chunk_header, term()}}.
 read_header(#?MODULE{cfg = #cfg{}} = State0) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
     %% TODO: skip non user chunks for offset readers
-    case read_header0(State0) of
+    case catch read_header0(State0) of
         {ok,
          #{num_records := NumRecords,
-           data_size := DataSize,
-           trailer_size := TrailerSize} =
+           next_position := NextPos} =
              Header,
-         #?MODULE{mode = #read{} = Read, fd = Fd} = State} ->
+         #?MODULE{mode = #read{next_offset = ChId} = Read} = State} ->
             %% skip data portion
-            {ok, _} = file:position(Fd, {cur, DataSize + TrailerSize}),
             {ok, Header,
-             State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
+             State#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
+                                            position = NextPos}}};
         {end_of_stream, _} = EOF ->
             EOF;
         {error, _} = Err ->
             Err
     end.
 
--spec read_chunk(state()) ->
-                    {ok,
-                     {chunk_type(),
-                      offset(),
-                      epoch(),
-                      HeaderData :: iodata(),
-                      RecordData :: iodata(),
-                      TrailerData :: iodata()},
-                     state()} |
-                    {end_of_stream, state()} |
-                    {error, {invalid_chunk_header, term()}}.
-read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
-    %% reads the next chunk of entries, parsed
-    %% NB: this may return records before the requested index,
-    %% that is fine - the reading process can do the appropriate filtering
-    case read_header0(State0) of
+-record(iterator, {fd :: file:io_device(),
+                   next_offset :: offset(),
+                   %% entries left
+                   num_left :: non_neg_integer(),
+                   %% any trailing data from last read
+                   %% we try to capture at least the size of the next record
+                   data :: undefined | binary(),
+                   next_record_pos :: non_neg_integer()}).
+-opaque chunk_iterator() :: #iterator{}.
+-define(REC_MATCH_SIMPLE(Len, Rem),
+        <<0:1, Len:31/unsigned, Rem/binary>>).
+-define(REC_MATCH_SUBBATCH(CompType, NumRec, UncompLen, Len, Rem),
+        <<1:1, CompType:3/unsigned, _:4/unsigned,
+          NumRecs:16/unsigned,
+          UncompressedLen:32/unsigned,
+          Len:32/unsigned, Rem/binary>>).
+
+-define(REC_HDR_SZ_SIMPLE_B, 4).
+-define(REC_HDR_SZ_SUBBATCH_B, 11).
+-define(ITER_READ_AHEAD_B, 64).
+
+
+-spec chunk_iterator(state()) ->
+    {ok, header_map(), chunk_iterator(), state()} |
+    {end_of_stream, state()} |
+    {error, {invalid_chunk_header, term()}}.
+chunk_iterator(State) ->
+    chunk_iterator(State, 1).
+
+-spec chunk_iterator(state(), pos_integer() | all) ->
+    {ok, header_map(), chunk_iterator(), state()} |
+    {end_of_stream, state()} |
+    {error, {invalid_chunk_header, term()}}.
+chunk_iterator(#?MODULE{cfg = #cfg{},
+                        mode = #read{type = RType,
+                                     chunk_selector = Selector}
+                       } = State0, CreditHint)
+  when (is_integer(CreditHint) andalso CreditHint > 0) orelse
+       is_atom(CreditHint) ->
+    %% reads the next chunk of unparsed chunk data
+    case catch read_header0(State0) of
         {ok,
          #{type := ChType,
            chunk_id := ChId,
-           epoch := Epoch,
+           crc := Crc,
+           num_entries := NumEntries,
+           num_records := NumRecords,
+           data_size := DataSize,
+           filter_size := FilterSize,
+           position := Pos,
+           next_position := NextPos} = Header,
+         #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
+            State = State1#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
+                                                    position = NextPos}},
+            case needs_handling(RType, Selector, ChType) of
+                true ->
+                    DataPos = Pos + ?HEADER_SIZE_B + FilterSize,
+                    Data = iter_read_ahead(Fd, DataPos, ChId, Crc, CreditHint,
+                                           DataSize, NumEntries),
+                    Iterator = #iterator{fd = Fd,
+                                         data = Data,
+                                         next_offset = ChId,
+                                         num_left = NumEntries,
+                                         next_record_pos = DataPos},
+                    {ok, Header, Iterator, State};
+                false ->
+                    %% skip
+                    chunk_iterator(State, CreditHint)
+            end;
+        Other ->
+            Other
+    end.
+
+-spec iterator_next(chunk_iterator()) ->
+    end_of_chunk | {offset_entry(), chunk_iterator()}.
+iterator_next(#iterator{num_left = 0}) ->
+    end_of_chunk;
+iterator_next(#iterator{fd = Fd,
+                        next_offset = NextOffs,
+                        num_left = Num,
+                        data = ?REC_MATCH_SIMPLE(Len, Rem0),
+                        next_record_pos = Pos} = I0) ->
+    {Record, Rem} =
+        case Rem0 of
+            <<Record0:Len/binary, Rem1/binary>> ->
+                {Record0, Rem1};
+            _ ->
+                %% not enough in Rem0 to read the entire record
+                %% so we need to read it from disk
+                {ok, <<Record0:Len/binary, Rem1/binary>>} =
+                    file:pread(Fd, Pos + ?REC_HDR_SZ_SIMPLE_B,
+                               Len + ?ITER_READ_AHEAD_B),
+                {Record0, Rem1}
+        end,
+
+    I = I0#iterator{next_offset = NextOffs + 1,
+                    num_left = Num - 1,
+                    data = Rem,
+                    next_record_pos = Pos + ?REC_HDR_SZ_SIMPLE_B + Len},
+    {{NextOffs, Record}, I};
+iterator_next(#iterator{fd = Fd,
+                        next_offset = NextOffs,
+                        num_left = Num,
+                        data = ?REC_MATCH_SUBBATCH(CompType, NumRecs,
+                                                   UncompressedLen,
+                                                   Len, Rem0),
+                        next_record_pos = Pos} = I0) ->
+    {Data, Rem} =
+        case Rem0 of
+            <<Record0:Len/binary, Rem1/binary>> ->
+                {Record0, Rem1};
+            _ ->
+                %% not enough in Rem0 to read the entire record
+                %% so we need to read it from disk
+                {ok, <<Record0:Len/binary, Rem1/binary>>} =
+                    file:pread(Fd, Pos + ?REC_HDR_SZ_SUBBATCH_B,
+                               Len + ?ITER_READ_AHEAD_B),
+                {Record0, Rem1}
+        end,
+    Record = {batch, NumRecs, CompType, UncompressedLen, Data},
+    I = I0#iterator{next_offset = NextOffs + NumRecs,
+                    num_left = Num - 1,
+                    data = Rem,
+                    next_record_pos = Pos + ?REC_HDR_SZ_SUBBATCH_B + Len},
+    {{NextOffs, Record}, I};
+iterator_next(#iterator{fd = Fd,
+                        next_record_pos = Pos} = I) ->
+    {ok, Data} = file:pread(Fd, Pos, ?ITER_READ_AHEAD_B),
+    iterator_next(I#iterator{data = Data}).
+
+-spec read_chunk(state()) ->
+    {ok, binary(), state()} |
+    {end_of_stream, state()} |
+    {error, {invalid_chunk_header, term()}}.
+read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
+    %% reads the next chunk of unparsed chunk data
+    case catch read_header0(State0) of
+        {ok,
+         #{type := _ChType,
+           chunk_id := ChId,
+           epoch := _Epoch,
            crc := Crc,
            num_records := NumRecords,
-           header_data := HeaderData,
+           header_data := _HeaderData,
            data_size := DataSize,
+           filter_size := FilterSize,
+           position := Pos,
+           next_position := NextPos,
            trailer_size := TrailerSize},
          #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State} ->
-            {ok, BlobData} = file:read(Fd, DataSize),
-            {ok, TrailerData} = file:read(Fd, TrailerSize),
-            validate_crc(ChId, Crc, BlobData),
-            {ok, {ChType, ChId, Epoch, HeaderData, BlobData, TrailerData},
-             State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
+            ToRead = ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
+            {ok, ChData} = file:pread(Fd, Pos, ToRead),
+            <<_:?HEADER_SIZE_B/binary,
+              _:FilterSize/binary,
+              RecordData:DataSize/binary,
+              _/binary>> = ChData,
+            validate_crc(ChId, Crc, RecordData),
+            {ok, ChData,
+             State#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
+                                            position = NextPos}}};
         Other ->
             Other
     end.
@@ -1374,46 +1578,38 @@ read_chunk_parsed(State) ->
     {ok, header_map(), [record()], state()} |
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
-read_chunk_parsed(#?MODULE{mode = #read{type = RType,
-                                        chunk_selector = Selector}} = State0,
-                 HeaderOrNot) ->
-    %% reads the next chunk of entries, parsed
-    %% NB: this may return records before the requested index,
-    %% that is fine - the reading process can do the appropriate filtering
-    case read_header0(State0) of
-        {ok,
-         #{type := ChType,
-           chunk_id := ChId,
-           crc := Crc,
-           num_records := NumRecords,
-           data_size := DataSize,
-           trailer_size := TrailerSize} = Header,
-         #?MODULE{fd = Fd, mode = #read{next_offset = _ChId} = Read} = State1} ->
-            {ok, Data} = file:read(Fd, DataSize),
-            {ok, _TrailerData} = file:read(Fd, TrailerSize),
-            validate_crc(ChId, Crc, Data),
-            State = State1#?MODULE{mode = incr_next_offset(NumRecords, Read)},
-            case needs_handling(RType, Selector, ChType) of
-                true when HeaderOrNot == no_header ->
-                    %% parse data into records
-                    {parse_records(ChId, Data, []), State};
-                true ->
-                    {ok, Header, parse_records(ChId, Data, []), State};
-                false ->
-                    %% skip
-                    read_chunk_parsed(State, HeaderOrNot)
-            end;
-        Ret ->
-            Ret
+read_chunk_parsed(#?MODULE{mode = #read{}} = State0,
+                  HeaderOrNot) ->
+    %% the Header parameter isn't used anywhere in RabbitMQ so is ignored
+    case chunk_iterator(State0, all) of
+        {end_of_stream, _} = Eos ->
+            Eos;
+        {ok, _H, I0, State1} when HeaderOrNot == no_header ->
+            Records = iter_all_records(iterator_next(I0), []),
+            {Records, State1};
+        {ok, Header, I0, State1} when HeaderOrNot == with_header ->
+            Records = iter_all_records(iterator_next(I0), []),
+            {ok, Header, Records, State1};
+        Err ->
+            Err
     end.
+
+iter_all_records(end_of_chunk, Acc) ->
+    lists:reverse(Acc);
+iter_all_records({{ChId, {batch, _Num, 0, _Size, Data}}, I}, Acc0) ->
+    %% TODO validate that sub batch is correct
+    Acc = parse_subbatch(ChId, Data, Acc0),
+    iter_all_records(iterator_next(I), Acc);
+iter_all_records({X, I}, Acc0) ->
+    Acc = [X | Acc0],
+    iter_all_records(iterator_next(I), Acc).
 
 is_valid_chunk_on_disk(SegFile, Pos) ->
     %% read a chunk from a specified location in the segment
     %% then checks the CRC
     case open(SegFile, [read, raw, binary]) of
         {ok, SegFd} ->
-            {ok, Pos} = file:position(SegFd, Pos),
-            IsValid = case file:read(SegFd, ?HEADER_SIZE_B) of
+            IsValid = case file:pread(SegFd, Pos, ?HEADER_SIZE_B) of
                           {ok,
                            <<?MAGIC:4/unsigned,
                              ?VERSION:4/unsigned,
@@ -1426,12 +1622,18 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
                              Crc:32/integer,
                              DataSize:32/unsigned,
                              _TrailerSize:32/unsigned,
-                             _Reserved:32>>} ->
-                              {ok, Data} = file:read(SegFd, DataSize),
-                              case erlang:crc32(Data) of
-                                  Crc ->
-                                      true;
-                                  _ ->
+                             FilterSize:8/unsigned,
+                             _Reserved:24>>} ->
+                              DataPos = Pos + FilterSize + ?HEADER_SIZE_B,
+                              case file:pread(SegFd, DataPos, DataSize) of
+                                  {ok, Data} ->
+                                      case erlang:crc32(Data) of
+                                          Crc ->
+                                              true;
+                                          _ ->
+                                              false
+                                      end;
+                                  eof ->
                                       false
                               end;
                           _ ->
@@ -1443,7 +1645,6 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
             false
     end.
 
-
 -spec send_file(gen_tcp:socket(), state()) ->
                    {ok, state()} |
                    {error, term()} |
@@ -1451,62 +1652,66 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
 send_file(Sock, State) ->
     send_file(Sock, State, fun(_, _) -> ok end).
 
--spec send_file(gen_tcp:socket(), state(),
+-spec send_file(gen_tcp:socket() | ssl:socket(), state(),
                 fun((header_map(), non_neg_integer()) -> term())) ->
-                   {ok, state()} |
-                   {error, term()} |
-                   {end_of_stream, state()}.
+    {ok, state()} |
+    {error, term()} |
+    {end_of_stream, state()}.
 send_file(Sock,
-          #?MODULE{cfg = #cfg{}, mode = #read{type = RType,
-                                              chunk_selector = Selector,
-                                              transport = Transport}} = State0,
+          #?MODULE{mode = #read{type = RType,
+                                chunk_selector = Selector,
+                                transport = Transport}} = State0,
           Callback) ->
-    case read_header0(State0) of
-        {ok,
-         #{type := ChType,
-           chunk_id := ChId,
-           num_records := NumRecords,
-           data_size := DataSize,
-           trailer_size := TrailerSize,
-           position := Pos} = Header,
-         #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
+    case catch read_header0(State0) of
+        {ok, #{type := ChType,
+               chunk_id := ChId,
+               num_records := NumRecords,
+               filter_size := FilterSize,
+               data_size := DataSize,
+               trailer_size := TrailerSize,
+               position := Pos,
+               next_position := NextPos,
+               header_data := HeaderData} = Header,
+         #?MODULE{fd = Fd,
+                  mode = #read{next_offset = ChId} = Read0} = State1} ->
             %% read header
             %% used to write frame headers to socket
             %% and return the number of bytes to sendfile
             %% this allow users of this api to send all the data
             %% or just header and entry data
-            ToSend = case RType of
-                         offset ->
-                             select_chunk_to_send(Selector, ChType, DataSize, TrailerSize);
-                         data ->
-                             DataSize + TrailerSize + ?HEADER_SIZE_B
-                     end,
+            {ToSkip, ToSend} =
+                case RType of
+                    offset ->
+                        select_amount_to_send(Selector, ChType, FilterSize,
+                                              DataSize, TrailerSize);
+                    data ->
+                        {0, FilterSize + DataSize + TrailerSize}
+                end,
 
-            %% sendfile doesn't increment the file descriptor position
-            %% so we have to do this manually
-            NextFilePos = Pos + DataSize + TrailerSize + ?HEADER_SIZE_B,
-            State = State1#?MODULE{mode = incr_next_offset(NumRecords, Read)},
+            Read = Read0#read{next_offset = ChId + NumRecords,
+                              position = NextPos},
             %% only sendfile if either the reader is a data reader
             %% or the chunk is a user type (for offset readers)
             case needs_handling(RType, Selector, ChType) of
                 true ->
-                    %% this avoids any data sent in the Callback to be dispatched
-                    %% in it's own TCP frame
-                    ok = setopts(Transport, Sock, [{nopush, true}]),
-                    _ = Callback(Header, ToSend),
-                    case sendfile(Transport, Fd, Sock, Pos, ToSend) of
+                    _ = Callback(Header, ToSend + byte_size(HeaderData)),
+                    case send(Transport, Sock, HeaderData) of
                         ok ->
-                            ok = setopts(Transport, Sock, [{nopush, false}]),
-                            {ok, _} = file:position(Fd, NextFilePos),
-                            {ok, State};
+                            case sendfile(Transport, Fd, Sock,
+                                          Pos + ?HEADER_SIZE_B + ToSkip, ToSend) of
+                                ok ->
+                                    State = State1#?MODULE{mode = Read},
+                                    {ok, State};
+                                Err ->
+                                    %% reset the position to the start of the current
+                                    %% chunk so that subsequent reads won't error
+                                    Err
+                            end;
                         Err ->
-                            %% reset the position to the start of the current
-                            %% chunk so that subsequent reads won't error
-                            {ok, _} = file:position(Fd, Pos),
                             Err
                     end;
                 false ->
-                    {ok, _} = file:position(Fd, NextFilePos),
+                    State = State1#?MODULE{mode = Read},
                     %% skip chunk and recurse
                     send_file(Sock, State, Callback)
             end;
@@ -1515,10 +1720,10 @@ send_file(Sock,
     end.
 
 %% There could be many more selectors in the future
-select_chunk_to_send(user_data, ?CHNK_USER, DataSize, _TrailerSize) ->
-    DataSize + ?HEADER_SIZE_B;
-select_chunk_to_send(_, _, DataSize, TrailerSize) ->
-    DataSize + TrailerSize + ?HEADER_SIZE_B.
+select_amount_to_send(user_data, ?CHNK_USER, FilterSize, DataSize, _TrailerSize) ->
+    {FilterSize, DataSize};
+select_amount_to_send(_, _, FilterSize, DataSize, TrailerSize) ->
+    {FilterSize, DataSize + TrailerSize}.
 
 needs_handling(data, _, _) ->
     true;
@@ -1544,11 +1749,19 @@ close(#?MODULE{cfg = #cfg{counter_id = CntId,
             osiris_counters:delete(CntId)
     end.
 
-delete_directory(#{name := Name} = Config) when is_map(Config) ->
+delete_directory(#{name := Name,
+                   dir := _} = Config) ->
+    Dir = directory(Config),
+    ?DEBUG_(Name, " deleting directory ~ts", [Dir]),
+    delete_dir(Dir);
+delete_directory(#{name := Name}) ->
     delete_directory(Name);
-delete_directory(Name) when is_list(Name) ->
+delete_directory(Name) when ?IS_STRING(Name) ->
     Dir = directory(Name),
-    ?DEBUG("osiris_log: deleting directory ~s", [Dir]),
+    ?DEBUG_(Name, " deleting directory ~ts", [Dir]),
+    delete_dir(Dir).
+
+delete_dir(Dir) ->
     case file:list_dir(Dir) of
         {ok, Files} ->
             [ok =
@@ -1562,69 +1775,41 @@ delete_directory(Name) when is_list(Name) ->
 
 %% Internal
 
-header_info(Fd, Pos) ->
-    {ok, Pos} = file:position(Fd, Pos),
-    {ok,
-     <<?MAGIC:4/unsigned,
-       ?VERSION:4/unsigned,
-       ChType:8/unsigned,
-       _NumEntries:16/unsigned,
-       Num:32/unsigned,
-       _Timestamp:64/signed,
-       Epoch:64/unsigned,
-       Offset:64/unsigned,
-       _Crc:32/integer,
-       Size:32/unsigned,
-       TSize:32/unsigned,
-       _Reserved:32>>} =
-        file:read(Fd, ?HEADER_SIZE_B),
-    {ChType, Offset, Epoch, Num, Size, TSize}.
+next_chunk_pos(Fd, Pos) ->
+    {ok, <<?MAGIC:4/unsigned,
+           ?VERSION:4/unsigned,
+           _ChType:8/unsigned,
+           _NumEntries:16/unsigned,
+           _Num:32/unsigned,
+           _Timestamp:64/signed,
+           _Epoch:64/unsigned,
+           _Offset:64/unsigned,
+           _Crc:32/integer,
+           Size:32/unsigned,
+           TSize:32/unsigned,
+           FSize:8/unsigned,
+           _Reserved:24>>} = file:pread(Fd, Pos, ?HEADER_SIZE_B),
+    Pos + ?HEADER_SIZE_B + FSize + Size + TSize.
 
-parse_records(_Offs, <<>>, Acc) ->
-    %% TODO: this could probably be changed to body recursive
-    lists:reverse(Acc);
-parse_records(Offs,
-              <<0:1, %% simple
-                Len:31/unsigned,
-                Data:Len/binary,
-                Rem/binary>>,
-              Acc) ->
-    parse_records(Offs + 1, Rem, [{Offs, Data} | Acc]);
-parse_records(Offs,
-              <<1:1, %% simple
-                0:3/unsigned, %% compression type
-                _:4/unsigned, %% reserved
-                NumRecs:16/unsigned,
-                _UncompressedLen:32/unsigned,
-                Len:32/unsigned,
-                Data:Len/binary,
-                Rem/binary>>,
-              Acc) ->
-    Recs = parse_records(Offs, Data, []),
-    parse_records(Offs + NumRecs, Rem, lists:reverse(Recs) ++ Acc);
-parse_records(Offs,
-              <<1:1, %% simple
-                CompType:3/unsigned, %% compression type
-                _:4/unsigned, %% reserved
-                NumRecs:16/unsigned,
-                UncompressedLen:32/unsigned,
-                Len:32/unsigned,
-                Data:Len/binary,
-                Rem/binary>>,
-              Acc) ->
-    %% return the first offset of the sub batch and the batch, unparsed
-    %% as we don't want to decompress on the server
-    parse_records(Offs + NumRecs, Rem,
-                  [{Offs, {batch, NumRecs, CompType, UncompressedLen, Data}} | Acc]).
+
+parse_subbatch(_Offs, <<>>, Acc) ->
+    Acc;
+parse_subbatch(Offs,
+               <<0:1, %% simple
+                 Len:31/unsigned,
+                 Data:Len/binary,
+                 Rem/binary>>,
+               Acc) ->
+    parse_subbatch(Offs + 1, Rem, [{Offs, Data} | Acc]).
+
 
 sorted_index_files(#{index_files := IdxFiles}) ->
     %% cached
     IdxFiles;
 sorted_index_files(#{dir := Dir}) ->
     sorted_index_files(Dir);
-sorted_index_files(Dir) when is_list(Dir) orelse is_binary(Dir) ->
-    Files = index_files_unsorted(Dir),
-    lists:sort(Files).
+sorted_index_files(Dir) when ?IS_STRING(Dir) ->
+    index_files(Dir, fun lists:sort/1).
 
 sorted_index_files_rev(#{index_files := IdxFiles}) ->
     %% cached
@@ -1632,17 +1817,34 @@ sorted_index_files_rev(#{index_files := IdxFiles}) ->
 sorted_index_files_rev(#{dir := Dir}) ->
     sorted_index_files_rev(Dir);
 sorted_index_files_rev(Dir) ->
-    Files = index_files_unsorted(Dir),
-    lists:sort(fun erlang:'>'/2, Files).
+    index_files(Dir, fun (Files) ->
+                             lists:sort(fun erlang:'>'/2, Files)
+                     end).
 
 index_files_unsorted(Dir) ->
-    case prim_file:list_dir(Dir) of
-        {error, enoent} ->
-            [];
-        {ok, Files} ->
-            [filename:join(Dir, F)
-             || F <- Files, filename:extension(F) == ".index"]
-    end.
+    index_files(Dir, fun (X) -> X end).
+
+index_files(Dir, SortFun) ->
+    [filename:join(Dir, F)
+     || <<_:20/binary, ".index">> = F <- SortFun(list_dir(Dir))].
+
+orphaned_segments(Dir) ->
+    orphaned_segments(lists:sort(list_dir(Dir)), []).
+
+orphaned_segments([], Acc) ->
+    Acc;
+orphaned_segments([<<_:20/binary, ".index">>], Acc) ->
+    Acc;
+orphaned_segments([<<Name:20/binary, ".index">>,
+                   <<Name:20/binary, ".segment">> | _Rem],
+                  Acc) ->
+    %% when we find a matching pair we can return
+    Acc;
+orphaned_segments([<<_:20/binary, ".segment">> = Dangler | Rem], Acc) ->
+    orphaned_segments(Rem, [Dangler | Acc]);
+orphaned_segments([_Unexpected | Rem], Acc) ->
+    %% just ignore unexpected files
+    orphaned_segments(Rem, Acc).
 
 first_and_last_seginfos(#{index_files := IdxFiles}) ->
     first_and_last_seginfos0(IdxFiles);
@@ -1652,7 +1854,6 @@ first_and_last_seginfos(#{dir := Dir}) ->
 first_and_last_seginfos0([]) ->
     none;
 first_and_last_seginfos0([FstIdxFile]) ->
-    %% this function is only used by init
     {ok, SegInfo} = build_seg_info(FstIdxFile),
     {1, SegInfo, SegInfo};
 first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
@@ -1670,7 +1871,7 @@ first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
                 {ok, LastSegInfo} ->
                     {length(Rem) + 1, FstSegInfo, LastSegInfo};
                 {error, Err} ->
-                    ?ERROR("~s: failed to build seg_info from file ~s, error: ~w",
+                    ?ERROR("~s: failed to build seg_info from file ~ts, error: ~w",
                            [?MODULE, LastIdxFile, Err]),
                     error(Err)
             end;
@@ -1681,11 +1882,7 @@ first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
 
 build_seg_info(IdxFile) ->
     case last_valid_idx_record(IdxFile) of
-        {ok, <<_Offset:64/unsigned,
-               _Timestamp:64/signed,
-               _Epoch:64/unsigned,
-               LastChunkPos:32/unsigned,
-               _ChType:8/unsigned>>} ->
+        {ok, ?IDX_MATCH(_, _, LastChunkPos)} ->
             SegFile = segment_from_index_file(IdxFile),
             build_segment_info(SegFile, LastChunkPos, IdxFile);
         undefined ->
@@ -1699,7 +1896,7 @@ build_seg_info(IdxFile) ->
 last_idx_record(IdxFd) ->
     nth_last_idx_record(IdxFd, 1).
 
-nth_last_idx_record(IdxFile, N) when is_list(IdxFile) ->
+nth_last_idx_record(IdxFile, N) when ?IS_STRING(IdxFile) ->
     {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
     IdxRecord = nth_last_idx_record(IdxFd, N),
     _ = file:close(IdxFd),
@@ -1734,7 +1931,15 @@ last_valid_idx_record(IdxFile) ->
     end.
 
 first_idx_record(IdxFd) ->
-    file:pread(IdxFd, ?IDX_HEADER_SIZE, ?INDEX_RECORD_SIZE_B).
+    idx_read_at(IdxFd, ?IDX_HEADER_SIZE).
+
+idx_read_at(Fd, Pos) when is_integer(Pos) ->
+    case file:pread(Fd, Pos, ?INDEX_RECORD_SIZE_B) of
+        {ok, ?ZERO_IDX_MATCH(_)} ->
+            {error, empty_idx_record};
+        Ret ->
+            Ret
+    end.
 
 %% Some file:position/2 operations are subject to race conditions. In particular, `eof` may position the Fd
 %% in the middle of a record being written concurrently. If that happens, we need to re-position at the nearest
@@ -1768,7 +1973,8 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
            FirstChId:64/unsigned,
            _FirstCrc:32/integer,
            FirstSize:32/unsigned,
-           FirstTSize:32/unsigned,
+           FirstFSize:8/unsigned,
+           FirstTSize:24/unsigned,
            _/binary>>} ->
             case file:pread(Fd, LastChunkPos, ?HEADER_SIZE_B) of
                 {ok,
@@ -1783,68 +1989,89 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
                    _LastCrc:32/integer,
                    LastSize:32/unsigned,
                    LastTSize:32/unsigned,
-                   _Reserved:32>>} ->
-                    Size = LastChunkPos + LastSize + LastTSize + ?HEADER_SIZE_B,
+                   LastFSize:8/unsigned,
+                   _Reserved:24>>} ->
+                    LastChunkSize = LastFSize + LastSize + LastTSize,
+                    Size = LastChunkPos + ?HEADER_SIZE_B + LastChunkSize,
+                    %% TODO: this file:position/2 all has no actual function and
+                    %% is only used to emit a debug log. Remove?
                     {ok, Eof} = file:position(Fd, eof),
-                    ?DEBUG_IF("~s: segment ~s has trailing data ~w ~w",
+                    ?DEBUG_IF("~s: segment ~ts has trailing data ~w ~w",
                               [?MODULE, filename:basename(SegFile),
                                Size, Eof], Size =/= Eof),
                     _ = file:close(Fd),
+                    FstChInfo = #chunk_info{epoch = FirstEpoch,
+                                            timestamp = FirstTs,
+                                            id = FirstChId,
+                                            num = FirstNumRecords,
+                                            type = FirstChType,
+                                            size = FirstFSize + FirstSize + FirstTSize,
+                                            pos = ?LOG_HEADER_SIZE},
+                    LastChInfo = #chunk_info{epoch = LastEpoch,
+                                             timestamp = LastTs,
+                                             id = LastChId,
+                                             num = LastNumRecords,
+                                             type = LastChType,
+                                             size = LastChunkSize,
+                                             pos = LastChunkPos},
                     {ok, #seg_info{file = SegFile,
                                    index = IdxFile,
                                    size = Size,
-                                   first =
-                                   #chunk_info{epoch = FirstEpoch,
-                                               timestamp = FirstTs,
-                                               id = FirstChId,
-                                               num = FirstNumRecords,
-                                               type = FirstChType,
-                                               size = FirstSize + FirstTSize,
-                                               pos = ?LOG_HEADER_SIZE},
-                                   last =
-                                   #chunk_info{epoch = LastEpoch,
-                                               timestamp = LastTs,
-                                               id = LastChId,
-                                               num = LastNumRecords,
-                                               type = LastChType,
-                                               size = LastSize + LastTSize,
-                                               pos = LastChunkPos}}};
+                                   first = FstChInfo,
+                                   last = LastChInfo}};
                 _ ->
                     % last chunk is corrupted - try the previous one
                     _ = file:close(Fd),
-                    {ok, <<_Offset:64/unsigned,
-                           _Timestamp:64/signed,
-                           _Epoch:64/unsigned,
-                           PreviousChunkPos:32/unsigned,
-                           _ChType:8/unsigned>>} = nth_last_idx_record(IdxFile, 2),
-                    case PreviousChunkPos == LastChunkPos of
+                    {ok, ?IDX_MATCH(_ChId, _E, PrevChPos)} =
+                        nth_last_idx_record(IdxFile, 2),
+                    case PrevChPos == LastChunkPos of
                         false ->
-                            build_segment_info(SegFile, PreviousChunkPos, IdxFile);
+                            build_segment_info(SegFile, PrevChPos , IdxFile);
                         true ->
                             % avoid an infinite loop if multiple chunks are corrupted
-                            ?ERROR("Multiple corrupted chunks in segment file ~p", [SegFile]),
+                            ?ERROR("Multiple corrupted chunks in segment file ~0p",
+                                   [SegFile]),
                             exit({corrupted_segment, {segment_file, SegFile}})
                     end
             end
     end.
 
--spec overview(term()) -> {range(), [{epoch(), offset()}]}.
+-spec overview(file:filename_all()) ->
+    {range(), [{epoch(), offset()}]}.
 overview(Dir) ->
-    case sorted_index_files(Dir) of
+    Files = list_dir(Dir),
+    %% index files with matching segment
+    %% init/1 would repair this situation however as overview may
+    %% be called before init/1 happens on a system we need to
+    %% explicitly filter these out
+    case index_files_with_segment(lists:sort(Files), Dir, []) of
         [] ->
             {empty, []};
         IdxFiles ->
             Range = offset_range_from_idx_files(IdxFiles),
-            EpochOffsets = last_epoch_offsets(IdxFiles),
+            EpochOffsets = last_epoch_chunk_ids(<<>>, IdxFiles),
             {Range, EpochOffsets}
     end.
+
+index_files_with_segment([], _, Acc) ->
+    lists:reverse(Acc);
+index_files_with_segment([<<Name:20/binary, ".index">> = I,
+                          <<Name:20/binary, ".segment">>
+                           | Rem], Dir, Acc) ->
+    index_files_with_segment(Rem, Dir, [filename:join(Dir, I) | Acc]);
+index_files_with_segment([_OrphanedOrUnexpected | Rem], Dir, Acc) ->
+    %% orphaned segment file or unexpected file, ignore
+    index_files_with_segment(Rem, Dir, Acc).
+
+
 
 -spec format_status(state()) -> map().
 format_status(#?MODULE{cfg = #cfg{directory = Dir,
                                   max_segment_size_bytes  = MSSB,
                                   max_segment_size_chunks  = MSSC,
                                   tracking_config = TrkConf,
-                                  retention = Retention},
+                                  retention = Retention,
+                                  filter_size = FilterSize},
                        mode = Mode0,
                        current_file = File}) ->
     Mode = case Mode0 of
@@ -1868,23 +2095,25 @@ format_status(#?MODULE{cfg = #cfg{directory = Dir,
       max_segment_size_chunks  => MSSC,
       tracking_config => TrkConf,
       retention => Retention,
+      filter_size => FilterSize,
       file => filename:basename(File)}.
 
 -spec update_retention([retention_spec()], state()) -> state().
 update_retention(Retention,
-                 #?MODULE{cfg = #cfg{retention = Retention0} = Cfg} = State0)
+                 #?MODULE{cfg = #cfg{name = Name,
+                                     retention = Retention0} = Cfg} = State0)
     when is_list(Retention) ->
-    ?DEBUG("osiris_log: update_retention from: ~w to ~w",
-           [Retention0, Retention]),
+    ?DEBUG_(Name, " from: ~w to ~w", [Retention0, Retention]),
     State = State0#?MODULE{cfg = Cfg#cfg{retention = Retention}},
     trigger_retention_eval(State).
 
 -spec evaluate_retention(file:filename_all(), [retention_spec()]) ->
-    {range(), non_neg_integer()}.
+    {range(), FirstTimestamp :: osiris:timestamp(),
+     NumRemainingFiles :: non_neg_integer()}.
 evaluate_retention(Dir, Specs) when is_list(Dir) ->
     % convert to binary for faster operations later
     % mostly in segment_from_index_file/1
-    evaluate_retention(list_to_binary(Dir), Specs);
+    evaluate_retention(unicode:characters_to_binary(Dir), Specs);
 evaluate_retention(Dir, Specs) when is_binary(Dir) ->
 
     {Time, Result} = timer:tc(
@@ -1895,8 +2124,7 @@ evaluate_retention(Dir, Specs) when is_binary(Dir) ->
                                FirstTs = first_timestamp_from_index_files(IdxFiles),
                                {OffsetRange, FirstTs, length(IdxFiles)}
                        end),
-    ?DEBUG("~s:~s/~b (~w) completed in ~fs",
-           [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Specs, Time/1_000_000]),
+    ?DEBUG_(<<>>," (~w) completed in ~fms", [Specs, Time/1_000]),
     Result.
 
 evaluate_retention0(IdxFiles, []) ->
@@ -1971,126 +2199,172 @@ file_size_or_zero(Path) ->
             0
     end.
 
-last_epoch_offsets([IdxFile]) ->
-    Fd = open_index_read(IdxFile),
-    _ = file:advise(Fd, 0, 0, sequential),
-    Record = file:read(Fd, ?INDEX_RECORD_SIZE_B),
-    case last_epoch_offset(Record, Fd, undefined) of
-        undefined ->
-            [];
-        {LastE, LastO, Res} ->
-            lists:reverse([{LastE, LastO} | Res])
+last_epoch_chunk_ids(Name, IdxFiles) ->
+    T1 = erlang:monotonic_time(),
+    %% no need to filter out empty index files as
+    %% that will be done by last_epoch_chunk_ids0/2
+    Return = last_epoch_chunk_ids0(IdxFiles, undefined),
+    T2 = erlang:monotonic_time(),
+    Time = erlang:convert_time_unit(T2 - T1, native, microsecond),
+    ?DEBUG_(Name, " completed in ~bms", [Time div 1000]),
+    Return.
+
+last_epoch_chunk_ids0([], {LastE, LastO, Res}) ->
+    lists:reverse([{LastE, LastO} | Res]);
+last_epoch_chunk_ids0([], undefined) ->
+    %% the empty stream
+    [];
+last_epoch_chunk_ids0([IdxFile | _] = Files, undefined) ->
+    {ok, Fd} = open(IdxFile, [read, raw, binary]),
+    case first_idx_record(Fd) of
+        {ok, ?IDX_MATCH(FstChId, FstEpoch, _)} ->
+            ok = file:close(Fd),
+            last_epoch_chunk_ids0(Files, {FstEpoch, FstChId, []});
+        _ ->
+            ok = file:close(Fd),
+            []
     end;
-last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
-    F = fun() ->
-                {ok, FstFd} = open(FstIdxFile, [read, raw, binary]),
-		%% on linux this disables read-ahead so should only
-		%% bring a single block into memory
-		%% having the first block of index files in page cache
-		%% should generally be a good thing
-                _ = file:advise(FstFd, 0, 0, random),
-                {ok, <<FstO:64/unsigned,
-                       _FstTimestamp:64/signed,
-                       FstE:64/unsigned,
-                       _FstChunkPos:32/unsigned,
-                       _FstChType:8/unsigned>>} = first_idx_record(FstFd),
-                ok = file:close(FstFd),
-                NonEmptyIdxFiles = non_empty_index_files(IdxFiles),
-                {LastE, LastO, Res} =
-                    lists:foldl(
-                      fun(IdxFile, {E, _, EOs} = Acc) ->
-                              Fd = open_index_read(IdxFile),
-                              {ok, <<Offset:64/unsigned,
-                                     _Timestamp:64/signed,
-                                     Epoch:64/unsigned,
-                                     _LastChunkPos:32/unsigned,
-                                     _ChType:8/unsigned>>} =
-                                  last_valid_idx_record(IdxFile),
-                              case Epoch > E of
-                                  true ->
-                                      %% we need to scan as the last index record
-                                      %% has a greater epoch
-                                      _ = file:advise(Fd, 0, 0, sequential),
-                                      {ok, ?IDX_HEADER_SIZE} = file:position(Fd, ?IDX_HEADER_SIZE),
-                                      last_epoch_offset(
-                                        file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
-                                        Acc);
-                                  false ->
-                                      ok = file:close(Fd),
-                                      {Epoch, Offset, EOs}
-                              end
-                      end, {FstE, FstO, []}, NonEmptyIdxFiles),
-                lists:reverse([{LastE, LastO} | Res])
-        end,
-    {Time, Result} = timer:tc(F),
-    ?DEBUG("~s:~s/~b completed in ~bms",
-           [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time div 1000]),
-    Result.
+last_epoch_chunk_ids0([IdxFile | Rem], {PrevE, _PrevChId, EOs} = Acc0) ->
+    %% TODO: make last_valid_idx_record/1 take a file handle
+    case last_valid_idx_record(IdxFile) of
+        {ok, ?IDX_MATCH(_LstChId, LstEpoch, _)}
+          when LstEpoch > PrevE ->
+            {ok, Fd} = open(IdxFile, [read, raw, binary]),
+            Acc = idx_skip_search(Fd, ?IDX_HEADER_SIZE,
+                                  fun leo_search_fun/3,
+                                  Acc0),
+            ok = file:close(Fd),
+            last_epoch_chunk_ids0(Rem, Acc);
+        {ok, ?IDX_MATCH(LstChId, LstEpoch, _)} ->
+            %% no scan needed, just pass last epoch chunk id pair
+            Acc = {LstEpoch, LstChId, EOs},
+            last_epoch_chunk_ids0(Rem, Acc);
+        undefined ->
+            %% this means the index had a header but no entries
+            %% we assume there are no further valid index files
+            last_epoch_chunk_ids0([], Acc0);
+        eof ->
+            %% last index file must have been empty
+            last_epoch_chunk_ids0([], Acc0)
+    end.
 
-%% aggregates the chunk offsets for each epoch
-last_epoch_offset(eof, Fd, Acc) ->
-    ok = file:close(Fd),
-    Acc;
-last_epoch_offset({ok,
-                   <<Offset:64/unsigned,
-                     _T:64/signed,
-                     Epoch:64/unsigned,
-                     _:32/unsigned,
-                     _ChType:8/unsigned>>},
-                  Fd, undefined) ->
-    last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
-                      {Epoch, Offset, []});
-last_epoch_offset({ok,
-                   <<O:64/unsigned,
-                     _T:64/signed,
-                     CurEpoch:64/unsigned,
-                     _:32/unsigned,
-                     _ChType:8/unsigned>>},
-                  Fd, {CurEpoch, _LastOffs, Acc}) ->
-    %% epoch is unchanged
-    last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
-                      {CurEpoch, O, Acc});
-last_epoch_offset({ok,
-                   <<O:64/unsigned,
-                     _T:64/signed,
-                     Epoch:64/unsigned,
-                     _:32/unsigned,
-                     _ChType:8/unsigned>>},
-                  Fd, {CurEpoch, LastOffs, Acc})
+
+leo_search_fun(_Type, ?IDX_MATCH(ChId, Epoch, _), {Epoch, _, Prev}) ->
+    {continue, {Epoch, ChId, Prev}};
+leo_search_fun(peek, ?IDX_MATCH(_ChId, Epoch, _), {CurEpoch, _, _} = Acc)
   when Epoch > CurEpoch ->
-    last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
-                      {Epoch, O, [{CurEpoch, LastOffs} | Acc]});
-last_epoch_offset({ok, _}, Fd, Acc) ->
-    %% trailing data in the index file - ignore
-    ok = file:close(Fd),
-    Acc.
+    {scan, Acc};
+leo_search_fun(scan, ?IDX_MATCH(ChId, Epoch, _), {CurEpoch, CurChId, Prev})
+  when Epoch > CurEpoch ->
+    {continue, {Epoch, ChId, [{CurEpoch, CurChId} | Prev]}};
+leo_search_fun(scan, ?IDX_MATCH(ChId, Epoch, _), undefined) ->
+    {continue, {Epoch, ChId, []}};
+leo_search_fun(_Type, _, Acc) ->
+    %% invalid index record
+    {continue, Acc}.
 
+idx_skip_search(Fd, ?IDX_HEADER_SIZE = Pos0, Fun, Acc0) ->
+    %% avoid skipping on very first record
+    case idx_read_at(Fd, Pos0) of
+        {ok, IdxRecordBin} ->
+            case Fun(scan, IdxRecordBin, Acc0) of
+                {continue, Acc} ->
+                    Pos = Pos0 + ?INDEX_RECORD_SIZE_B,
+                    idx_skip_search(Fd, Pos, Fun, Acc);
+                {return, Acc} ->
+                    Acc
+            end;
+        _ ->
+            Acc0
+    end;
+idx_skip_search(Fd, Pos, Fun, Acc0) ->
+    SkipSize = ?SKIP_SEARCH_JUMP * ?INDEX_RECORD_SIZE_B,
+    PeekPos = Pos + SkipSize,
+    case idx_read_at(Fd, PeekPos) of
+        {ok, IdxRecordBin} ->
+            case Fun(peek, IdxRecordBin, Acc0) of
+                {continue, Acc} ->
+                    idx_skip_search(Fd, PeekPos + ?INDEX_RECORD_SIZE_B, Fun, Acc);
+                {return, Acc} ->
+                    Acc;
+                {scan, Acc1} ->
+                    {ok, Data} = file:pread(Fd, Pos, SkipSize + ?INDEX_RECORD_SIZE_B),
+                    case idx_lin_scan(Data, Fun, Acc1) of
+                        {continue, Acc} ->
+                            idx_skip_search(Fd, PeekPos + ?INDEX_RECORD_SIZE_B,
+                                            Fun, Acc);
+                        {return, Acc} ->
+                            Acc
+                    end
+            end;
+        _ ->
+            %% eof or invalid index record
+            case file:pread(Fd, Pos, SkipSize + ?INDEX_RECORD_SIZE_B) of
+                {ok, Data} ->
+                    case idx_lin_scan(Data, Fun, Acc0) of
+                        {continue, Acc} ->
+                            %% eof so can't continue
+                            Acc;
+                        {return, Acc} ->
+                            Acc
+                    end;
+                eof ->
+                    Acc0
+            end
+    end.
+
+
+idx_lin_scan(<<>>, _Fun, Acc) ->
+    {continue, Acc};
+idx_lin_scan(?ZERO_IDX_MATCH(_), _Fun, Acc0) ->
+    {continue, Acc0};
+idx_lin_scan(<<IdxRecordBin:?INDEX_RECORD_SIZE_B/binary, Rem/binary>>, Fun, Acc0) ->
+    case Fun(scan, IdxRecordBin, Acc0) of
+        {continue, Acc} ->
+            idx_lin_scan(Rem, Fun, Acc);
+        {return, _} = Ret ->
+            Ret
+    end.
 
 segment_from_index_file(IdxFile) when is_list(IdxFile) ->
     unicode:characters_to_list(string:replace(IdxFile, ".index", ".segment", trailing));
 segment_from_index_file(IdxFile) when is_binary(IdxFile) ->
     unicode:characters_to_binary(string:replace(IdxFile, ".index", ".segment", trailing)).
 
-make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next) ->
-    {NumEntries, NumRecords, EData} =
-        lists:foldl(fun ({batch, NumRecords, CompType, UncompLen, B},
-                         {Entries, Count, Acc}) ->
-                            Data =
-                                [<<1:1, %% batch record type
-                                   CompType:3/unsigned,
-                                   0:4/unsigned,
-                                   NumRecords:16/unsigned,
-                                   UncompLen:32/unsigned,
-                                   (iolist_size(B)):32/unsigned>>,
-                                 B],
-                            {Entries + 1, Count + NumRecords, [Data | Acc]};
-                        (B, {Entries, Count, Acc}) ->
-                            %% simple record type
-                            Data = [<<0:1, (iolist_size(B)):31/unsigned>>, B],
-                            {Entries + 1, Count + 1, [Data | Acc]}
-                    end,
-                    {0, 0, []}, Blobs),
+process_entry({FilterValue, Data}, {Entries, Count, Bloom, Acc}) ->
+    %% filtered value
+    process_entry0(Data, {Entries, Count,
+                          osiris_bloom:insert(FilterValue, Bloom), Acc});
+process_entry(Data, {Entries, Count, Bloom, Acc}) ->
+    %% unfiltered, pass the <<>> empty string
+    process_entry0(Data, {Entries, Count,
+                          osiris_bloom:insert(<<>>, Bloom), Acc}).
 
+process_entry0({batch, NumRecords, CompType, UncompLen, B},
+               {Entries, Count, Bloom, Acc}) ->
+    Data = [<<1:1, %% batch record type
+              CompType:3/unsigned,
+              0:4/unsigned,
+              NumRecords:16/unsigned,
+              UncompLen:32/unsigned,
+              (iolist_size(B)):32/unsigned>>,
+            B],
+    {Entries + 1, Count + NumRecords, Bloom, [Data | Acc]};
+process_entry0(B, {Entries, Count, Bloom, Acc})
+  when is_binary(B) orelse
+       is_list(B) ->
+    %% simple record type
+    Data = [<<0:1, (iolist_size(B)):31/unsigned>>, B],
+    {Entries + 1, Count + 1, Bloom, [Data | Acc]}.
+
+
+make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next, FilterSize) ->
+    Bloom0 = osiris_bloom:init(FilterSize),
+    {NumEntries, NumRecords, Bloom, EData} =
+        lists:foldl(fun process_entry/2, {0, 0, Bloom0, []}, Blobs),
+
+    BloomData = osiris_bloom:to_binary(Bloom),
+    BloomSize = byte_size(BloomData),
     Size = iolist_size(EData),
     TSize = iolist_size(TData),
     %% checksum is over entry data only
@@ -2106,8 +2380,11 @@ make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next) ->
         Crc:32/integer,
         Size:32/unsigned,
         TSize:32/unsigned,
-        0:32/unsigned>>,
-      EData, TData],
+        BloomSize:8/unsigned,
+        0:24/unsigned>>,
+      BloomData,
+      EData,
+      TData],
      NumRecords}.
 
 write_chunk(Chunk,
@@ -2115,7 +2392,8 @@ write_chunk(Chunk,
             Timestamp,
             Epoch,
             NumRecords,
-            #?MODULE{cfg = #cfg{counter = CntRef} = Cfg,
+            #?MODULE{cfg = #cfg{counter = CntRef,
+                                shared = Shared} = Cfg,
                      fd = Fd,
                      index_fd = IdxFd,
                      mode =
@@ -2144,21 +2422,21 @@ write_chunk(Chunk,
                               Epoch:64/unsigned,
                               Cur:32/unsigned,
                               ChType:8/unsigned>>),
+            osiris_log_shared:set_last_chunk_id(Shared, Next),
             %% update counters
             counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
             counters:add(CntRef, ?C_CHUNKS, 1),
             maybe_set_first_offset(Next, Cfg),
             State#?MODULE{mode =
-                          Write#write{tail_info =
-                                      {NextOffset,
-                                       {Epoch, Next, Timestamp}},
+                          Write#write{tail_info = {NextOffset,
+                                                   {Epoch, Next, Timestamp}},
                                       segment_size = {SegSizeBytes + Size,
                                                       SegSizeChunks + 1}}}
     end.
 
 
-maybe_set_first_offset(0, #cfg{first_offset_fun = Fun}) ->
-    Fun(0);
+maybe_set_first_offset(0, #cfg{shared = Ref}) ->
+    osiris_log_shared:set_first_chunk_id(Ref, 0);
 maybe_set_first_offset(_, _Cfg) ->
     ok.
 
@@ -2169,11 +2447,6 @@ max_segment_size_reached(
                       max_segment_size_chunks = MaxSizeChunks}}) ->
     CurrentSizeBytes >= MaxSizeBytes orelse
     CurrentSizeChunks >= MaxSizeChunks.
-
-setopts(tcp, Sock, Opts) ->
-    ok = inet:setopts(Sock, Opts);
-setopts(ssl, Sock, Opts) ->
-    ok = ssl:setopts(Sock, Opts).
 
 sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
     ok;
@@ -2194,6 +2467,11 @@ sendfile(ssl, Fd, Sock, Pos, ToSend) ->
         {error, _} = Err ->
             Err
     end.
+
+send(tcp, Sock, Data) ->
+    gen_tcp:send(Sock, Data);
+send(ssl, Sock, Data) ->
+    ssl:send(Sock, Data).
 
 last_timestamp_in_index_file(IdxFile) ->
     case file:open(IdxFile, [raw, binary, read]) of
@@ -2234,6 +2512,42 @@ first_timestamp_from_index_files([IdxFile | _]) ->
     end;
 first_timestamp_from_index_files([]) ->
     0.
+
+chunk_id_range_from_idx_files(Files) ->
+    case non_empty_index_files(Files) of
+        [] ->
+            {ok, empty};
+        [IdxFile] ->
+            chunk_id_range_from_idx_files(IdxFile, IdxFile);
+        [F | Rem] ->
+            L = lists:last(Rem),
+            chunk_id_range_from_idx_files(F, L)
+    end.
+
+chunk_id_range_from_idx_files(FstIdxFile, LstIdxFile) ->
+    {ok, LstFd} = open(LstIdxFile, [read, raw, binary]),
+    case position_at_idx_record_boundary(LstFd, eof) of
+        {ok, Pos} ->
+            case file:pread(LstFd, Pos - ?INDEX_RECORD_SIZE_B,
+                            ?INDEX_RECORD_SIZE_B) of
+                {ok, ?IDX_MATCH(LstChId, _, _)} ->
+                    ok = file:close(LstFd),
+                    {ok, FstFd} = open(FstIdxFile, [read, raw, binary]),
+                    case file:pread(FstFd, ?IDX_HEADER_SIZE,
+                                    ?INDEX_RECORD_SIZE_B) of
+                        {ok, ?IDX_MATCH(FstChId, _, _)} ->
+                            ok = file:close(FstFd),
+                            {ok, {FstChId, LstChId}};
+                        Err ->
+                            ok = file:close(LstFd),
+                            Err
+                    end;
+                Err ->
+                    ok = file:close(LstFd),
+                    Err
+            end
+    end.
+
 
 offset_range_from_idx_files([]) ->
     empty;
@@ -2295,26 +2609,28 @@ find_segment_for_offset(Offset, IdxFiles) ->
                         true ->
                             %% we found it
                             {found, Info};
+                        false when Offset >= NextChId ->
+                            {not_found, high};
                         false ->
-                            not_found
+                            {not_found, low}
                     end;
                 {error, _} = Err ->
                     Err
             end;
         false ->
-            not_found
+            {not_found, low}
     end.
 
-can_read_next_offset(#read{type = offset,
-                           next_offset = NextOffset,
-                           offset_ref = Ref}) ->
-    atomics:get(Ref, 1) >= NextOffset;
-can_read_next_offset(#read{type = data}) ->
-    true.
-
-incr_next_offset(Num, #read{next_offset = NextOffset} = Read) ->
-    Read#read{last_offset = NextOffset,
-              next_offset = NextOffset + Num}.
+-spec can_read_next(state()) -> boolean().
+can_read_next(#?MODULE{mode = #read{type = offset,
+                                    next_offset = NextOffset},
+                       cfg = #cfg{shared = Ref}}) ->
+    osiris_log_shared:last_chunk_id(Ref) >= NextOffset andalso
+    osiris_log_shared:committed_chunk_id(Ref) >= NextOffset;
+can_read_next(#?MODULE{mode = #read{type = data,
+                                    next_offset = NextOffset},
+                       cfg = #cfg{shared = Ref}}) ->
+    osiris_log_shared:last_chunk_id(Ref) >= NextOffset.
 
 make_file_name(N, Suff) ->
     lists:flatten(
@@ -2332,7 +2648,7 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
     _ = close_fd(OldIdxFd),
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
-    ?DEBUG("~s: ~s ~s: ~s", [?MODULE, ?FUNCTION_NAME, Name, Filename]),
+    ?DEBUG_(Name, "~ts", [Filename]),
     {ok, IdxFd} =
         file:open(
             filename:join(Dir, IdxFilename), ?FILE_OPTS_WRITE),
@@ -2360,65 +2676,55 @@ open_index_read(File) ->
     {ok, ?IDX_HEADER_SIZE} = file:position(Fd, ?IDX_HEADER_SIZE),
     Fd.
 
-offset_idx_scan(Offset, #seg_info{index = IndexFile} = SegmentInfo) ->
-    {Time, Result} =
-        timer:tc(
-          fun() ->
-                  case offset_range_from_segment_infos([SegmentInfo]) of
-                      empty ->
-                          eof;
-                      {SegmentStartOffs, SegmentEndOffs} ->
-                          case Offset < SegmentStartOffs orelse
-                               Offset > SegmentEndOffs of
-                              true ->
-                                  offset_out_of_range;
-                              false ->
-                                  IndexFd = open_index_read(IndexFile),
-								  _ = file:advise(IndexFd, 0, 0, sequential),
-                                  offset_idx_scan0(IndexFd, Offset, not_found)
-                          end
-                  end
-          end),
-    ?DEBUG("~s:~s/~b completed in ~fs",
-           [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1000000]),
+offset_idx_scan(Name, Offset, #seg_info{index = IndexFile} = SegmentInfo) ->
+    T1 = erlang:monotonic_time(),
+    Result = case offset_range_from_segment_infos([SegmentInfo]) of
+                 empty ->
+                     eof;
+                 {SegmentStartOffs, SegmentEndOffs} ->
+                     case Offset < SegmentStartOffs orelse
+                          Offset > SegmentEndOffs of
+                         true ->
+                             offset_out_of_range;
+                         false ->
+                             {ok, IdxFd} = open(IndexFile,
+                                                [read, raw, binary]),
+                             _ = file:advise(IdxFd, 0, 0, random),
+                             {Offset, SearchResult} =
+                                 idx_skip_search(IdxFd, ?IDX_HEADER_SIZE,
+                                                 fun offset_search_fun/3,
+                                                 {Offset, not_found}),
+                             ok = file:close(IdxFd),
+                             SearchResult
+                     end
+             end,
+    T2 = erlang:monotonic_time(),
+    Time = erlang:convert_time_unit(T2 - T1, native, microsecond),
+
+    ?DEBUG_(Name, " completed in ~fms",
+           [Time/1000]),
     Result.
 
-offset_idx_scan0(Fd, Offset, PreviousChunk) ->
-    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
-        {ok, <<ChunkId:64/unsigned,
-               _Timestamp:64/signed,
-               Epoch:64/unsigned,
-               FilePos:32/unsigned,
-               _ChType:8/unsigned>>} ->
-            case Offset < ChunkId of
-                true ->
-                    %% offset we are looking for is higher or equal
-                    %% to the start of the previous chunk
-                    %% but lower than the start of the current chunk ->
-                    %% return the previous chunk
-                    _ = file:close(Fd),
-                    PreviousChunk;
-                false ->
-                    offset_idx_scan0(Fd, Offset, {ChunkId, Epoch, FilePos})
-            end;
-        eof ->
-            _ = file:close(Fd),
-            %% Offset must be in the last chunk as there is no more data
-            PreviousChunk;
-        {error, Posix} ->
-            _ = file:close(Fd),
-            Posix
-    end.
+
+offset_search_fun(scan, ?IDX_MATCH(ChId, _Epoch, _Pos), {Offset, _} = State)
+  when Offset < ChId ->
+    {return, State};
+offset_search_fun(peek, ?IDX_MATCH(ChId, _Epoch, _Pos), {Offset, _} = State)
+  when Offset < ChId ->
+    {scan, State};
+offset_search_fun(_Type, ?IDX_MATCH(ChId, Epoch, Pos), {Offset, _}) ->
+    {continue, {Offset, {ChId, Epoch, Pos}}}.
 
 throw_missing({error, enoent}) ->
     throw(missing_file);
 throw_missing(Any) ->
     Any.
 
-open(SegFile, Options) ->
-    throw_missing(file:open(SegFile, Options)).
+open(File, Options) ->
+    throw_missing(file:open(File, Options)).
 
 chunk_location_for_timestamp(Idx, Ts) ->
+    %% TODO: optimise using skip search approach
     Fd = open_index_read(Idx),
     %% scan index file for nearest timestamp
     {ChunkId, _Timestamp, _Epoch, FilePos} = timestamp_idx_scan(Fd, Ts),
@@ -2455,6 +2761,10 @@ validate_crc(ChunkId, Crc, IOData) ->
             exit({crc_validation_failure, {chunk_id, ChunkId}})
     end.
 
+-spec make_counter(osiris_log:config()) ->
+    counters:counters_ref().
+make_counter(#{counter := Counter}) ->
+    Counter;
 make_counter(#{counter_spec := {Name, Fields}}) ->
     %% create a registered counter
     osiris_counters:new(Name, ?COUNTER_FIELDS ++ Fields);
@@ -2480,19 +2790,25 @@ part(Len, [B | L]) when Len > 0 ->
 
 -spec recover_tracking(state()) ->
     osiris_tracking:state().
-recover_tracking(#?MODULE{cfg = #cfg{tracking_config = TrkConfig},
-                          fd = Fd}) ->
+recover_tracking(#?MODULE{cfg = #cfg{directory = Dir,
+                                     tracking_config = TrkConfig},
+                          current_file = File}) ->
+    %% we need to open a new file handle here as we cannot use the one that is
+    %% being used for appending to the segment as pread _may_ move the file
+    %% position on some systems (such as windows)
+    {ok, Fd} = open(filename:join(Dir, File), [read, raw, binary]),
+    _ = file:advise(Fd, 0, 0, random),
     %% TODO: if the first chunk in the segment isn't a tracking snapshot and
     %% there are prior segments we could scan at least two segments increasing
     %% the chance of encountering a snapshot and thus ensure we don't miss any
     %% tracking entries
-    {ok, 0} = file:position(Fd, 0),
-    {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
-    Trk = osiris_tracking:init(undefined, TrkConfig),
-    recover_tracking(Fd, Trk).
+    Trk0 = osiris_tracking:init(undefined, TrkConfig),
+    Trk = recover_tracking(Fd, Trk0, ?LOG_HEADER_SIZE),
+    _ = file:close(Fd),
+    Trk.
 
-recover_tracking(Fd, Trk0) ->
-    case file:read(Fd, ?HEADER_SIZE_B) of
+recover_tracking(Fd, Trk0, Pos0) ->
+    case file:pread(Fd, Pos0, ?HEADER_SIZE_B) of
         {ok,
          <<?MAGIC:4/unsigned,
            ?VERSION:4/unsigned,
@@ -2505,85 +2821,123 @@ recover_tracking(Fd, Trk0) ->
            _Crc:32/integer,
            Size:32/unsigned,
            TSize:32/unsigned,
-           _Reserved:32>>} ->
+           FSize:8/unsigned,
+           _Reserved:24>>} ->
+            Pos = Pos0 + ?HEADER_SIZE_B,
+            NextPos = Pos + Size + TSize + FSize,
             case ChType of
                 ?CHNK_TRK_DELTA ->
                     %% tracking is written a single record so we don't
                     %% have to parse
-                    {ok, <<0:1, S:31, Data:S/binary>>} = file:read(Fd, Size),
+                    {ok, <<0:1, S:31, Data:S/binary>>} =
+                        file:pread(Fd, Pos + FSize, Size),
                     Trk = osiris_tracking:append_trailer(ChunkId, Data, Trk0),
-                    {ok, _} = file:position(Fd, {cur, TSize}),
                     %% A tracking delta chunk will not have any writer data
                     %% so no need to parse writers here
-                    recover_tracking(Fd, Trk);
+                    recover_tracking(Fd, Trk, NextPos);
                 ?CHNK_TRK_SNAPSHOT ->
-                    {ok, <<0:1, S:31, Data:S/binary>>} = file:read(Fd, Size),
-                    {ok, _} = file:read(Fd, TSize),
+                    {ok, <<0:1, S:31, Data:S/binary>>} =
+                        file:pread(Fd, Pos + FSize, Size),
                     Trk = osiris_tracking:init(Data, Trk0),
-                    recover_tracking(Fd, Trk);
-                ?CHNK_USER ->
-                    {ok, _} = file:position(Fd, {cur, Size}),
-                    {ok, TData} = file:read(Fd, TSize),
-
+                    recover_tracking(Fd, Trk, NextPos);
+                ?CHNK_USER when TSize > 0 ->
+                    {ok, TData} = file:pread(Fd, Pos + FSize + Size, TSize),
                     Trk = osiris_tracking:append_trailer(ChunkId, TData, Trk0),
-                    recover_tracking(Fd, Trk)
+                    recover_tracking(Fd, Trk, NextPos);
+                ?CHNK_USER ->
+                    recover_tracking(Fd, Trk0, NextPos)
             end;
         eof ->
             Trk0
     end.
 
 read_header0(#?MODULE{cfg = #cfg{directory = Dir,
+                                 shared = Shared,
                                  counter = CntRef},
-                      mode = #read{offset_ref = ORef,
-                                   next_offset = NextChId0} = Read0,
+                      mode = #read{next_offset = NextChId0,
+                                   position = Pos,
+                                   filter = Filter} = Read0,
                       current_file = CurFile,
                       fd = Fd} =
-                 State) ->
+             State) ->
     %% reads the next header if permitted
-    case can_read_next_offset(Read0) of
+    case can_read_next(State) of
         true ->
-            {ok, Pos} = file:position(Fd, cur),
-            case file:read(Fd, ?HEADER_SIZE_B) of
-                {ok,
-                 <<?MAGIC:4/unsigned,
-                   ?VERSION:4/unsigned,
-                   ChType:8/unsigned,
-                   NumEntries:16/unsigned,
-                   NumRecords:32/unsigned,
-                   Timestamp:64/signed,
-                   Epoch:64/unsigned,
-                   NextChId0:64/unsigned,
-                   Crc:32/integer,
-                   DataSize:32/unsigned,
-                   TrailerSize:32/unsigned,
-                   _Reserved:32>> =
-                     HeaderData} ->
+            %% optimistically read 64 bytes (small binary) as it may save us
+            %% a syscall reading the filter if the filter is of the default
+            %% 16 byte size
+            case file:pread(Fd, Pos, ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE) of
+                {ok, <<?MAGIC:4/unsigned,
+                       ?VERSION:4/unsigned,
+                       ChType:8/unsigned,
+                       NumEntries:16/unsigned,
+                       NumRecords:32/unsigned,
+                       Timestamp:64/signed,
+                       Epoch:64/unsigned,
+                       NextChId0:64/unsigned,
+                       Crc:32/integer,
+                       DataSize:32/unsigned,
+                       TrailerSize:32/unsigned,
+                       FilterSize:8/unsigned,
+                       _Reserved:24,
+                       MaybeFilter/binary>> = HeaderData0} ->
+                    <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
                     counters:put(CntRef, ?C_OFFSET, NextChId0 + NumRecords),
                     counters:add(CntRef, ?C_CHUNKS, 1),
-                    {ok,
-                     #{chunk_id => NextChId0,
-                       epoch => Epoch,
-                       type => ChType,
-                       crc => Crc,
-                       num_records => NumRecords,
-                       num_entries => NumEntries,
-                       timestamp => Timestamp,
-                       data_size => DataSize,
-                       trailer_size => TrailerSize,
-                       header_data => HeaderData,
-                       position => Pos},
-                     State};
+                    NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
+
+                    ChunkFilter = case MaybeFilter of
+                                      <<F:FilterSize/binary, _/binary>> ->
+                                          %% filter is of default size or 0
+                                          F;
+                                      _  when Filter =/= undefined ->
+                                          %% the filter is larger than default
+                                          case file:pread(Fd, Pos + ?HEADER_SIZE_B,
+                                                          FilterSize) of
+                                              {ok, F} ->
+                                                  F;
+                                              eof ->
+                                                  throw({end_of_stream, State})
+                                          end;
+                                      _ ->
+                                          <<>>
+                                  end,
+
+                    case osiris_bloom:is_match(ChunkFilter, Filter) of
+                        true ->
+                            {ok, #{chunk_id => NextChId0,
+                                   epoch => Epoch,
+                                   type => ChType,
+                                   crc => Crc,
+                                   num_records => NumRecords,
+                                   num_entries => NumEntries,
+                                   timestamp => Timestamp,
+                                   data_size => DataSize,
+                                   trailer_size => TrailerSize,
+                                   header_data => HeaderData,
+                                   filter_size => FilterSize,
+                                   next_position => NextPos,
+                                   position => Pos}, State};
+                        false ->
+                            Read = Read0#read{next_offset = NextChId0 + NumRecords,
+                                              position = NextPos},
+                            read_header0(State#?MODULE{mode = Read});
+                        {retry_with, NewFilter} ->
+                            Read = Read0#read{filter = NewFilter},
+                            read_header0(State#?MODULE{mode = Read})
+                    end;
                 {ok, Bin} when byte_size(Bin) < ?HEADER_SIZE_B ->
                     %% partial header read
                     %% this can happen when a replica reader reads ahead
                     %% optimistically
-                    %% set the position back and and return end of stream
-                    {ok, Pos} = file:position(Fd, Pos),
+                    %% treat as end_of_stream
                     {end_of_stream, State};
                 eof ->
-                    FirstOffset = atomics:get(ORef, 2),
+                    FirstOffset = osiris_log_shared:first_chunk_id(Shared),
                     %% open next segment file and start there if it exists
                     NextChId = max(FirstOffset, NextChId0),
+                    %% TODO: replace this check with a last chunk id counter
+                    %% updated by the writer and replicas
                     SegFile = make_file_name(NextChId, "segment"),
                     case SegFile == CurFile of
                         true ->
@@ -2592,19 +2946,16 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                             %% log but would cause an infinite loop if it does
                             {end_of_stream, State};
                         false ->
-                            case file:open(
-                                     filename:join(Dir, SegFile),
-                                     [raw, binary, read])
-                            of
+                            case file:open(filename:join(Dir, SegFile),
+                                           [raw, binary, read]) of
                                 {ok, Fd2} ->
                                     ok = file:close(Fd),
-                                    {ok, _} =
-                                        file:position(Fd2, ?LOG_HEADER_SIZE),
-                                    Read = Read0#read{next_offset = NextChId},
-                                    read_header0(State#?MODULE{current_file =
-                                                                   SegFile,
-                                                               fd = Fd2,
-                                                               mode = Read});
+                                    Read = Read0#read{next_offset = NextChId,
+                                                      position = ?LOG_HEADER_SIZE},
+                                    read_header0(
+                                      State#?MODULE{current_file = SegFile,
+                                                    fd = Fd2,
+                                                    mode = Read});
                                 {error, enoent} ->
                                     {end_of_stream, State}
                             end
@@ -2624,10 +2975,8 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                    _Reserved:32>>} ->
                     %% TODO: we may need to return the new state here if
                     %% we've crossed segments
-                    {ok, Pos} = file:position(Fd, Pos),
                     {error, {unexpected_chunk_id, UnexpectedChId, NextChId0}};
                 Invalid ->
-                    _ = file:position(Fd, Pos),
                     {error, {invalid_chunk_header, Invalid}}
             end;
         false ->
@@ -2635,23 +2984,25 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
     end.
 
 trigger_retention_eval(#?MODULE{cfg =
-                                    #cfg{directory = Dir,
+                                    #cfg{name = Name,
+                                         directory = Dir,
                                          retention = RetentionSpec,
                                          counter = Cnt,
-                                         first_offset_fun = Fun}} = State) ->
-    ok =
-        osiris_retention:eval(Dir, RetentionSpec,
-                              %% updates first offset and first timestamp
-                              %% after retention has been evaluated
-                              fun ({{FstOff, _}, FstTs, Seg}) when is_integer(FstOff),
-                                                                   is_integer(FstTs) ->
-                                      Fun(FstOff),
-                                      counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
-                                      counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
-                                      counters:put(Cnt, ?C_SEGMENTS, Seg);
-                                  (_) ->
-                                      ok
-                              end),
+                                         shared = Shared}} = State) ->
+
+    %% updates first offset and first timestamp
+    %% after retention has been evaluated
+    EvalFun = fun ({{FstOff, _}, FstTs, NumSegLeft})
+                    when is_integer(FstOff),
+                         is_integer(FstTs) ->
+                      osiris_log_shared:set_first_chunk_id(Shared, FstOff),
+                      counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
+                      counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
+                      counters:put(Cnt, ?C_SEGMENTS, NumSegLeft);
+                  (_) ->
+                      ok
+              end,
+    ok = osiris_retention:eval(Name, Dir, RetentionSpec, EvalFun),
     State.
 
 next_location(undefined) ->
@@ -2662,8 +3013,10 @@ next_location(#chunk_info{id = Id,
                           size = Size}) ->
     {Id + Num, Pos + Size + ?HEADER_SIZE_B}.
 
-index_file_first_offset(IdxFile) ->
-    list_to_integer(filename:basename(IdxFile, ".index")).
+index_file_first_offset(IdxFile) when is_list(IdxFile) ->
+    list_to_integer(filename:basename(IdxFile, ".index"));
+index_file_first_offset(IdxFile) when is_binary(IdxFile) ->
+    binary_to_integer(filename:basename(IdxFile, <<".index">>)).
 
 first_last_timestamps(IdxFile) ->
     case file:open(IdxFile, [raw, read, binary]) of
@@ -2754,9 +3107,132 @@ close_fd(Fd) ->
     _ = file:close(Fd),
     ok.
 
+
+dump_init(File) ->
+    {ok, Fd} = file:open(File, [raw, binary, read]),
+    {ok, <<"OSIL", _V:4/binary>> } = file:read(Fd, ?LOG_HEADER_SIZE),
+    Fd.
+
+dump_init_idx(File) ->
+    {ok, Fd} = file:open(File, [raw, binary, read]),
+    {ok, <<"OSII", _V:4/binary>> } = file:read(Fd, ?IDX_HEADER_SIZE),
+    Fd.
+
+dump_index(Fd) ->
+    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
+        {ok,
+         <<ChunkId:64/unsigned,
+           Timestamp:64/signed,
+           Epoch:64/unsigned,
+           FilePos:32/unsigned,
+           ChType:8/unsigned>>} ->
+            #{chunk_id => ChunkId,
+              timestamp => Timestamp,
+              epoch => Epoch,
+              file_pos => FilePos,
+              type => ChType};
+        Err ->
+            Err
+    end.
+
+
+
+dump_chunk(Fd) ->
+    {ok, Pos} = file:position(Fd, cur),
+    case file:read(Fd, ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE) of
+        {ok, <<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               ChType:8/unsigned,
+               NumEntries:16/unsigned,
+               NumRecords:32/unsigned,
+               Timestamp:64/signed,
+               Epoch:64/unsigned,
+               NextChId0:64/unsigned,
+               Crc:32/integer,
+               DataSize:32/unsigned,
+               TrailerSize:32/unsigned,
+               FilterSize:8/unsigned,
+               _Reserved:24,
+               MaybeFilter/binary>>} ->
+
+            NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
+
+            ChunkFilter = case MaybeFilter of
+                              <<F:FilterSize/binary, _/binary>> ->
+                                  %% filter is of default size or 0
+                                  F;
+                              _ when FilterSize > 0 ->
+                                  %% the filter is larger than default
+                                  case file:pread(Fd, Pos + ?HEADER_SIZE_B,
+                                                  FilterSize) of
+                                      {ok, F} ->
+                                          F;
+                                      eof ->
+                                          eof
+                                  end;
+                              _ ->
+                                  <<>>
+                          end,
+            {ok, Data} = file:pread(Fd, Pos + FilterSize + ?HEADER_SIZE_B, DataSize),
+            CrcMatch = erlang:crc32(Data) =:= Crc,
+            _ = file:position(Fd, NextPos),
+            #{chunk_id => NextChId0,
+              epoch => Epoch,
+              type => ChType,
+              crc => Crc,
+              data => Data,
+              crc_match => CrcMatch,
+              num_records => NumRecords,
+              num_entries => NumEntries,
+              timestamp => Timestamp,
+              data_size => DataSize,
+              trailer_size => TrailerSize,
+              filter_size => FilterSize,
+              chunk_filter => ChunkFilter,
+              next_position => NextPos,
+              position => Pos};
+        eof ->
+            eof
+    end.
+
+dump_crc_check(Fd) ->
+    case dump_chunk(Fd) of
+        eof ->
+            eof;
+        #{crc_match := false} = Ch ->
+            Ch;
+        _ ->
+            dump_crc_check(Fd)
+    end.
+
+iter_read_ahead(_Fd, _Pos, _ChunkId, _Crc, 1, _DataSize, _NumEntries) ->
+    %% no point reading ahead if there is only one entry to be read at this
+    %% time
+    undefined;
+iter_read_ahead(Fd, Pos, ChunkId, Crc, Credit, DataSize, NumEntries)
+  when Credit == all orelse NumEntries == 1 ->
+    {ok, Data} = file:pread(Fd, Pos, DataSize),
+    validate_crc(ChunkId, Crc, Data),
+    Data;
+iter_read_ahead(Fd, Pos, _ChunkId, _Crc, Credit0, DataSize, NumEntries) ->
+    %% read ahead, assumes roughly equal entry sizes which may not be the case
+    %% TODO round up to nearest block?
+    %% We can only practically validate CRC if we read the whole data
+    Credit = min(Credit0, NumEntries),
+    Size = DataSize div NumEntries * Credit,
+    {ok, Data} = file:pread(Fd, Pos, Size + ?ITER_READ_AHEAD_B),
+    Data.
+
+list_dir(Dir) ->
+    case prim_file:list_dir(Dir) of
+        {error, enoent} ->
+            [];
+        {ok, Files} ->
+            [list_to_binary(F) || F <- Files]
+    end.
+
 -ifdef(TEST).
 
-% -include_lib("eunit/include/eunit.hrl").
 
 part_test() ->
     [<<"ABCD">>] = part(4, [<<"ABCDEF">>]),

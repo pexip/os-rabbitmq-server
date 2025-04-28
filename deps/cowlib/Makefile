@@ -2,7 +2,7 @@
 
 PROJECT = cowlib
 PROJECT_DESCRIPTION = Support library for manipulating Web protocols.
-PROJECT_VERSION = 2.9.1
+PROJECT_VERSION = 2.13.0
 
 # Options.
 
@@ -21,11 +21,12 @@ LOCAL_DEPS = crypto
 DOC_DEPS = asciideck
 
 TEST_DEPS = $(if $(CI_ERLANG_MK),ci.erlang.mk) base32 horse proper jsx \
-	structured-header-tests uritemplate-tests
-dep_base32 = git https://github.com/dnsimple/base32_erlang master
+	decimal structured-header-tests uritemplate-tests
+dep_base32 = git https://github.com/dnsimple/base32_erlang main
 dep_horse = git https://github.com/ninenines/horse.git master
 dep_jsx = git https://github.com/talentdeficit/jsx v2.10.0
-dep_structured-header-tests = git https://github.com/httpwg/structured-header-tests e614583397e7f65e0082c0fff3929f32a298b9f2
+dep_decimal = git https://github.com/egobrain/decimal 0.6.2
+dep_structured-header-tests = git https://github.com/httpwg/structured-header-tests faed1f92942abd4fb5d61b1f9f0dc359f499f1d7
 dep_uritemplate-tests = git https://github.com/uri-templates/uritemplate-test master
 
 # CI configuration.
@@ -38,9 +39,27 @@ AUTO_CI_HIPE ?= OTP-LATEST
 # AUTO_CI_ERLLVM ?= OTP-LATEST
 AUTO_CI_WINDOWS ?= OTP-21+
 
+# Hex configuration.
+
+define HEX_TARBALL_EXTRA_METADATA
+#{
+	licenses => [<<"ISC">>],
+	links => #{
+		<<"Function reference">> => <<"https://ninenines.eu/docs/en/cowlib/2.13/manual/">>,
+		<<"GitHub">> => <<"https://github.com/ninenines/cowlib">>,
+		<<"Sponsor">> => <<"https://github.com/sponsors/essen">>
+	}
+}
+endef
+
 # Standard targets.
 
 include $(if $(ERLANG_MK_FILENAME),$(ERLANG_MK_FILENAME),erlang.mk)
+
+# Always rebuild from scratch in CI because OTP-25.0+ can't use the older build.
+
+ci-setup:: distclean-deps
+	-$(verbose) rm -rf $(ERLANG_MK_TMP)/rebar
 
 # Compile options.
 
@@ -85,9 +104,11 @@ perfs: test-build
 # Prepare for the release.
 
 prepare_tag:
+	$(verbose) $(warning Hex metadata: $(HEX_TARBALL_EXTRA_METADATA))
+	$(verbose) echo
 	$(verbose) echo -n "Most recent tag:            "
-	$(verbose) git tag | tail -n1
-	$(verbose) git verify-tag `git tag | tail -n1`
+	$(verbose) git tag --sort taggerdate | tail -n1
+	$(verbose) git verify-tag `git tag --sort taggerdate | tail -n1`
 	$(verbose) echo -n "MAKEFILE: "
 	$(verbose) grep -m1 PROJECT_VERSION Makefile
 	$(verbose) echo -n "APP:                 "

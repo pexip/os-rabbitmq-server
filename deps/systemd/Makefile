@@ -6,7 +6,6 @@ export DRV_CFLAGS
 ERLANG_ARCH = 64
 export ERLANG_ARCH
 ERLC_OPTS = +debug_info
-export ERLC_OPTS
 
 DEPS += enough
 dep_enough = hex 0.1.0 enough

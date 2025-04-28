@@ -1,3 +1,19 @@
+%% The contents of this file are subject to the Mozilla Public License
+%% Version 2.0 (the "License"); you may not use this file except in
+%% compliance with the License. You may obtain a copy of the License
+%% at https://www.mozilla.org/en-US/MPL/2.0/
+%%
+%% Software distributed under the License is distributed on an "AS IS"
+%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
+%% the License for the specific language governing rights and
+%% limitations under the License.
+%%
+%% The Original Code is RabbitMQ.
+%%
+%% The Initial Developer of the Original Code is Pivotal Software, Inc.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
+%%
+
 -module(rabbit_stream_core).
 
 -include("rabbit_stream.hrl").
@@ -30,8 +46,9 @@
 -define(STRING(Str), (byte_size(Str)):16, Str / binary).
 -define(DATASTR(Str), (byte_size(Str)):32, Str / binary).
 
--export_type([state/0]).
+-export_type([state/0, command_version/0]).
 
+-type command_version() :: 0..65535.
 -type correlation_id() :: non_neg_integer().
 %% publishing sequence number
 -type publishing_id() :: non_neg_integer().
@@ -57,20 +74,31 @@
     ?RESPONSE_CODE_ACCESS_REFUSED |
     ?RESPONSE_CODE_PRECONDITION_FAILED |
     ?RESPONSE_CODE_PUBLISHER_DOES_NOT_EXIST |
-    ?RESPONSE_CODE_NO_OFFSET.
+    ?RESPONSE_CODE_NO_OFFSET |
+    ?RESPONSE_SASL_CANNOT_CHANGE_MECHANISM |
+    ?RESPONSE_SASL_CANNOT_CHANGE_USERNAME .
 -type error_code() :: response_code().
 -type sequence() :: non_neg_integer().
 -type credit() :: non_neg_integer().
 -type offset_ref() :: binary().
 -type endpoint() :: {Host :: binary(), Port :: non_neg_integer()}.
+-type active() :: boolean().
 -type command() ::
     {publish,
+     publisher_id(),
+     MessageCount :: non_neg_integer(),
+     Payload :: binary() | iolist()} |
+    {publish_v2,
      publisher_id(),
      MessageCount :: non_neg_integer(),
      Payload :: binary() | iolist()} |
     {publish_confirm, publisher_id(), [publishing_id()]} |
     {publish_error, publisher_id(), error_code(), [publishing_id()]} |
     {deliver, subscription_id(), Chunk :: binary()} |
+    {deliver_v2,
+     subscription_id(),
+     CommittedChunkId :: osiris:offset(),
+     Chunk :: binary()} |
     {credit, subscription_id(), Credit :: non_neg_integer()} |
     {metadata_update, stream_name(), response_code()} |
     {store_offset, offset_ref(), stream_name(), osiris:offset()} |
@@ -98,7 +126,14 @@
      {open, VirtualHost :: binary()} |
      {close, Code :: non_neg_integer(), Reason :: binary()} |
      {route, RoutingKey :: binary(), SuperStream :: binary()} |
-     {partitions, SuperStream :: binary()}} |
+     {partitions, SuperStream :: binary()} |
+     {consumer_update, subscription_id(), active()} |
+     {exchange_command_versions,
+      [{Command :: atom(), MinVersion :: command_version(),
+        MaxVersion :: command_version()}]} |
+     {stream_stats, Stream :: binary()} |
+     {create_super_stream, stream_name(), Partitions :: [binary()], BindingKeys :: [binary()], Args :: #{binary() => binary()}} |
+     {delete_super_stream, stream_name()}} |
     {response, correlation_id(),
      {declare_publisher |
       delete_publisher |
@@ -107,7 +142,9 @@
       create_stream |
       delete_stream |
       close |
-      sasl_authenticate,
+      sasl_authenticate |
+      create_super_stream |
+      delete_super_stream,
       response_code()} |
      {query_publisher_sequence, response_code(), sequence()} |
      {open, response_code(), #{binary() => binary()}} |
@@ -123,8 +160,13 @@
      {tune, FrameMax :: non_neg_integer(),
       HeartBeat :: non_neg_integer()} |
      {credit, response_code(), subscription_id()} |
-     {route, response_code(), stream_name()} |
-     {partitions, response_code(), [stream_name()]}} |
+     {route, response_code(), [stream_name()]} |
+     {partitions, response_code(), [stream_name()]} |
+     {consumer_update, response_code(), none | offset_spec()} |
+     {exchange_command_versions, response_code(),
+      [{Command :: atom(), MinVersion :: command_version(),
+        MaxVersion :: command_version()}]} |
+     {stream_stats, response_code(), Stats :: #{binary() => integer()}}} |
     {unknown, binary()}.
 
 -spec init(term()) -> state().
@@ -223,11 +265,25 @@ frame({publish, PublisherId, MessageCount, Payload}) ->
                      PublisherId:8,
                      MessageCount:32>>,
                    Payload]);
+frame({publish_v2, PublisherId, MessageCount, Payload}) ->
+    wrap_in_frame([<<?REQUEST:1,
+                     ?COMMAND_PUBLISH:15,
+                     ?VERSION_2:16,
+                     PublisherId:8,
+                     MessageCount:32>>,
+                   Payload]);
 frame({deliver, SubscriptionId, Chunk}) ->
     wrap_in_frame([<<?REQUEST:1,
                      ?COMMAND_DELIVER:15,
                      ?VERSION_1:16,
                      SubscriptionId:8>>,
+                   Chunk]);
+frame({deliver_v2, SubscriptionId, CommittedChunkId, Chunk}) ->
+    wrap_in_frame([<<?REQUEST:1,
+                     ?COMMAND_DELIVER:15,
+                     ?VERSION_2:16,
+                     SubscriptionId:8,
+                     CommittedChunkId:64>>,
                    Chunk]);
 frame({metadata_update, Stream, ResponseCode}) ->
     StreamSize = byte_size(Stream),
@@ -284,7 +340,7 @@ frame({request, CorrelationId, Body}) ->
                      CorrelationId:32>>,
                    BodyBin]);
 frame({response, _CorrelationId, {credit, Code, SubscriptionId}}) ->
-    %% specical case as credit response does not write correlationid!
+    %% special case as credit response does not write correlationid!
     wrap_in_frame(<<?RESPONSE:1,
                     ?COMMAND_CREDIT:15,
                     ?VERSION_1:16,
@@ -419,11 +475,50 @@ response_body({metadata = Tag, Endpoints, Metadata}) ->
 
     NumStreams = map_size(Metadata),
     {command_id(Tag), [EndpointsBin, <<NumStreams:32>>, MetadataBin]};
-response_body({route = Tag, Code, Stream}) ->
-    {command_id(Tag), <<Code:16, ?STRING(Stream)>>};
+response_body({route = Tag, Code, Streams}) ->
+    StreamsBin = [<<?STRING(Stream)>> || Stream <- Streams],
+    {command_id(Tag), [<<Code:16, (length(Streams)):32>>, StreamsBin]};
 response_body({partitions = Tag, Code, Streams}) ->
     StreamsBin = [<<?STRING(Stream)>> || Stream <- Streams],
-    {command_id(Tag), [<<Code:16, (length(Streams)):32>>, StreamsBin]}.
+    {command_id(Tag), [<<Code:16, (length(Streams)):32>>, StreamsBin]};
+response_body({consumer_update = Tag, Code, OffsetSpec}) ->
+    OffsetSpecBin =
+        case OffsetSpec of
+            none ->
+                <<?OFFSET_TYPE_NONE:16>>;
+            first ->
+                <<?OFFSET_TYPE_FIRST:16>>;
+            last ->
+                <<?OFFSET_TYPE_LAST:16>>;
+            next ->
+                <<?OFFSET_TYPE_NEXT:16>>;
+            Offset when is_integer(Offset) ->
+                <<?OFFSET_TYPE_OFFSET, Offset:64/unsigned>>;
+            {timestamp, Ts} ->
+                <<?OFFSET_TYPE_TIMESTAMP, Ts:64/signed>>
+        end,
+    {command_id(Tag), [<<Code:16, OffsetSpecBin/binary>>]};
+response_body({exchange_command_versions = Tag, Code,
+               CommandVersions}) ->
+    CommandVersionsBin =
+        lists:foldr(fun({Command, MinVersion, MaxVersion}, Acc) ->
+                       CommandId = command_id(Command),
+                       [<<CommandId:16, MinVersion:16, MaxVersion:16>> | Acc]
+                    end,
+                    [], CommandVersions),
+    {command_id(Tag),
+     [<<Code:16, (length(CommandVersions)):32>>, CommandVersionsBin]};
+response_body({stream_stats = Tag, Code, Stats}) ->
+    Init = <<Code:16, (maps:size(Stats)):32>>,
+    {command_id(Tag),
+     maps:fold(fun(Key, Value, Acc) ->
+                  KeySize = byte_size(Key),
+                  <<Acc/binary,
+                    KeySize:16,
+                    Key:KeySize/binary,
+                    Value:64/signed>>
+               end,
+               Init, Stats)}.
 
 request_body({declare_publisher = Tag,
               PublisherId,
@@ -486,9 +581,7 @@ request_body({create_stream = Tag, Stream, Args}) ->
 request_body({delete_stream = Tag, Stream}) ->
     {Tag, <<?STRING(Stream)>>};
 request_body({metadata = Tag, Streams}) ->
-    StreamsBin =
-        lists:foldr(fun(Stream, Acc) -> [<<?STRING(Stream)>> | Acc] end, [],
-                    Streams),
+    StreamsBin = generate_list(Streams),
     {Tag, [<<(length(Streams)):32>>, StreamsBin]};
 request_body({peer_properties = Tag, Props}) ->
     PropsBin = generate_map(Props),
@@ -510,6 +603,35 @@ request_body({close = Tag, Code, Reason}) ->
 request_body({route = Tag, RoutingKey, SuperStream}) ->
     {Tag, <<?STRING(RoutingKey), ?STRING(SuperStream)>>};
 request_body({partitions = Tag, SuperStream}) ->
+    {Tag, <<?STRING(SuperStream)>>};
+request_body({consumer_update = Tag, SubscriptionId, Active}) ->
+    ActiveBin =
+        case Active of
+            true ->
+                1;
+            false ->
+                0
+        end,
+    {Tag, <<SubscriptionId:8, ActiveBin:8>>};
+request_body({exchange_command_versions = Tag, CommandVersions}) ->
+    CommandVersionsBin =
+        lists:foldl(fun({Command, MinVersion, MaxVersion}, Acc) ->
+                       CommandId = command_id(Command),
+                       [<<CommandId:16, MinVersion:16, MaxVersion:16>> | Acc]
+                    end,
+                    [], CommandVersions),
+    CommandVersionsLength = length(CommandVersions),
+    {Tag, [<<CommandVersionsLength:32>>, CommandVersionsBin]};
+request_body({stream_stats = Tag, Stream}) ->
+    {Tag, <<?STRING(Stream)>>};
+request_body({create_super_stream = Tag, SuperStream, Partitions, BindingKeys, Args}) ->
+    PartitionsBin = generate_list(Partitions),
+    BindingKeysBin = generate_list(BindingKeys),
+    ArgsBin = generate_map(Args),
+    {Tag, [<<?STRING(SuperStream), (length(Partitions)):32>>, PartitionsBin,
+           <<(length(BindingKeys)):32>>, BindingKeysBin,
+           <<(map_size(Args)):32>>, ArgsBin]};
+request_body({delete_super_stream = Tag, SuperStream}) ->
     {Tag, <<?STRING(SuperStream)>>}.
 
 append_data(Prev, Data) when is_binary(Prev) ->
@@ -540,6 +662,13 @@ parse_request(<<?REQUEST:1,
                 Messages/binary>>) ->
     {publish, PublisherId, MessageCount, Messages};
 parse_request(<<?REQUEST:1,
+                ?COMMAND_PUBLISH:15,
+                ?VERSION_2:16,
+                PublisherId:8/unsigned,
+                MessageCount:32,
+                Messages/binary>>) ->
+    {publish_v2, PublisherId, MessageCount, Messages};
+parse_request(<<?REQUEST:1,
                 ?COMMAND_PUBLISH_CONFIRM:15,
                 ?VERSION_1:16,
                 PublisherId:8,
@@ -552,6 +681,13 @@ parse_request(<<?REQUEST:1,
                 SubscriptionId:8,
                 Chunk/binary>>) ->
     {deliver, SubscriptionId, Chunk};
+parse_request(<<?REQUEST:1,
+                ?COMMAND_DELIVER:15,
+                ?VERSION_2:16,
+                SubscriptionId:8,
+                CommittedChunkId:64,
+                Chunk/binary>>) ->
+    {deliver_v2, SubscriptionId, CommittedChunkId, Chunk};
 parse_request(<<?REQUEST:1,
                 ?COMMAND_CREDIT:15,
                 ?VERSION_1:16,
@@ -748,6 +884,51 @@ parse_request(<<?REQUEST:1,
                 CorrelationId:32,
                 ?STRING(StreamSize, SuperStream)>>) ->
     request(CorrelationId, {partitions, SuperStream});
+parse_request(<<?REQUEST:1,
+                ?COMMAND_CONSUMER_UPDATE:15,
+                ?VERSION_1:16,
+                CorrelationId:32,
+                SubscriptionId:8,
+                ActiveBin:8>>) ->
+    Active =
+        case ActiveBin of
+            0 ->
+                false;
+            1 ->
+                true
+        end,
+    request(CorrelationId, {consumer_update, SubscriptionId, Active});
+parse_request(<<?REQUEST:1,
+                ?COMMAND_EXCHANGE_COMMAND_VERSIONS:15,
+                ?VERSION_1:16,
+                CorrelationId:32,
+                _CommandVersionsCount:32,
+                CommandVersionsBin/binary>>) ->
+    CommandVersions = parse_command_versions(CommandVersionsBin),
+    request(CorrelationId, {exchange_command_versions, CommandVersions});
+parse_request(<<?REQUEST:1,
+                ?COMMAND_STREAM_STATS:15,
+                ?VERSION_1:16,
+                CorrelationId:32,
+                ?STRING(StreamSize, Stream)>>) ->
+    request(CorrelationId, {stream_stats, Stream});
+parse_request(<<?REQUEST:1,
+                ?COMMAND_CREATE_SUPER_STREAM:15,
+                ?VERSION_1:16,
+                CorrelationId:32,
+                ?STRING(StreamSize, Stream),
+                PartitionsCount:32,
+                Rest0/binary>>) ->
+    {Partitions, <<BindingKeysCount:32, Rest1/binary>>} = list_of_strings(PartitionsCount, Rest0),
+    {BindingKeys, <<_ArgumentsCount:32, Rest2/binary>>} = list_of_strings(BindingKeysCount, Rest1),
+    Args = parse_map(Rest2, #{}),
+    request(CorrelationId, {create_super_stream, Stream, Partitions, BindingKeys, Args});
+parse_request(<<?REQUEST:1,
+                ?COMMAND_DELETE_SUPER_STREAM:15,
+                ?VERSION_1:16,
+                CorrelationId:32,
+                ?STRING(SuperStreamSize, SuperStream)>>) ->
+    request(CorrelationId, {delete_super_stream, SuperStream});
 parse_request(Bin) ->
     {unknown, Bin}.
 
@@ -818,12 +999,45 @@ parse_response_body(?COMMAND_SASL_AUTHENTICATE,
         end,
     {sasl_authenticate, ResponseCode, Challenge};
 parse_response_body(?COMMAND_ROUTE,
-                    <<ResponseCode:16, ?STRING(StreamSize, Stream)>>) ->
-    {route, ResponseCode, Stream};
+                    <<ResponseCode:16, _Count:32, StreamsBin/binary>>) ->
+    Streams = list_of_strings(StreamsBin),
+    {route, ResponseCode, Streams};
 parse_response_body(?COMMAND_PARTITIONS,
                     <<ResponseCode:16, _Count:32, PartitionsBin/binary>>) ->
     Partitions = list_of_strings(PartitionsBin),
-    {partitions, ResponseCode, Partitions}.
+    {partitions, ResponseCode, Partitions};
+parse_response_body(?COMMAND_CONSUMER_UPDATE,
+                    <<ResponseCode:16, OffsetType:16/signed,
+                      OffsetValue/binary>>) ->
+    OffsetSpec = offset_spec(OffsetType, OffsetValue),
+    {consumer_update, ResponseCode, OffsetSpec};
+parse_response_body(?COMMAND_EXCHANGE_COMMAND_VERSIONS,
+                    <<ResponseCode:16, _CommandVersionsCount:32,
+                      CommandVersionsBin/binary>>) ->
+    CommandVersions = parse_command_versions(CommandVersionsBin),
+    {exchange_command_versions, ResponseCode, CommandVersions};
+parse_response_body(?COMMAND_STREAM_STATS,
+                    <<ResponseCode:16, _Count:32, StatsBin/binary>>) ->
+    Info = parse_int_map(StatsBin, #{}),
+    {stream_stats, ResponseCode, Info}.
+
+offset_spec(OffsetType, OffsetValueBin) ->
+    case OffsetType of
+        ?OFFSET_TYPE_NONE ->
+            none;
+        ?OFFSET_TYPE_FIRST ->
+            first;
+        ?OFFSET_TYPE_LAST ->
+            last;
+        ?OFFSET_TYPE_NEXT ->
+            next;
+        ?OFFSET_TYPE_OFFSET ->
+            <<Offset:64/unsigned>> = OffsetValueBin,
+            Offset;
+        ?OFFSET_TYPE_TIMESTAMP ->
+            <<Timestamp:64/signed>> = OffsetValueBin,
+            {timestamp, Timestamp}
+    end.
 
 request(Corr, Cmd) ->
     {request, Corr, Cmd}.
@@ -861,6 +1075,15 @@ parse_nodes(<<Index:16,
             C, Acc) ->
     parse_nodes(Rem, C - 1, Acc#{Index => {Host, Port}}).
 
+parse_command_versions(<<>>) ->
+    [];
+parse_command_versions(<<Key:16,
+                         MinVersion:16,
+                         MaxVersion:16,
+                         Rem/binary>>) ->
+    [{parse_command_id(Key), MinVersion, MaxVersion}
+     | parse_command_versions(Rem)].
+
 parse_map(<<>>, Acc) ->
     Acc;
 parse_map(<<?STRING(KeySize, Key), ?STRING(ValSize, Value),
@@ -868,9 +1091,28 @@ parse_map(<<?STRING(KeySize, Key), ?STRING(ValSize, Value),
           Acc) ->
     parse_map(Rem, Acc#{Key => Value}).
 
+parse_int_map(<<>>, Acc) ->
+    Acc;
+parse_int_map(<<?STRING(KeySize, Key), Value:64, Rem/binary>>, Acc) ->
+    parse_int_map(Rem, Acc#{Key => Value}).
+
+generate_list(List) ->
+    lists:foldr(fun(E, Acc) -> [<<?STRING(E)>> | Acc] end, [],
+                List).
+
 generate_map(Map) ->
     maps:fold(fun(K, V, Acc) -> [<<?STRING(K), ?STRING(V)>> | Acc] end,
               [], Map).
+
+list_of_strings(Count, Bin) ->
+    list_of_strings(Count, [], Bin).
+
+list_of_strings(_, Acc, <<>>) ->
+    {lists:reverse(Acc), <<>>};
+list_of_strings(0, Acc, Rest) ->
+    {lists:reverse(Acc), Rest};
+list_of_strings(Count, Acc, <<?STRING(Size, String), Rem/binary>>) ->
+    list_of_strings(Count - 1, [String | Acc], Rem).
 
 list_of_strings(<<>>) ->
     [];
@@ -896,6 +1138,8 @@ command_id(declare_publisher) ->
     ?COMMAND_DECLARE_PUBLISHER;
 command_id(publish) ->
     ?COMMAND_PUBLISH;
+command_id(publish_v2) ->
+    ?COMMAND_PUBLISH;
 command_id(publish_confirm) ->
     ?COMMAND_PUBLISH_CONFIRM;
 command_id(publish_error) ->
@@ -907,6 +1151,8 @@ command_id(delete_publisher) ->
 command_id(subscribe) ->
     ?COMMAND_SUBSCRIBE;
 command_id(deliver) ->
+    ?COMMAND_DELIVER;
+command_id(deliver_v2) ->
     ?COMMAND_DELIVER;
 command_id(credit) ->
     ?COMMAND_CREDIT;
@@ -941,7 +1187,17 @@ command_id(heartbeat) ->
 command_id(route) ->
     ?COMMAND_ROUTE;
 command_id(partitions) ->
-    ?COMMAND_PARTITIONS.
+    ?COMMAND_PARTITIONS;
+command_id(consumer_update) ->
+    ?COMMAND_CONSUMER_UPDATE;
+command_id(exchange_command_versions) ->
+    ?COMMAND_EXCHANGE_COMMAND_VERSIONS;
+command_id(stream_stats) ->
+    ?COMMAND_STREAM_STATS;
+command_id(create_super_stream) ->
+    ?COMMAND_CREATE_SUPER_STREAM;
+command_id(delete_super_stream) ->
+    ?COMMAND_DELETE_SUPER_STREAM.
 
 parse_command_id(?COMMAND_DECLARE_PUBLISHER) ->
     declare_publisher;
@@ -992,7 +1248,17 @@ parse_command_id(?COMMAND_HEARTBEAT) ->
 parse_command_id(?COMMAND_ROUTE) ->
     route;
 parse_command_id(?COMMAND_PARTITIONS) ->
-    partitions.
+    partitions;
+parse_command_id(?COMMAND_CONSUMER_UPDATE) ->
+    consumer_update;
+parse_command_id(?COMMAND_EXCHANGE_COMMAND_VERSIONS) ->
+    exchange_command_versions;
+parse_command_id(?COMMAND_STREAM_STATS) ->
+    stream_stats;
+parse_command_id(?COMMAND_CREATE_SUPER_STREAM) ->
+    create_super_stream;
+parse_command_id(?COMMAND_DELETE_SUPER_STREAM) ->
+    delete_super_stream.
 
 element_index(Element, List) ->
     element_index(Element, List, 0).

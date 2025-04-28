@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_exchange_type_event).
@@ -38,20 +38,29 @@ info(_X) -> [].
 info(_X, _) -> [].
 
 register() ->
-    rabbit_exchange:declare(exchange(), topic, true, false, true, [],
-                            ?INTERNAL_USER),
-    gen_event:add_handler(rabbit_event, ?MODULE, []).
+    case rabbit_exchange:declare(exchange(), topic, true, false, true, [],
+                                 ?INTERNAL_USER) of
+        {ok, _Exchange} ->
+            gen_event:add_handler(rabbit_event, ?MODULE, []);
+        {error, timeout} = Err ->
+            Err
+    end.
 
 unregister() ->
-    rabbit_exchange:delete(exchange(), false, ?INTERNAL_USER),
-    gen_event:delete_handler(rabbit_event, ?MODULE, []).
+    case rabbit_exchange:ensure_deleted(exchange(), false, ?INTERNAL_USER) of
+        ok ->
+            gen_event:delete_handler(rabbit_event, ?MODULE, []),
+            ok;
+        {error, _} = Err ->
+            Err
+    end.
 
 exchange() ->
     exchange(get_vhost()).
 
 exchange(VHost) ->
     _ = ensure_vhost_exists(VHost),
-    rabbit_misc:r(VHost, exchange, ?EXCH_NAME).
+   rabbit_misc:r(VHost, exchange, ?EXCH_NAME).
 
 %%----------------------------------------------------------------------------
 
@@ -73,22 +82,23 @@ handle_event(#event{type      = Type,
                     props     = Props,
                     timestamp = TS,
                     reference = none}, #state{vhost = VHost} = State) ->
-    case key(Type) of
-        ignore -> ok;
-        Key    ->
-                  Props2 = [{<<"timestamp_in_ms">>, TS} | Props],
-                  PBasic = #'P_basic'{delivery_mode = 2,
-                                      headers = fmt_proplist(Props2),
-                                      %% 0-9-1 says the timestamp is a
-                                      %% "64 bit POSIX
-                                      %% timestamp". That's second
-                                      %% resolution, not millisecond.
-                                      timestamp = erlang:convert_time_unit(
-                                                    TS, milli_seconds, seconds)},
-            Msg = rabbit_basic:message(exchange(VHost), Key, PBasic, <<>>),
-                  rabbit_basic:publish(
-                    rabbit_basic:delivery(false, false, Msg, undefined))
-    end,
+    _ = case key(Type) of
+            ignore -> ok;
+            Key    ->
+                Props2 = [{<<"timestamp_in_ms">>, TS} | Props],
+                PBasic = #'P_basic'{delivery_mode = 2,
+                                    headers = fmt_proplist(Props2),
+                                    %% 0-9-1 says the timestamp is a
+                                    %% "64 bit POSIX
+                                    %% timestamp". That's second
+                                    %% resolution, not millisecond.
+                                    timestamp = erlang:convert_time_unit(
+                                                  TS, milli_seconds, seconds)},
+                Content = rabbit_basic:build_content(PBasic, <<>>),
+                XName = exchange(VHost),
+                {ok, Msg} = mc_amqpl:message(XName, Key, Content),
+                rabbit_queue_type:publish_at_most_once(XName, Msg)
+        end,
     {ok, State};
 handle_event(_Event, State) ->
     {ok, State}.
@@ -106,10 +116,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%----------------------------------------------------------------------------
 
 ensure_vhost_exists(VHost) ->
-    case rabbit_vhost:exists(VHost) of
-        false -> rabbit_vhost:add(VHost, ?INTERNAL_USER);
-        _     -> ok
-    end.
+    rabbit_vhost:add(VHost, ?INTERNAL_USER).
 
 %% pattern matching is way more efficient that the string operations,
 %% let's use all the keys we're aware of to speed up the handler.

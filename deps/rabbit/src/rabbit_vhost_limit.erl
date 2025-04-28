@@ -2,14 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_vhost_limit).
 
 -behaviour(rabbit_runtime_parameter).
-
--include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([register/0]).
 -export([parse_set/3, set/3, clear/2]).
@@ -39,12 +37,14 @@ validate(_VHost, <<"vhost-limits">>, Name, Term, _User) ->
 
 notify(VHost, <<"vhost-limits">>, <<"limits">>, Limits, ActingUser) ->
     rabbit_event:notify(vhost_limits_set, [{name, <<"limits">>},
+                                           {vhost, VHost},
                                            {user_who_performed_action, ActingUser}
                                            | Limits]),
     update_vhost(VHost, Limits).
 
 notify_clear(VHost, <<"vhost-limits">>, <<"limits">>, ActingUser) ->
     rabbit_event:notify(vhost_limits_cleared, [{name, <<"limits">>},
+                                               {vhost, VHost},
                                                {user_who_performed_action, ActingUser}]),
     %% If the function is called as a part of vhost deletion, the vhost can
     %% be already deleted.
@@ -84,7 +84,7 @@ list(VHost) ->
 -spec is_over_connection_limit(vhost:name()) -> {true, non_neg_integer()} | false.
 
 is_over_connection_limit(VirtualHost) ->
-    case rabbit_vhost_limit:connection_limit(VirtualHost) of
+    case connection_limit(VirtualHost) of
         %% no limit configured
         undefined                                            -> false;
         %% with limit = 0, no connections are allowed
@@ -149,9 +149,11 @@ parse_set(VHost, Defn, ActingUser) ->
             set(VHost, maps:to_list(Term), ActingUser);
         {error, Reason} ->
             {error_string,
-                rabbit_misc:format("JSON decoding error. Reason: ~ts", [Reason])}
+                rabbit_misc:format("Could not parse JSON document: ~tp", [Reason])}
     end.
 
+-spec set(vhost:name(), [{binary(), binary()}], rabbit_types:user() | rabbit_types:username()) ->
+    rabbit_runtime_parameters:ok_or_error_string().
 set(VHost, Defn, ActingUser) ->
     rabbit_runtime_parameters:set_any(VHost, <<"vhost-limits">>,
                                       <<"limits">>, Defn, ActingUser).
@@ -181,13 +183,9 @@ vhost_limit_validation() ->
      {<<"max-queues">>,      fun rabbit_parameter_validation:integer/2, optional}].
 
 update_vhost(VHostName, Limits) ->
-    rabbit_misc:execute_mnesia_transaction(
-      fun() ->
-              rabbit_vhost:update(VHostName,
-                                  fun(VHost) ->
-                                          rabbit_vhost:set_limits(VHost, Limits)
-                                  end)
-      end),
+    _ = rabbit_db_vhost:update(
+          VHostName,
+          fun(VHost) -> rabbit_vhost:set_limits(VHost, Limits) end),
     ok.
 
 get_limit(VirtualHost, Limit) ->

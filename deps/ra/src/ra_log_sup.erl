@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 %% @hidden
 -module(ra_log_sup).
@@ -30,13 +30,15 @@ init([#{data_dir := DataDir,
                 start => {ra_log_pre_init, start_link, [System]}},
     Meta = #{id => ra_log_meta,
              start => {ra_log_meta, start_link, [Cfg]}},
-    SegmentMaxEntries = maps:get(segment_max_entries, Cfg, 4096),
+    SegmentMaxEntries = maps:get(segment_max_entries, Cfg, ?SEGMENT_MAX_ENTRIES),
+    SegmentMaxPending = maps:get(segment_max_pending, Cfg, ?SEGMENT_MAX_PENDING),
     SegmentComputeChecksums = maps:get(segment_compute_checksums, Cfg, true),
     SegWriterConf = #{name => SegWriterName,
                       system => System,
                       data_dir => DataDir,
                       segment_conf =>
                           #{max_count => SegmentMaxEntries,
+                            max_pending => SegmentMaxPending,
                             compute_checksums => SegmentComputeChecksums}},
     SegWriter = #{id => ra_log_segment_writer,
                   start => {ra_log_segment_writer, start_link,
@@ -68,6 +70,10 @@ make_wal_conf(#{data_dir := DataDir,
     HibAfter = maps:get(wal_hibernate_after, Cfg, undefined),
     Gc = maps:get(wal_garbage_collect, Cfg, false),
     PreAlloc = maps:get(wal_pre_allocate, Cfg, false),
+    MinBinVheapSize = maps:get(wal_min_bin_vheap_size, Cfg,
+                               ?MIN_BIN_VHEAP_SIZE),
+    MinHeapSize = maps:get(wal_min_heap_size, Cfg, ?MIN_HEAP_SIZE),
+    CompressMemTables = maps:get(compress_mem_tables, Cfg, false),
     #{name => WalName,
       names => Names,
       dir => WalDir,
@@ -80,5 +86,8 @@ make_wal_conf(#{data_dir := DataDir,
       max_batch_size => MaxBatchSize,
       hibernate_after => HibAfter,
       garbage_collect => Gc,
-      pre_allocate => PreAlloc
+      pre_allocate => PreAlloc,
+      min_heap_size => MinHeapSize,
+      min_bin_vheap_size => MinBinVheapSize,
+      compress_mem_tables => CompressMemTables
      }.

@@ -6,7 +6,6 @@ export DRV_CFLAGS
 ERLANG_ARCH = 64
 export ERLANG_ARCH
 ERLC_OPTS = +debug_info
-export ERLC_OPTS
 ERLC_OPTS += -I ./_build/default/plugins/gpb/include
 
 DEPS += gun

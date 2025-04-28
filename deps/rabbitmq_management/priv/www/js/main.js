@@ -1,18 +1,70 @@
-$(document).ready(function() {
-    if (enable_uaa) {
-        get(uaa_location + "/info", "application/json", function(req) {
-            if (req.status !== 200) {
-                replace_content('outer', format('login_uaa', {}));
-                replace_content('login-status', '<p class="warning">' + uaa_location + " does not appear to be a running UAA instance or may not have a trusted SSL certificate"  + '</p> <button id="loginWindow" onclick="uaa_login_window()">Single Sign On</button>');
-            } else {
-                replace_content('outer', format('login_uaa', {}));
-            }
-        });
-    } else {
-        replace_content('outer', format('login', {}));
-        start_app_login();
+
+$(document).ready(function() {    
+  var url_string = window.location.href;
+  var url = new URL(url_string);
+  var error = url.searchParams.get('error');
+  if (error) {
+    if (oauth.enabled) {
+      renderWarningMessageInLoginStatus(oauth, fmt_escape_html(error));
     }
+  } else {
+    if (oauth.enabled) {
+      startWithOAuthLogin(oauth);
+    } else {
+      startWithLoginPage();
+      }
+  }
 });
+
+function startWithLoginPage() {
+  replace_content('outer', format('login', {}));
+  start_app_login();
+}
+function removeDuplicates(array){
+  let output = []
+  for(let item of array) {
+    if(!output.includes(item)) {
+      output.push(item)
+    }
+  }
+  return output
+}
+
+
+function startWithOAuthLogin (oauth) {
+  store_pref("oauth-return-to", window.location.hash);
+
+  if (!oauth.logged_in) {
+    hasAnyResourceServerReady(oauth, (oauth, warnings) => {  render_login_oauth(oauth, warnings); start_app_login(); })
+  } else {
+    start_app_login()
+  }
+}
+function render_login_oauth(oauth, messages) {
+  let formatData = {}
+  formatData.warnings = []
+  formatData.notAuthorized = false
+  formatData.resource_servers = oauth.resource_servers
+  formatData.declared_resource_servers_count = oauth.declared_resource_servers_count
+  formatData.oauth_disable_basic_auth = oauth.oauth_disable_basic_auth
+
+  if (Array.isArray(messages)) {
+    formatData.warnings = messages
+  } else if (typeof messages == "string") {
+    formatData.warnings = [messages]
+    formatData.notAuthorized = messages == "Not authorized"
+  }
+  replace_content('outer', format('login_oauth', formatData))
+
+  setup_visibility()
+  $('#login').off('click', 'div.section h2, div.section-hidden h2');
+  $('#login').on('click', 'div.section h2, div.section-hidden h2', function() {
+          toggle_visibility($(this));
+      });
+}
+function renderWarningMessageInLoginStatus(oauth, message) {
+  render_login_oauth(oauth, message)
+}
 
 function dispatcher_add(fun) {
     dispatcher_modules.push(fun);
@@ -27,23 +79,6 @@ function dispatcher() {
     }
 }
 
-function set_auth_pref(userinfo) {
-    // clear a local storage value used by earlier versions
-    clear_local_pref('auth');
-
-    var b64 = b64_encode_utf8(userinfo);
-    var date  = new Date();
-    var login_session_timeout = get_login_session_timeout();
-
-    if (login_session_timeout) {
-        date.setMinutes(date.getMinutes() + login_session_timeout);
-    } else {
-        // 8 hours from now
-        date.setHours(date.getHours() + 8);
-    }
-    store_cookie_value_with_expiration('auth', encodeURIComponent(b64), date);
-}
-
 function getParameterByName(name) {
     var match = RegExp('[#&]' + name + '=([^&]*)').exec(window.location.hash);
     return match && decodeURIComponent(match[1].replace(/\+/g, ' '));
@@ -53,99 +88,71 @@ function getAccessToken() {
     return getParameterByName('access_token');
 }
 
-function start_app_login() {
-    app = new Sammy.Application(function () {
-        this.get('#/', function() {});
-        this.put('#/login', function() {
-            username = this.params['username'];
-            password = this.params['password'];
-            set_auth_pref(username + ':' + password);
-            check_login();
-        });
-    });
-    if (enable_uaa) {
-        var token = getAccessToken();
-        if (token != null) {
-            set_auth_pref(uaa_client_id + ':' + token);
-            store_pref('uaa_token', token);
-            check_login();
-        } else if(has_auth_cookie_value()) {
-            check_login();
-        };
-    } else {
-        app.run();
-        if (get_cookie_value('auth') != null) {
-            check_login();
-        }
+function start_app_login () {
+  app = new Sammy.Application(function () {
+    this.get('/', function () {})
+    this.get('#/', function () {})
+    if (!oauth.enabled || !oauth.oauth_disable_basic_auth) {
+      this.put('#/login', function() {
+        set_basic_auth(this.params['username'], this.params['password'])
+        check_login()
+      });
     }
-}
-
-
-function uaa_logout_window() {
-    uaa_invalid = true;
-    uaa_login_window();
-}
-
-function uaa_login_window() {
-    var redirect;
-    if (window.location.hash != "") {
-        redirect = window.location.href.split(window.location.hash)[0];
+  })
+  
+  if (oauth.enabled) {
+    if (has_auth_credentials()) {
+      check_login();
     } else {
-        redirect = window.location.href
-    };
-    var loginRedirectUrl;
-    if (uaa_invalid) {
-        loginRedirectUrl = Singular.properties.uaaLocation + '/logout.do?client_id=' + Singular.properties.clientId + '&redirect=' + redirect;
+      app.run();
+    }
+  } else
+    if (!has_auth_credentials() || !check_login()) {
+      app.run();
+    }
+
+}
+
+
+function check_login () {
+  user = JSON.parse(sync_get('/whoami'));
+  if (user == false || user.error) {
+    clear_auth();
+    if (oauth.enabled) {
+      renderWarningMessageInLoginStatus(oauth, 'Not authorized');
     } else {
-        loginRedirectUrl = Singular.properties.uaaLocation + '/oauth/authorize?response_type=token&client_id=' + Singular.properties.clientId + '&redirect_uri=' + redirect;
-    };
-    window.open(loginRedirectUrl, "LOGIN_WINDOW");
-}
-
-function check_login() {
-    user = JSON.parse(sync_get('/whoami'));
-    if (user == false) {
-        // clear a local storage value used by earlier versions
-        clear_pref('auth');
-        clear_pref('uaa_token');
-        clear_cookie_value('auth');
-        if (enable_uaa) {
-            uaa_invalid = true;
-            replace_content('login-status', '<button id="loginWindow" onclick="uaa_login_window()">Log out</button>');
-        } else {
-            replace_content('login-status', '<p>Login failed</p>');
-        }
+      replace_content('login-status', '<p>Login failed</p>');
     }
-    else {
-        hide_popup_warn();
-        replace_content('outer', format('layout', {}));
-        var user_login_session_timeout = parseInt(user.login_session_timeout);
-        // Update auth login_session_timeout if changed
-        if (has_auth_cookie_value() && !isNaN(user_login_session_timeout) &&
-            user_login_session_timeout !== get_login_session_timeout()) {
+    return false;
+  }
+  check_version()
+  hide_popup_warn()
+  replace_content('outer', format('layout', {}))
+  var user_login_session_timeout = parseInt(user.login_session_timeout)
+  if (!isNaN(user_login_session_timeout)) {
+    update_login_session_timeout(user_login_session_timeout)
+  }
 
-            update_login_session_timeout(user_login_session_timeout);
-        }
-        setup_global_vars();
-        setup_constant_events();
-        update_vhosts();
-        update_interval();
-        setup_extensions();
-    }
+  ui_data_model.vhosts = JSON.parse(sync_get('/vhosts'));
+  ac.update(user, ui_data_model)
+  if (ac.isMonitoringUser()) {
+    ui_data_model.nodes = JSON.parse(sync_get('/nodes'))
+  }
+  var overview = JSON.parse(sync_get('/overview'))
+
+  display.update(overview, ui_data_model)
+
+  setup_global_vars(overview)
+
+  setup_constant_events()
+  update_vhosts()
+  update_interval()
+  setup_extensions()
+
+
+  return true
 }
 
-function get_login_session_timeout() {
-    parseInt(get_cookie_value('login_session_timeout'));
-}
-
-function update_login_session_timeout(login_session_timeout) {
-    var auth_info = get_cookie_value('auth');
-    var date  = new Date();
-    // `login_session_timeout` minutes from now
-    date.setMinutes(date.getMinutes() + login_session_timeout);
-    store_cookie_value('login_session_timeout', login_session_timeout);
-    store_cookie_value_with_expiration('auth', auth_info, date);
-}
 
 function start_app() {
     if (app !== undefined) {
@@ -170,8 +177,7 @@ function start_app() {
     // just leave the history here.
     //Sammy.HashLocationProxy._interval = null;
 
-    app = new Sammy.Application(dispatcher);
-    app.run();
+
 
     var url = this.location.toString();
     var hash = this.location.hash;
@@ -183,8 +189,11 @@ function start_app() {
         // Tokens are passed in the url hash, so the url always contains a #.
         // We need to check the current path is `/` and token is present,
         // so we can redirect to `/#/`
-        this.location = url.replace(/#token_type.+/gi, "#/");
+        this.location = url.replace(/#token_type.+/gi, '#/');
     }
+
+    app = new Sammy.Application(dispatcher);
+    app.run();
 }
 
 function setup_constant_events() {
@@ -208,17 +217,18 @@ function setup_constant_events() {
 }
 
 function update_vhosts() {
-    var vhosts = JSON.parse(sync_get('/vhosts'));
-    vhosts_interesting = vhosts.length > 1;
-    if (vhosts_interesting)
+    if (display.vhosts) {
         $('#vhost-form').show();
-    else
+        $('li#vhost').show();
+    }else {
         $('#vhost-form').hide();
+        $('li#vhost').hide();
+    }
     var select = $('#show-vhost').get(0);
-    select.options.length = vhosts.length + 1;
+    select.options.length = ui_data_model.vhosts.length + 1;
     var index = 0;
-    for (var i = 0; i < vhosts.length; i++) {
-        var vhost = vhosts[i].name;
+    for (var i = 0; i < ui_data_model.vhosts.length; i++) {
+        var vhost = ui_data_model.vhosts[i].name;
         select.options[i + 1] = new Option(vhost, vhost);
         if (vhost == current_vhost) index = i + 1;
     }
@@ -232,7 +242,7 @@ function setup_extensions() {
     extension_count = 0;
     for (var i in extensions) {
         var extension = extensions[i];
-        if ($.isPlainObject(extension) && extension.hasOwnProperty("javascript")) {
+        if ($.isPlainObject(extension) && extension.hasOwnProperty('javascript')) {
             dynamic_load(extension.javascript);
             extension_count++;
         }
@@ -243,7 +253,8 @@ function dynamic_load(filename) {
     var element = document.createElement('script');
     element.setAttribute('type', 'text/javascript');
     element.setAttribute('src', 'js/' + filename);
-    document.getElementsByTagName("head")[0].appendChild(element);
+    document.getElementsByTagName('head')[0].appendChild(element);
+    return element;
 }
 
 function update_interval() {
@@ -271,14 +282,20 @@ function update_interval() {
 function go_to(url) {
     this.location = url;
 }
-
+function go_to_home() {
+    // location.href = rabbit_path_prefix() + "/"
+    location.href =  "/"
+  }
+  
 function set_timer_interval(interval) {
     timer_interval = interval;
     reset_timer();
 }
 
 function reset_timer() {
-    clearInterval(timer);
+    if (timer != null) {
+        clearInterval(timer);
+    }
     if (timer_interval != null) {
         timer = setInterval(partial_update, timer_interval);
     }
@@ -318,6 +335,7 @@ function update() {
     clearInterval(timer);
     with_update(function(html) {
             update_navigation();
+            update_warnings();
             replace_content('main', html);
             postprocess();
             postprocess_partial();
@@ -369,13 +387,15 @@ function update_navigation() {
         var selected = false;
         if (contains_current_highlight(val)) {
             selected = true;
-            if (!leaf(val)) {
-                descend = nav(val);
+            if (!leaf(val) && val[2] && ac.canAccessVhosts()) {
+                descend = nav(val)
             }
         }
         if (show(path)) {
-            l1 += '<li><a href="' + nav(path) + '"' +
-                (selected ? ' class="selected"' : '') + '>' + k + '</a></li>';
+          if (val.length < 3 || ( val[2] && ac.canAccessVhosts() )) {
+            l1 += '<li id="' + navigation_tab_id(k) + '"><a href="' + nav(path) + '"' +
+                (selected ? ' class="selected"' : '') + '>' + k + '</a></li>'
+          }
         }
     }
 
@@ -391,12 +411,56 @@ function update_navigation() {
     replace_content('rhs', l2);
 }
 
+function update_warnings() {
+    feature_flags = JSON.parse(sync_get('/feature-flags'));
+    var needs_enabling = false;
+    for (var i = 0; i < feature_flags.length; i++) {
+         var feature_flag = feature_flags[i];
+         if (feature_flag.state == "disabled" && feature_flag.stability != "experimental") {
+             needs_enabling = true;
+         }
+    }
+    deprecated_features = JSON.parse(sync_get('/deprecated-features/used'));
+    var needs_deprecating = false;
+    if (deprecated_features.length > 0) {
+        needs_deprecating = true;
+    }
+    var l1 = '<p class="warning">';
+    if (needs_enabling) {
+        l1 += '<span>&#9888;</span> All stable feature flags must be enabled after completing an upgrade. <a href="https://www.rabbitmq.com/feature-flags.html">[Learn more]</a>';
+    }
+    if (needs_deprecating) {
+        if (needs_enabling) {
+            l1 += '<br/>'
+        }
+        l1 += '<span>&#9888;</span> Deprecated features are being used. <a href="https://www.rabbitmq.com/feature-flags.html">[Learn more]</a>'
+    }
+    l1 += '</p>';
+    if (needs_enabling || needs_deprecating) {
+      $('#main').addClass('with-warnings');
+      $('#rhs').addClass('with-warnings');
+      replace_content('warnings', l1);
+  } else {
+      $('#main').removeClass('with-warnings');
+      $('#rhs').removeClass('with-warnings');
+  }
+}
+
+function navigation_tab_id(value) {
+    return value.toLowerCase().replaceAll(/\s/g, "-")
+}
+
 function nav(pair) {
     return pair[0];
 }
 
 function show(pair) {
-    return jQuery.inArray(pair[1], user_tags) != -1;
+    var hasUserTag = jQuery.inArray(pair[1], user_tags) != -1
+    if (pair.length > 2 && pair[2]) {
+      return hasUserTag && ac.canAccessVhosts()
+    } else {
+      return hasUserTag
+    }
 }
 
 function leaf(pair) {
@@ -570,9 +634,13 @@ function show_popup(type, text, _mode) {
     hide();
     $('#outer').after(format('popup', {'type': type, 'text': text}));
     $(cssClass).fadeIn(100);
-    $(cssClass + ' span').on('click', function () {
+
+    var closeButtonCssClass = cssClass + ' span';
+    $('div#outer,' + closeButtonCssClass).on('click', function(event) {
+      if ($(event.target).eq($(closeButtonCssClass)) || !$(event.target).closest(cssClass).length) {
         $('.popup-owner').removeClass('popup-owner');
         hide();
+      }
     });
 }
 
@@ -602,11 +670,7 @@ function submit_import(form) {
                 vhost_part = '/' + esc(vhost_name);
             }
 
-            if (enable_uaa) {
-                var form_action = "/definitions" + vhost_part + '?token=' + get_pref('uaa_token');
-            } else {
-                var form_action = "/definitions" + vhost_part + '?auth=' + get_cookie_value('auth');
-            };
+            var form_action = "/definitions" + vhost_part;
             var fd = new FormData();
             fd.append('file', file);
             with_req('POST', form_action, fd, function(resp) {
@@ -632,6 +696,10 @@ function postprocess() {
                            "after deletion.");
         });
 
+    $('form.enable-feature-flag').on('submit', function() {
+                    full_refresh();
+    });
+
     $('label').map(function() {
             if ($(this).attr('for') == '') {
                 var id = 'auto-label-' + Math.floor(Math.random()*1000000000);
@@ -644,21 +712,42 @@ function postprocess() {
         });
 
     $('#download-definitions').on('click', function() {
-            var idx = $("select[name='vhost-download'] option:selected").index();
-            var vhost = ((idx <=0 ) ? "" : "/" + esc($("select[name='vhost-download'] option:selected").val()));
-        if (enable_uaa) {
-            var path = 'api/definitions' + vhost + '?download=' +
-                esc($('#download-filename').val()) +
-                '&token=' + get_pref('uaa_token');
+        var idx = $("select[name='vhost-download'] option:selected").index()
+        var vhost = ((idx <=0 ) ? "" : "/" + esc($("select[name='vhost-download'] option:selected").val()))
+        var download_filename = esc($('#download-filename').val())
+        var path = '/definitions' + vhost
+        with_req('GET', path, null, function(resp) {
+            if (resp.status >= 200 && resp.status <= 299) {
+                var type = resp.getResponseHeader('Content-Type')
+                var blob = new Blob([resp.response], { type: type })
+                if (typeof window.navigator.msSaveBlob !== 'undefined') {
+                    window.navigator.msSaveBlob(blob, download_filename)
+                } else {
+                    var URL = window.URL || window.webkitURL
+                    var downloadUrl = URL.createObjectURL(blob)
+                    var a = document.createElement("a")
+                    if (typeof a.download === 'undefined') {
+                        window.location = downloadUrl
+                    } else {
+                        a.href = downloadUrl
+                        a.download = download_filename
+                        document.body.appendChild(a)
+                        a.click()
+                    }
+                    var cleanup = function () {
+                        URL.revokeObjectURL(downloadUrl)
+                        document.body.removeChild(a)
+                    };
+                    setTimeout(cleanup, 1000)
+                }
             } else {
-                var path = 'api/definitions' + vhost + '?download=' +
-                    esc($('#download-filename').val()) +
-                    '&auth=' + get_cookie_value('auth');
-            };
-            window.location = path;
-            setTimeout('app.run()');
-            return false;
-        });
+                // Unsuccessful status
+                show_popup('warn', 'Error downloading definitions')
+            }
+
+          });
+
+      });
 
     $('.update-manual').on('click', function() {
             update_manual($(this).attr('for'), $(this).attr('query'));
@@ -741,13 +830,31 @@ function postprocess() {
     update_multifields();
 }
 
+function is_valid_regexp(value) {
+    try {
+        var _ = new RegExp(value, 'i');
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 function url_pagination_template_context(template, context, defaultPage, defaultPageSize){
     var page_number_request = fmt_page_number_request(context, defaultPage);
     var page_size = fmt_page_size_request(context, defaultPageSize);
     var name_request = fmt_filter_name_request(context, "");
     var use_regex = fmt_regex_request(context, "") == "checked";
     if (use_regex) {
-        name_request = esc(name_request);
+        // rabbitmq/rabbitmq-server#8008: if the expression cannot be compiled to a reg exp,
+        // assume a regular text filter
+        var valid_regexp = is_valid_regexp(name_request);
+        if (!valid_regexp) {
+            show_popup('warn', fmt_escape_html(`Filter expression '${name_request}' is not a valid regular expression, will perform a regular text query`));
+            use_regex = false;
+        }
+        if (use_regex && valid_regexp) {
+            name_request = esc(name_request);
+        }
     }
     return  '/' + template +
         '?page=' +  page_number_request +
@@ -786,6 +893,7 @@ function update_pages(template, page_start){
          case 'exchanges' : renderExchanges(); break;
          case 'connections' : renderConnections(); break;
          case 'channels' : renderChannels(); break;
+         case 'users' : renderUsers(); break;
          default:
              renderCallback = RENDER_CALLBACKS[template];
              if (renderCallback != undefined) {
@@ -805,6 +913,16 @@ function renderQueues() {
             pagination: true
         }
     }, 'vhosts': '/vhosts'}, 'queues', '#/queues');
+}
+
+function renderUsers() {
+    render({'users': {path: url_pagination_template('users', 1, 100),
+		      options: {
+			  sort: true,
+			  pagination: true
+		      }
+		     },
+            'permissions': '/permissions'}, 'users', '#/users');
 }
 
 function renderExchanges() {
@@ -1184,24 +1302,10 @@ function update_status(status) {
     replace_content('status', html);
 }
 
-function has_auth_cookie_value() {
-    return get_cookie_value('auth') != null;
-}
 
-function auth_header() {
-    if(has_auth_cookie_value() && enable_uaa) {
-        return "Bearer " + decodeURIComponent(get_pref('uaa_token'));
-    } else {
-        if(has_auth_cookie_value()) {
-            return "Basic " + decodeURIComponent(get_cookie_value('auth'));
-        } else {
-            return null;
-        }
-    }
-}
 
 function with_req(method, path, body, fun) {
-    if(!has_auth_cookie_value()) {
+    if(!has_auth_credentials()) {
         // navigate to the login form
         location.reload();
         return;
@@ -1210,7 +1314,7 @@ function with_req(method, path, body, fun) {
     var json;
     var req = xmlHttpRequest();
     req.open(method, 'api' + path, true );
-    var header = auth_header();
+    var header = authorization_header();
     if (header !== null) {
         req.setRequestHeader('authorization', header);
     }
@@ -1235,13 +1339,14 @@ function get(url, accept, callback) {
   var req = new XMLHttpRequest();
   req.open("GET", url);
   req.setRequestHeader("Accept", accept);
-  req.send();
 
   req.onreadystatechange = function() {
     if (req.readyState == XMLHttpRequest.DONE) {
       callback(req);
     }
   };
+  req.send();
+
 }
 
 function sync_get(path) {
@@ -1273,7 +1378,7 @@ function sync_req(type, params0, path_template, options) {
     var req = xmlHttpRequest();
     req.open(type, 'api' + path, false);
     req.setRequestHeader('content-type', 'application/json');
-    req.setRequestHeader('authorization', auth_header());
+    req.setRequestHeader('authorization', authorization_header());
 
     if (options != undefined || options != null) {
         if (options.headers != undefined || options.headers != null) {
@@ -1303,13 +1408,17 @@ function sync_req(type, params0, path_template, options) {
         else
             // rabbitmq/rabbitmq-management#732
             // https://developer.mozilla.org/en-US/docs/Glossary/Truthy
-            return {result: true, http_status: req.status, req_params: params};
+            return {result: true, http_status: req.status, req_params: params, responseText: req.responseText};
     }
     else {
         return false;
     }
 }
-
+function initiate_logout(oauth, error = "") {
+    clear_pref('auth');
+    clear_cookie_value('auth');    
+    renderWarningMessageInLoginStatus(oauth, error);
+}
 function check_bad_response(req, full_page_404) {
     // 1223 == 204 - see https://www.enhanceie.com/ie/bugs.asp
     // MSIE7 and 8 appear to do this in response to HTTP 204.
@@ -1327,8 +1436,12 @@ function check_bad_response(req, full_page_404) {
         var error = JSON.parse(req.responseText).error;
         if (typeof(error) != 'string') error = JSON.stringify(error);
 
-        if (error == 'bad_request' || error == 'not_found' || error == 'not_authorised') {
-            show_popup('warn', fmt_escape_html(reason));
+        if (error == 'bad_request' || error == 'not_found' || error == 'not_authorised' || error == 'not_authorized') {
+            if ((req.status == 401 || req.status == 403) && oauth.enabled) {
+              initiate_logout(oauth, reason);
+            } else {
+              show_popup('warn', fmt_escape_html(reason));
+            }
         } else if (error == 'page_out_of_range') {
             var seconds = 60;
             if (last_page_out_of_range_error > 0)
@@ -1452,7 +1565,9 @@ function collapse_multifields(params0) {
     }
     if (params.hasOwnProperty('queuetype')) {
         delete params['queuetype'];
-        params['arguments']['x-queue-type'] = queue_type;
+        if (queue_type != 'default') {
+            params['arguments']['x-queue-type'] = queue_type;
+        }
         if (queue_type == 'quorum' ||
             queue_type == 'stream') {
             params['durable'] = true;
@@ -1578,18 +1693,6 @@ function xmlHttpRequest() {
     return res;
 }
 
-// Our base64 library takes a string that is really a byte sequence,
-// and will throw if given a string with chars > 255 (and hence not
-// DTRT for chars > 127). So encode a unicode string as a UTF-8
-// sequence of "bytes".
-function b64_encode_utf8(str) {
-    return base64.encode(encode_utf8(str));
-}
-
-// encodeURIComponent handles utf-8, unescape does not. Neat!
-function encode_utf8(str) {
-  return unescape(encodeURIComponent(str));
-}
 
 (function($){
     $.fn.extend({
@@ -1739,4 +1842,13 @@ function get_chart_range_type(arg) {
 
     console.log('[WARNING]: range type not found for arg: ' + arg);
     return 'basic';
+}
+
+function check_version() {
+    let curVersion = sync_get('/version')
+    let storedVersion = get_pref('version')
+    if (!storedVersion || storedVersion != curVersion) {
+        store_pref('version', curVersion)
+        location.reload()
+    }
 }

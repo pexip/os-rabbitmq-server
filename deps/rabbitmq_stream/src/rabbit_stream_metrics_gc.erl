@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is Pivotal Software, Inc.
-%% Copyright (c) 2020-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_stream_metrics_gc).
@@ -32,7 +32,7 @@
 
 -spec start_link() -> rabbit_types:ok_pid_or_error().
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], [{hibernate_after, 0}]).
 
 init(_) ->
     Interval =
@@ -54,7 +54,7 @@ handle_info(start_gc, State) ->
     {noreply, start_timer(State)}.
 
 terminate(_Reason, #state{timer = TRef}) ->
-    erlang:cancel_timer(TRef),
+    _ = erlang:cancel_timer(TRef),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->

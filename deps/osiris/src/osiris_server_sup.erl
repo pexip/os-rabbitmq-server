@@ -2,13 +2,14 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 
 -module(osiris_server_sup).
 
 -behaviour(supervisor).
 
+-include("osiris.hrl").
 -export([start_link/0]).
 -export([init/1,
          stop_child/2,
@@ -21,15 +22,25 @@ init([]) ->
     Procs = [],
     {ok, {{one_for_one, 1, 5}, Procs}}.
 
-stop_child(Node, CName) ->
+stop_child(Node, #{name := Name}) ->
+    stop_child(Node, Name);
+stop_child(Node, Name) when ?IS_STRING(Name) ->
     try
-        case supervisor:terminate_child({?MODULE, Node}, CName) of
+        %% as replicas are temporary we don't have to explicitly
+        %% delete them
+        case supervisor:terminate_child({?MODULE, Node}, Name) of
             ok ->
-                %% as replicas are temporary we don't have to explicitly
-                %% delete them
                 ok;
             {error, not_found} ->
-                ok;
+                OthName = flip_name(Name),
+                case supervisor:terminate_child({?MODULE, Node}, OthName) of
+                    ok ->
+                        ok;
+                    {error, not_found} ->
+                        ok;
+                    Err ->
+                        Err
+                end;
             Err ->
                 Err
         end
@@ -39,17 +50,29 @@ stop_child(Node, CName) ->
             ok
     end.
 
-delete_child(Node, #{name := CName} = Config) ->
+delete_child(Node, #{name := Name} = Config) ->
     try
-        case supervisor:get_childspec({?MODULE, Node}, CName) of
+        case supervisor:get_childspec({?MODULE, Node}, Name) of
             {ok, _} ->
-                _ = stop_child(Node, CName),
+                _ = stop_child(Node, Name),
                 rpc:call(Node, osiris_log, delete_directory, [Config]);
             {error, not_found} ->
-                ok
+                OthName = flip_name(Name),
+                case supervisor:get_childspec({?MODULE, Node}, OthName) of
+                    {ok, _} ->
+                        _ = stop_child(Node, OthName),
+                        rpc:call(Node, osiris_log, delete_directory, [Config]);
+                    {error, not_found} ->
+                        rpc:call(Node, osiris_log, delete_directory, [Config])
+                end
         end
     catch
         _:{noproc, _} ->
             %% Whole supervisor or app is already down - i.e. stop_app
-            ok
+            rpc:call(Node, osiris_log, delete_directory, [Config])
     end.
+
+flip_name(N) when is_binary(N) ->
+    binary_to_list(N);
+flip_name(N) when is_list(N) ->
+    list_to_binary(N).

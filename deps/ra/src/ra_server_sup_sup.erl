@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 %% @hidden
 -module(ra_server_sup_sup).
@@ -39,7 +39,7 @@
 -include("ra.hrl").
 
 -spec start_server(System :: atom(), ra_server:ra_server_config()) ->
-    supervisor:startchild_ret() | {error, not_new | system_not_started}.
+    supervisor:startchild_ret() | {error, not_new | system_not_started} | {badrpc, term()}.
 start_server(System, #{id := NodeId,
                        uid := UId} = Config)
   when is_atom(System) ->
@@ -47,7 +47,7 @@ start_server(System, #{id := NodeId,
     rpc:call(Node, ?MODULE, start_server_rpc, [System, UId, Config]).
 
 -spec restart_server(atom(), ra_server_id(), ra_server:mutable_config()) ->
-    supervisor:startchild_ret() | {error, system_not_started}.
+    supervisor:startchild_ret() | {error, system_not_started} | {badrpc, term()}.
 restart_server(System, {RaName, Node}, AddConfig) ->
     rpc:call(Node, ?MODULE, restart_server_rpc,
              [System, {RaName, Node}, AddConfig]).
@@ -63,7 +63,7 @@ start_server_rpc(System, UId, Config0) ->
                 undefined ->
                     case ra_system:lookup_name(System, server_sup) of
                         {ok, Name} ->
-                            supervisor:start_child({Name, node()}, [Config]);
+                            start_child(Name, Config);
                         Err ->
                             Err
                     end;
@@ -77,25 +77,26 @@ start_server_rpc(System, UId, Config0) ->
             end
     end.
 
-restart_server_rpc(System, {RaName, Node}, AddConfig)
+restart_server_rpc(System, {RaName, _Node}, AddConfig)
   when is_atom(System) ->
     case ra_system:fetch(System) of
         undefined ->
             {error, system_not_started};
-        _ ->
+        SysCfg ->
             case recover_config(System, RaName) of
                 {ok, Config0} ->
                     MutConfig = maps:with(?MUTABLE_CONFIG_KEYS, AddConfig),
                     {ok, Name} = ra_system:lookup_name(System, server_sup),
-                    case maps:merge(Config0, MutConfig) of
-                        Config0 ->
-                            %% the config has not changed
-                            Config = Config0#{has_changed => false},
-                            supervisor:start_child({Name, Node}, [Config]);
-                        Config1 ->
-                            Config = Config1#{has_changed => true},
-                            supervisor:start_child({Name, Node}, [Config])
-                    end;
+                    Config = case maps:merge(Config0, MutConfig) of
+                                 Config0 ->
+                                     %% the config has not changed
+                                     Config0#{system_config => SysCfg,
+                                              has_changed => false};
+                                 Config1 ->
+                                     Config1#{system_config => SysCfg,
+                                              has_changed => true}
+                             end,
+                    start_child(Name, Config);
                 Err ->
                     Err
             end
@@ -129,12 +130,12 @@ prepare_server_stop_rpc(System, RaName) ->
             {ok, Parent, SrvSup}
     end.
 
--spec delete_server(atom(), NodeId :: ra_server_id()) ->
+-spec delete_server(atom(), ServerId :: ra_server_id()) ->
     ok | {error, term()} | {badrpc, term()}.
-delete_server(System, NodeId) when is_atom(System) ->
-    Node = ra_lib:ra_server_id_node(NodeId),
-    Name = ra_lib:ra_server_id_to_local_name(NodeId),
-    case stop_server(System, NodeId) of
+delete_server(System, ServerId) when is_atom(System) ->
+    Node = ra_lib:ra_server_id_node(ServerId),
+    Name = ra_lib:ra_server_id_to_local_name(ServerId),
+    case stop_server(System, ServerId) of
         ok ->
             rpc:call(Node, ?MODULE, delete_server_rpc, [System, Name]);
         {error, _} = Err -> Err
@@ -150,6 +151,7 @@ delete_server_rpc(System, RaName) ->
             ?INFO("Deleting server ~w and its data directory.~n",
                   [RaName]),
             %% TODO: better handle and report errors
+            %% UId could be `undefined' here
             UId = ra_directory:uid_of(Names, RaName),
             Pid = ra_directory:where_is(Names, RaName),
             ra_log_meta:delete(Meta, UId),
@@ -164,6 +166,7 @@ delete_server_rpc(System, RaName) ->
             catch ets:delete(ra_state, RaName),
             catch ets:delete(ra_open_file_metrics, Pid),
             catch ra_counters:delete({RaName, node()}),
+            catch ra_leaderboard:clear(RaName),
             ok
     end.
 
@@ -175,7 +178,7 @@ delete_data_directory(Directory) ->
                                      ok
                              catch
                                  _:_ = Err ->
-                                     ?WARN("ra: delete_server/1 failed to delete directory ~s~n"
+                                     ?WARN("ra: delete_server/1 failed to delete directory ~ts~n"
                                            "Error: ~p", [Directory, Err]),
                                      error
                              end
@@ -192,7 +195,7 @@ delete_data_directory(Directory) ->
 remove_all(System) when is_atom(System) ->
     #{names := #{server_sup := Sup}} = ra_system:fetch(System),
     _ = [begin
-             ?DEBUG("ra: terminating child ~w in system ~s~n", [Pid, System]),
+             ?DEBUG("ra: terminating child ~w in system ~ts~n", [Pid, System]),
              supervisor:terminate_child(Sup, Pid)
          end
          || {_, Pid, _, _} <- supervisor:which_children(Sup)],
@@ -230,3 +233,23 @@ init([]) ->
                   restart => temporary,
                   start => {ra_server_sup, start_link, []}},
     {ok, {SupFlags, [ChildSpec]}}.
+
+start_child(Name, Config) ->
+    Ref = make_ref(),
+    case supervisor:start_child(Name, [Config#{reply_to => {Ref, self()}}]) of
+        {ok, Pid} ->
+            %% we have started the process now and have to wait for reply
+            %% that is sent after init but before state machine recovery
+            MRef = erlang:monitor(process, Pid),
+            receive
+                {Ref, ok} ->
+                    _ = erlang:demonitor(MRef),
+                    {ok, Pid};
+                {'DOWN', MRef, _, _, Reason} ->
+                    ?ERROR("Ra: failed to start ra server ~ts, err ~s",
+                           [Name, Reason]),
+                    {error, Reason}
+            end;
+        Err ->
+            Err
+    end.

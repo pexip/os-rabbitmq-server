@@ -2,189 +2,187 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_core_ff).
 
--export([classic_mirrored_queue_version_migration/3,
-         quorum_queue_migration/3,
-         stream_queue_migration/3,
-         implicit_default_bindings_migration/3,
-         virtual_host_metadata_migration/3,
-         maintenance_mode_status_migration/3,
-         user_limits_migration/3]).
-
 -rabbit_feature_flag(
    {classic_mirrored_queue_version,
     #{desc          => "Support setting version for classic mirrored queues",
-      stability     => stable,
-      migration_fun => {?MODULE, classic_mirrored_queue_version_migration}
+      stability     => required
      }}).
 
 -rabbit_feature_flag(
    {quorum_queue,
     #{desc          => "Support queues of type `quorum`",
-      doc_url       => "https://www.rabbitmq.com/quorum-queues.html",
-      stability     => stable,
-      migration_fun => {?MODULE, quorum_queue_migration}
+      doc_url       => "https://www.rabbitmq.com/docs/quorum-queues",
+      stability     => required
      }}).
 
 -rabbit_feature_flag(
    {stream_queue,
     #{desc          => "Support queues of type `stream`",
-      doc_url       => "https://www.rabbitmq.com/stream.html",
-      stability     => stable,
-      depends_on    => [quorum_queue],
-      migration_fun => {?MODULE, stream_queue_migration}
+      doc_url       => "https://www.rabbitmq.com/docs/stream",
+      stability     => required,
+      depends_on    => [quorum_queue]
      }}).
 
 -rabbit_feature_flag(
    {implicit_default_bindings,
     #{desc          => "Default bindings are now implicit, instead of "
                        "being stored in the database",
-      stability     => stable,
-      migration_fun => {?MODULE, implicit_default_bindings_migration}
+      stability     => required
      }}).
 
 -rabbit_feature_flag(
    {virtual_host_metadata,
     #{desc          => "Virtual host metadata (description, tags, etc)",
-      stability     => stable,
-      migration_fun => {?MODULE, virtual_host_metadata_migration}
+      stability     => required
      }}).
 
 -rabbit_feature_flag(
    {maintenance_mode_status,
     #{desc          => "Maintenance mode status",
-      stability     => stable,
-      migration_fun => {?MODULE, maintenance_mode_status_migration}
+      stability     => required
      }}).
 
 -rabbit_feature_flag(
     {user_limits,
      #{desc          => "Configure connection and channel limits for a user",
-       stability     => stable,
-       migration_fun => {?MODULE, user_limits_migration}
+       stability     => required
      }}).
 
-classic_mirrored_queue_version_migration(_FeatureName, _FeatureProps, _Enable) ->
-    ok.
+-rabbit_feature_flag(
+   {stream_single_active_consumer,
+    #{desc          => "Single active consumer for streams",
+      doc_url       => "https://www.rabbitmq.com/docs/stream",
+      stability     => required,
+      depends_on    => [stream_queue]
+     }}).
 
-%% -------------------------------------------------------------------
-%% Quorum queues.
-%% -------------------------------------------------------------------
+-rabbit_feature_flag(
+    {feature_flags_v2,
+     #{desc          => "Feature flags subsystem V2",
+       stability     => required
+     }}).
 
--define(quorum_queue_tables, [rabbit_queue,
-                              rabbit_durable_queue]).
+-rabbit_feature_flag(
+   {direct_exchange_routing_v2,
+    #{desc       => "v2 direct exchange routing implementation",
+      stability  => required,
+      depends_on => [feature_flags_v2, implicit_default_bindings]
+     }}).
 
-quorum_queue_migration(FeatureName, _FeatureProps, enable) ->
-    Tables = ?quorum_queue_tables,
-    rabbit_table:wait(Tables, _Retry = true),
-    Fields = amqqueue:fields(amqqueue_v2),
-    migrate_to_amqqueue_with_type(FeatureName, Tables, Fields);
-quorum_queue_migration(_FeatureName, _FeatureProps, is_enabled) ->
-    Tables = ?quorum_queue_tables,
-    rabbit_table:wait(Tables, _Retry = true),
-    Fields = amqqueue:fields(amqqueue_v2),
-    mnesia:table_info(rabbit_queue, attributes) =:= Fields andalso
-    mnesia:table_info(rabbit_durable_queue, attributes) =:= Fields.
+-rabbit_feature_flag(
+   {listener_records_in_ets,
+    #{desc       => "Store listener records in ETS instead of Mnesia",
+      stability  => required,
+      depends_on => [feature_flags_v2]
+     }}).
 
-stream_queue_migration(_FeatureName, _FeatureProps, _Enable) ->
-    ok.
+-rabbit_feature_flag(
+   {tracking_records_in_ets,
+    #{desc          => "Store tracking records in ETS instead of Mnesia",
+      stability     => required,
+      depends_on    => [feature_flags_v2]
+     }}).
 
-migrate_to_amqqueue_with_type(FeatureName, [Table | Rest], Fields) ->
-    rabbit_log_feature_flags:info(
-      "Feature flag `~s`:   migrating Mnesia table ~s...",
-      [FeatureName, Table]),
-    Fun = fun(Queue) -> amqqueue:upgrade_to(amqqueue_v2, Queue) end,
-    case mnesia:transform_table(Table, Fun, Fields) of
-        {atomic, ok}      -> migrate_to_amqqueue_with_type(FeatureName,
-                                                           Rest,
-                                                           Fields);
-        {aborted, Reason} -> {error, Reason}
-    end;
-migrate_to_amqqueue_with_type(FeatureName, [], _) ->
-    rabbit_log_feature_flags:info(
-      "Feature flag `~s`:   Mnesia tables migration done",
-      [FeatureName]),
-    ok.
+-rabbit_feature_flag(
+   {classic_queue_type_delivery_support,
+    #{desc          => "Bug fix for classic queue deliveries using mixed versions",
+      doc_url       => "https://github.com/rabbitmq/rabbitmq-server/issues/5931",
+      %%TODO remove compatibility code
+      stability     => required,
+      depends_on    => [stream_queue]
+     }}).
 
-%% -------------------------------------------------------------------
-%% Default bindings.
-%% -------------------------------------------------------------------
+-rabbit_feature_flag(
+   {restart_streams,
+    #{desc          => "Support for restarting streams with optional preferred next leader argument."
+      "Used to implement stream leader rebalancing",
+      stability     => required,
+      depends_on    => [stream_queue]
+     }}).
 
-implicit_default_bindings_migration(FeatureName, _FeatureProps,
-                                    enable) ->
-    %% Default exchange bindings are now implicit (not stored in the
-    %% route tables). It should be safe to remove them outside of a
-    %% transaction.
-    rabbit_table:wait([rabbit_queue]),
-    Queues = mnesia:dirty_all_keys(rabbit_queue),
-    remove_explicit_default_bindings(FeatureName, Queues);
-implicit_default_bindings_migration(_Feature_Name, _FeatureProps,
-                                    is_enabled) ->
-    undefined.
+-rabbit_feature_flag(
+   {stream_sac_coordinator_unblock_group,
+    #{desc          => "Bug fix to unblock a group of consumers in a super stream partition",
+      doc_url       => "https://github.com/rabbitmq/rabbitmq-server/issues/7743",
+      stability     => required,
+      depends_on    => [stream_single_active_consumer]
+     }}).
 
-remove_explicit_default_bindings(_FeatureName, []) ->
-    ok;
-remove_explicit_default_bindings(FeatureName, Queues) ->
-    rabbit_log_feature_flags:info(
-      "Feature flag `~s`:   deleting explicit default bindings "
-      "for ~b queues (it may take some time)...",
-      [FeatureName, length(Queues)]),
-    [rabbit_binding:remove_default_exchange_binding_rows_of(Q)
-     || Q <- Queues],
-    ok.
+-rabbit_feature_flag(
+   {stream_filtering,
+    #{desc          => "Support for stream filtering.",
+      stability     => required,
+      depends_on    => [stream_queue]
+     }}).
 
-%% -------------------------------------------------------------------
-%% Virtual host metadata.
-%% -------------------------------------------------------------------
+-rabbit_feature_flag(
+   {message_containers,
+    #{desc          => "Message containers.",
+      stability     => required,
+      depends_on    => [feature_flags_v2]
+     }}).
 
-virtual_host_metadata_migration(_FeatureName, _FeatureProps, enable) ->
-    Tab = rabbit_vhost,
-    rabbit_table:wait([Tab], _Retry = true),
-    Fun = fun(Row) -> vhost:upgrade_to(vhost_v2, Row) end,
-    case mnesia:transform_table(Tab, Fun, vhost:fields(vhost_v2)) of
-        {atomic, ok}      -> ok;
-        {aborted, Reason} -> {error, Reason}
-    end;
-virtual_host_metadata_migration(_FeatureName, _FeatureProps, is_enabled) ->
-    mnesia:table_info(rabbit_vhost, attributes) =:= vhost:fields(vhost_v2).
+-rabbit_feature_flag(
+   {khepri_db,
+    #{desc          => "New Raft-based metadata store. Fully supported as of RabbitMQ 4.0",
+      doc_url       => "https://www.rabbitmq.com/docs/next/metadata-store",
+      stability     => experimental,
+      depends_on    => [feature_flags_v2,
+                        direct_exchange_routing_v2,
+                        maintenance_mode_status,
+                        user_limits,
+                        virtual_host_metadata,
+                        tracking_records_in_ets,
+                        listener_records_in_ets,
 
-%% -------------------------------------------------------------------
-%% Maintenance mode.
-%% -------------------------------------------------------------------
+                        %% Deprecated features.
+                        classic_queue_mirroring,
+                        ram_node_type],
+      callbacks     => #{enable =>
+                         {rabbit_khepri, khepri_db_migration_enable},
+                         post_enable =>
+                         {rabbit_khepri, khepri_db_migration_post_enable}}
+     }}).
 
-maintenance_mode_status_migration(FeatureName, _FeatureProps, enable) ->
-    TableName = rabbit_maintenance:status_table_name(),
-    rabbit_log:info(
-      "Creating table ~s for feature flag `~s`",
-      [TableName, FeatureName]),
-    try
-        _ = rabbit_table:create(
-              TableName,
-              rabbit_maintenance:status_table_definition()),
-        _ = rabbit_table:ensure_table_copy(TableName, node())
-    catch throw:Reason  ->
-        rabbit_log:error(
-          "Failed to create maintenance status table: ~p",
-          [Reason])
-    end;
-maintenance_mode_status_migration(_FeatureName, _FeatureProps, is_enabled) ->
-    rabbit_table:exists(rabbit_maintenance:status_table_name()).
+-rabbit_feature_flag(
+   {stream_update_config_command,
+    #{desc          => "A new internal command that is used to update streams as "
+                        "part of a policy.",
+      stability     => required,
+      depends_on    => [stream_queue]
+     }}).
 
-%% -------------------------------------------------------------------
-%% User limits.
-%% -------------------------------------------------------------------
+-rabbit_feature_flag(
+   {quorum_queue_non_voters,
+    #{desc =>
+          "Allows new quorum queue members to be added as non voters initially.",
+      stability => stable,
+      depends_on => [quorum_queue]
+     }}).
 
-user_limits_migration(_FeatureName, _FeatureProps, enable) ->
-    Tab = rabbit_user,
-    rabbit_table:wait([Tab], _Retry = true),
-    Fun = fun(Row) -> internal_user:upgrade_to(internal_user_v2, Row) end,
-    case mnesia:transform_table(Tab, Fun, internal_user:fields(internal_user_v2)) of
-        {atomic, ok}      -> ok;
-        {aborted, Reason} -> {error, Reason}
-    end;
-user_limits_migration(_FeatureName, _FeatureProps, is_enabled) ->
-    mnesia:table_info(rabbit_user, attributes) =:= internal_user:fields(internal_user_v2).
+-rabbit_feature_flag(
+   {message_containers_deaths_v2,
+    #{desc          => "Bug fix for dead letter cycle detection",
+      doc_url       => "https://github.com/rabbitmq/rabbitmq-server/issues/11159",
+      stability     => stable,
+      depends_on    => [message_containers]
+     }}).
+
+%% We bundle the following separate concerns (which could have been separate feature flags)
+%% into a single feature flag for better user experience:
+%% 1. credit API v2 between classic / quorum queue client and classic / quorum queue server
+%% 2. cancel API v2 betweeen classic queue client and classic queue server
+%% 3. more compact quorum queue commands in quorum queue v4
+%% 4. store messages in message containers AMQP 1.0 disk format v1
+%% 5. support queue leader locator in classic queues
+-rabbit_feature_flag(
+   {'rabbitmq_4.0.0',
+    #{desc          => "Allows rolling upgrades from 3.13.x to 4.0.x",
+      stability     => stable,
+      depends_on    => [message_containers]
+     }}).

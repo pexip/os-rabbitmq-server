@@ -1,4 +1,4 @@
-%% Copyright (c) 2016-2017, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2016-2024, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -235,9 +235,13 @@ info(StreamID, Data0={data, Pid, _, _}, State0=#state{stream_body_status=Status}
 	end,
 	Data = erlang:delete_element(2, Data0),
 	do_info(StreamID, Data, [Data], State);
-info(StreamID, Alarm={alarm, Name, on}, State)
+info(StreamID, Alarm={alarm, Name, on}, State0=#state{stream_body_status=Status})
 		when Name =:= connection_buffer_full; Name =:= stream_buffer_full ->
-	do_info(StreamID, Alarm, [], State#state{stream_body_status=blocking});
+	State = case Status of
+		normal -> State0#state{stream_body_status=blocking};
+		_ -> State0
+	end,
+	do_info(StreamID, Alarm, [], State);
 info(StreamID, Alarm={alarm, Name, off}, State=#state{stream_body_pid=Pid, stream_body_status=Status})
 		when Name =:= connection_buffer_full; Name =:= stream_buffer_full ->
 	_ = case Status of
@@ -290,7 +294,9 @@ request_process(Req, Env, Middlewares) ->
 	try
 		execute(Req, Env, Middlewares)
 	catch
-		exit:Reason:Stacktrace ->
+		exit:Reason={shutdown, _}:Stacktrace ->
+			erlang:raise(exit, Reason, Stacktrace);
+		exit:Reason:Stacktrace when Reason =/= normal, Reason =/= shutdown ->
 			erlang:raise(exit, {Reason, Stacktrace}, Stacktrace)
 	end.
 

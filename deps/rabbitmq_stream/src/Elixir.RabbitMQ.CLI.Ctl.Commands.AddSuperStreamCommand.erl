@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2021 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module('Elixir.RabbitMQ.CLI.Ctl.Commands.AddSuperStreamCommand').
 
@@ -36,10 +36,11 @@ scopes() ->
     [streams].
 
 description() ->
-    <<"Add a super stream (experimental feature)">>.
+    <<"Add a super stream">>.
 
 switches() ->
     [{partitions, integer},
+     {binding_keys, string},
      {routing_keys, string},
      {max_length_bytes, string},
      {max_age, string},
@@ -52,9 +53,15 @@ help_section() ->
 
 validate([], _Opts) ->
     {validation_failure, not_enough_args};
+validate([_Name], #{routing_keys := _, binding_keys := _}) ->
+    {validation_failure,
+     "Specify --binding-keys only."};
+validate([_Name], #{partitions := _, binding_keys := _}) ->
+    {validation_failure,
+     "Specify --partitions or --binding-keys, not both."};
 validate([_Name], #{partitions := _, routing_keys := _}) ->
     {validation_failure,
-     "Specify --partitions or routing-keys, not both."};
+     "Specify --partitions or --binding-keys, not both."};
 validate([_Name], #{partitions := Partitions}) when Partitions < 1 ->
     {validation_failure, "The partition number must be greater than 0"};
 validate([_Name], Opts) ->
@@ -128,44 +135,40 @@ validate_stream_arguments(#{initial_cluster_size := Value} = Opts) ->
 validate_stream_arguments(_) ->
     ok.
 
-merge_defaults(_Args, #{routing_keys := _V} = Opts) ->
+merge_defaults(_Args, #{binding_keys := _V} = Opts) ->
     {_Args, maps:merge(#{vhost => <<"/">>}, Opts)};
+merge_defaults(_Args, #{routing_keys := RKs} = Opts) ->
+    {_Args, maps:merge(#{vhost => <<"/">>, binding_keys => RKs},
+                       maps:remove(routing_keys, Opts))};
 merge_defaults(_Args, Opts) ->
     {_Args, maps:merge(#{partitions => 3, vhost => <<"/">>}, Opts)}.
 
 usage() ->
     <<"add_super_stream <name> [--vhost <vhost>] [--partition"
-      "s <partitions>] [--routing-keys <routing-keys>]">>.
+      "s <partitions>] [--binding-keys <binding-keys>]">>.
 
 usage_additional() ->
-    [["<name>", "The name of the super stream."],
-     ["--vhost <vhost>", "The virtual host the super stream is added to."],
-     ["--partitions <partitions>",
-      "The number of partitions, default is 3. Mutually "
-      "exclusive with --routing-keys."],
-     ["--routing-keys <routing-keys>",
-      "Comma-separated list of routing keys. Mutually "
-      "exclusive with --partitions."],
-     ["--max-length-bytes <max-length-bytes>",
-      "The maximum size of partition streams, example "
-      "values: 20gb, 500mb."],
-     ["--max-age <max-age>",
-      "The maximum age of partition stream segments, "
-      "using the ISO 8601 duration format, e.g. PT10M30S "
-      "for 10 minutes 30 seconds, P5DT8H for 5 days "
-      "8 hours."],
-     ["--stream-max-segment-size-bytes <stream-max-segment-si"
-      "ze-bytes>",
-      "The maximum size of partition stream segments, "
-      "example values: 500mb, 1gb."],
-     ["--leader-locator <leader-locator>",
-      "Leader locator strategy for partition streams, "
-      "possible values are client-local, balanced."],
-     ["--initial-cluster-size <initial-cluster-size>",
-      "The initial cluster size of partition streams."]].
+    [[<<"<name>">>,
+      <<"The name of the super stream.">>],
+     [<<"--vhost <vhost>">>,
+      <<"The virtual host the super stream is added to.">>],
+     [<<"--partitions <partitions>">>,
+      <<"The number of partitions, default is 3. Mutually exclusive with --routing-keys.">>],
+     [<<"--binding-keys <binding-keys>">>,
+      <<"Comma-separated list of binding keys. Mutually exclusive with --partitions.">>],
+     [<<"--max-length-bytes <max-length-bytes>">>,
+      <<"The maximum size of partition streams, example values: 20gb, 500mb.">>],
+     [<<"--max-age <max-age>">>,
+      <<"The maximum age of partition stream segments, using the ISO 8601 duration format, e.g. PT10M30S for 10 minutes 30 seconds, P5DT8H for 5 days 8 hours.">>],
+     [<<"--stream-max-segment-size-bytes <stream-max-segment-size-bytes>">>,
+      <<"The maximum size of partition stream segments, example values: 500mb, 1gb.">>],
+     [<<"--leader-locator <leader-locator>">>,
+      <<"Leader locator strategy for partition streams, possible values are client-local, balanced.">>],
+     [<<"--initial-cluster-size <initial-cluster-size>">>,
+      <<"The initial cluster size of partition streams.">>]].
 
 usage_doc_guides() ->
-    [?STREAM_GUIDE_URL].
+    [?STREAMS_GUIDE_URL].
 
 run([SuperStream],
     #{node := NodeName,
@@ -191,30 +194,32 @@ run([SuperStream],
     #{node := NodeName,
       vhost := VHost,
       timeout := Timeout,
-      routing_keys := RoutingKeysStr} =
+      binding_keys := BindingKeysStr} =
         Opts) ->
-    RoutingKeys =
+    BindingKeys =
         [rabbit_data_coercion:to_binary(
              string:strip(K))
          || K
                 <- string:tokens(
-                       rabbit_data_coercion:to_list(RoutingKeysStr), ",")],
+                       rabbit_data_coercion:to_list(BindingKeysStr), ",")],
     Streams =
         [list_to_binary(binary_to_list(SuperStream)
                         ++ "-"
                         ++ binary_to_list(K))
-         || K <- RoutingKeys],
+         || K <- BindingKeys],
     create_super_stream(NodeName,
                         Timeout,
                         VHost,
                         SuperStream,
                         Streams,
                         stream_arguments(Opts),
-                        RoutingKeys).
+                        BindingKeys).
 
 stream_arguments(Opts) ->
     stream_arguments(#{}, Opts).
 
+%% Something strange, dialyzer infers that map_size/1 returns positive_integer()
+-dialyzer({no_match, stream_arguments/2}).
 stream_arguments(Acc, Arguments) when map_size(Arguments) =:= 0 ->
     Acc;
 stream_arguments(Acc, #{max_length_bytes := Value} = Arguments) ->
@@ -273,14 +278,14 @@ create_super_stream(NodeName,
     of
         ok ->
             {ok,
-             rabbit_misc:format("Super stream ~s has been created",
+             rabbit_misc:format("Super stream ~ts has been created",
                                 [SuperStream])};
         Error ->
             Error
     end.
 
 banner(_, _) ->
-    <<"Adding a super stream (experimental feature)...">>.
+    <<"Adding a super stream...">>.
 
 output({error, Msg}, _Opts) ->
     {error, 'Elixir.RabbitMQ.CLI.Core.ExitCodes':exit_software(), Msg};

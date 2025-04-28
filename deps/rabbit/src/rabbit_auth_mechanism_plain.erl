@@ -2,12 +2,10 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_auth_mechanism_plain).
--include_lib("rabbit_common/include/rabbit.hrl").
-
 -behaviour(rabbit_auth_mechanism).
 
 -export([description/0, should_offer/1, init/1, handle_response/2]).
@@ -36,16 +34,20 @@ handle_response(Response, _State) ->
         {ok, User, Pass} ->
             rabbit_access_control:check_user_pass_login(User, Pass);
         error ->
-            {protocol_error, "response ~p invalid", [Response]}
+            {protocol_error, "response ~tp invalid", [Response]}
     end.
 
 extract_user_pass(Response) ->
     case extract_elem(Response) of
-        {ok, User, Response1} -> case extract_elem(Response1) of
-                                     {ok, Pass, <<>>} -> {ok, User, Pass};
-                                     _                -> error
-                                 end;
-        error                 -> error
+        {ok, User, Response1} ->
+            case extract_elem(Response1) of
+                {ok, Pass, <<>>} ->
+                    {ok, User, Pass};
+                _ ->
+                    error
+            end;
+        error ->
+            error
     end.
 
 extract_elem(<<0:8, Rest/binary>>) ->

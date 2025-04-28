@@ -2,7 +2,7 @@
 %% vim: ts=4 sw=4 ft=erlang noet
 %%%-------------------------------------------------------------------
 %%% @author Andrew Bennett <potatosaladx@gmail.com>
-%%% @copyright 2014-2017, Andrew Bennett
+%%% @copyright 2014-2022, Andrew Bennett
 %%% @doc
 %%%
 %%% @end
@@ -134,6 +134,10 @@ der_decode(DER) when is_binary(DER) ->
 	case Result of
 		PrivateKeyInfo=#'PrivateKeyInfo'{} ->
 			i2k(PrivateKeyInfo);
+		ECPrivateKey={'ECPrivateKey', _, _, _, _, _} -> %% OTP 24
+			i2k(ECPrivateKey);
+		ECPrivateKey={'ECPrivateKey', _, _, _, _} -> %% OTP 23
+			i2k(ECPrivateKey);
 		SubjectPublicKeyInfo=#'SubjectPublicKeyInfo'{} ->
 			i2k(SubjectPublicKeyInfo);
 		Other ->
@@ -198,6 +202,10 @@ pem_entry_decode(PEMEntry) ->
 	case Result of
 		PrivateKeyInfo=#'PrivateKeyInfo'{} ->
 			i2k(PrivateKeyInfo);
+		ECPrivateKey={'ECPrivateKey', _, _, _, _, _} -> %% OTP 24
+			i2k(ECPrivateKey);
+		ECPrivateKey={'ECPrivateKey', _, _, _, _} -> %% OTP 23
+			i2k(ECPrivateKey);
 		SubjectPublicKeyInfo=#'SubjectPublicKeyInfo'{} ->
 			i2k(SubjectPublicKeyInfo);
 		Other ->
@@ -220,6 +228,10 @@ pem_entry_decode(PEMEntry, Password) ->
 	case Result of
 		PrivateKeyInfo=#'PrivateKeyInfo'{} ->
 			i2k(PrivateKeyInfo);
+		ECPrivateKey={'ECPrivateKey', _, _, _, _, _} -> %% OTP 24
+			i2k(ECPrivateKey);
+		ECPrivateKey={'ECPrivateKey', _, _, _, _} -> %% OTP 23
+			i2k(ECPrivateKey);
 		SubjectPublicKeyInfo=#'SubjectPublicKeyInfo'{} ->
 			i2k(SubjectPublicKeyInfo);
 		Other ->
@@ -706,17 +718,21 @@ key_derivation_params(#'PBES2-params'{keyDerivationFunc = KeyDerivationFunc, enc
 %% This function currently matches a tuple that ougth to be the value
 %% ?'id-hmacWithSHA1, but we need some kind of ASN1-fix for this.
 pseudo_random_function(#'PBKDF2-params_prf'{algorithm = {_,_, _,'id-hmacWithSHA1'}}) ->
-	{fun crypto:hmac/4, sha, pseudo_output_length(?'id-hmacWithSHA1')};
+	{fun hmac/4, sha, pseudo_output_length(?'id-hmacWithSHA1')};
 pseudo_random_function(#'PBKDF2-params_prf'{algorithm = ?'id-hmacWithSHA1' = Algo}) ->
-	{fun crypto:hmac/4, sha, pseudo_output_length(Algo)};
+	{fun hmac/4, sha, pseudo_output_length(Algo)};
 pseudo_random_function(#'PBKDF2-params_prf'{algorithm = ?'id-hmacWithSHA224'= Algo}) ->
-	{fun crypto:hmac/4, sha224, pseudo_output_length(Algo)};
+	{fun hmac/4, sha224, pseudo_output_length(Algo)};
 pseudo_random_function(#'PBKDF2-params_prf'{algorithm = ?'id-hmacWithSHA256' = Algo}) ->
-	{fun crypto:hmac/4, sha256, pseudo_output_length(Algo)};
+	{fun hmac/4, sha256, pseudo_output_length(Algo)};
 pseudo_random_function(#'PBKDF2-params_prf'{algorithm = ?'id-hmacWithSHA384' = Algo}) ->
-	{fun crypto:hmac/4, sha384, pseudo_output_length(Algo)};
+	{fun hmac/4, sha384, pseudo_output_length(Algo)};
 pseudo_random_function(#'PBKDF2-params_prf'{algorithm = ?'id-hmacWithSHA512' = Algo}) ->
-	{fun crypto:hmac/4, sha512, pseudo_output_length(Algo)}.
+	{fun hmac/4, sha512, pseudo_output_length(Algo)}.
+
+%% @private
+hmac(SubType, Key, Data, MacLength) ->
+    jose_crypto_compat:mac(hmac, SubType, Key, Data, MacLength).
 
 %% @private
 pseudo_output_length(?'id-hmacWithSHA1') ->
@@ -760,6 +776,10 @@ i2k(#'PrivateKeyInfo'{
 		publicKey = #'jose_EdDSA25519PublicKey'{ publicKey = PublicKey },
 		privateKey = PrivateKey
 	};
+i2k(ECPrivateKey = {'ECPrivateKey', _, PrivateKey, {namedCurve, ?'jose_id-EdDSA25519'}, _, _}) ->
+	i2k_eddsa25519(ECPrivateKey, PrivateKey);
+i2k(ECPrivateKey = {'ECPrivateKey', _, PrivateKey, {namedCurve, ?'jose_id-EdDSA25519'}, _, _, _}) ->
+	i2k_eddsa25519(ECPrivateKey, PrivateKey);
 i2k(#'SubjectPublicKeyInfo'{
 	algorithm =
 		#'AlgorithmIdentifier'{
@@ -781,6 +801,10 @@ i2k(#'PrivateKeyInfo'{
 		publicKey = #'jose_EdDSA448PublicKey'{ publicKey = PublicKey },
 		privateKey = PrivateKey
 	};
+i2k(ECPrivateKey = {'ECPrivateKey', _, PrivateKey, {namedCurve, ?'jose_id-EdDSA448'}, _, _}) ->
+	i2k_eddsa448(ECPrivateKey, PrivateKey);
+i2k(ECPrivateKey = {'ECPrivateKey', _, PrivateKey, {namedCurve, ?'jose_id-EdDSA448'}, _, _, _}) ->
+	i2k_eddsa448(ECPrivateKey, PrivateKey);
 i2k(#'SubjectPublicKeyInfo'{
 	algorithm =
 		#'AlgorithmIdentifier'{
@@ -857,6 +881,34 @@ i2k(PrivateKeyInfo=#'PrivateKeyInfo'{
 	end;
 i2k(Info) ->
 	Info.
+
+%% @private
+i2k_eddsa25519(_ECPrivateKey, << 4, 32:8/integer, PrivateKey:32/binary >>) ->
+	PublicKey = jose_curve25519:eddsa_secret_to_public(PrivateKey),
+	#'jose_EdDSA25519PrivateKey'{
+		publicKey = #'jose_EdDSA25519PublicKey'{ publicKey = PublicKey },
+		privateKey = PrivateKey
+	};
+i2k_eddsa25519(_ECPrivateKey, << PrivateKey:32/binary >>) ->
+	PublicKey = jose_curve25519:eddsa_secret_to_public(PrivateKey),
+	#'jose_EdDSA25519PrivateKey'{
+		publicKey = #'jose_EdDSA25519PublicKey'{ publicKey = PublicKey },
+		privateKey = PrivateKey
+	}.
+
+%% @private
+i2k_eddsa448(_ECPrivateKey, << 4, 57:8/integer, PrivateKey:57/binary >>) ->
+	PublicKey = jose_curve448:eddsa_secret_to_public(PrivateKey),
+	#'jose_EdDSA448PrivateKey'{
+		publicKey = #'jose_EdDSA448PublicKey'{ publicKey = PublicKey },
+		privateKey = PrivateKey
+	};
+i2k_eddsa448(_ECPrivateKey, << PrivateKey:57/binary >>) ->
+	PublicKey = jose_curve448:eddsa_secret_to_public(PrivateKey),
+	#'jose_EdDSA448PrivateKey'{
+		publicKey = #'jose_EdDSA448PublicKey'{ publicKey = PublicKey },
+		privateKey = PrivateKey
+	}.
 
 %% @private
 k2i(#'jose_EdDSA25519PrivateKey'{privateKey=PrivateKey}) ->

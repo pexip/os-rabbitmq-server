@@ -6,11 +6,6 @@ Files: *
 Copyright: (c) 2007-2014 GoPivotal, Inc.
 License: MPL-1.1
 
-Files: debian/missing-sources/*
-Copyright: 2012-2015 Pivotal Software, Inc.
-           2015 CloudFoundry.org Foundation
-License: Apache-2.0
-
 Files: deps/rabbitmq_codegen/amqp-rabbitmq-*.json
 Copyright: (c) 2008-2013, GoPivotal Inc.
 License: Expat
@@ -41,27 +36,6 @@ Copyright: (c) 2007-2013, IOLA and Ole Laursen
 License: Expat
 Comments: Downloaded from http://www.flotcharts.org/
 
-Files: deps/webmachine/*
-Copyright: (c) Basho Technologies
-License: Apache-2.0
-Comments: Downloaded from http://webmachine.basho.com/
-
-Files: deps/mochiweb/*
-Copyright: (c) 2007, Mochi Media, Inc.
-License: Expat
-Comments: Downloaded from http://github.com/mochi/mochiweb/
-
-Files:
- deps/rabbitmq_management_visualiser/priv/www/visualiser/js/glMatrix*.js
-Copyright: (c) 2011, Brandon Jones
-License: BSD-2-Clause
-Comments: Downloaded from http://code.google.com/p/glmatrix/
-
-Files: deps/rabbit_common/src/ec_semver.erl
- deps/rabbit_common/src/ec_semver_parser.erl
-Copyright: (c) 2011 Erlware, LLC
-License: Expat
-
 Files: debian/*
 Copyright: (c) 2007-2013, GoPivotal, Inc.
            (c) 2007, Tony Garnock-Jones <tonyg@rabbitmq.com>
@@ -72,6 +46,11 @@ Copyright: (c) 2007-2013, GoPivotal, Inc.
            (c) 2014-2016, James Page <james.page@canonical.com>
            (c) 2014-2018, Thomas Goirand <zigo@debian.org>
 License: MPL-1.1
+
+Files: debian/missing-sources/*
+Copyright: 2012-2015 Pivotal Software, Inc.
+           2015 CloudFoundry.org Foundation
+License: Apache-2.0
 
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy

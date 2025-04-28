@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_json).
@@ -10,72 +10,75 @@
 -export([decode/1, decode/2, try_decode/1, try_decode/2,
 	 encode/1, encode/2, try_encode/1, try_encode/2]).
 
--define(DEFAULT_DECODE_OPTIONS, [return_maps]).
+-define(DEFAULT_DECODE_OPTIONS, #{}).
+-define(DEFAULT_ENCODE_OPTIONS, #{}).
 
-
--spec decode(jsx:json_text()) -> jsx:json_term().
+-spec decode(iodata()) -> thoas:json_term().
 decode(JSON) ->
     decode(JSON, ?DEFAULT_DECODE_OPTIONS).
 
-
--spec decode(jsx:json_text(), jsx_to_term:config()) -> jsx:json_term().
+-spec decode(iodata(), thoas:decode_options()) -> thoas:json_term().
 decode(JSON, Opts) ->
-    jsx:decode(JSON, Opts).
+    case thoas:decode(JSON, Opts) of
+        {ok, Value}     -> Value;
+        {error, _Error} -> error({error, {failed_to_decode_json, JSON}})
+    end.
 
-
--spec try_decode(jsx:json_text()) -> {ok, jsx:json_term()} |
+-spec try_decode(iodata()) -> {ok, thoas:json_term()} |
 				     {error, Reason :: term()}.
 try_decode(JSON) ->
     try_decode(JSON, ?DEFAULT_DECODE_OPTIONS).
 
-
--spec try_decode(jsx:json_text(), jsx_to_term:config()) -> 
-			{ok, jsx:json_term()} | {error, Reason :: term()}.
+-spec try_decode(iodata(), thoas:decode_options()) ->
+			{ok, thoas:json_term()} | {error, Reason :: term()}.
 try_decode(JSON, Opts) ->
     try
         {ok, decode(JSON, Opts)}
-    catch error: Reason ->
+    catch error:Reason ->
         {error, Reason}
     end.
 
--spec encode(jsx:json_term()) -> jsx:json_text().
+-spec encode(thoas:input_term()) -> iodata().
 encode(Term) ->
-    encode(Term, []).
+    encode(Term, ?DEFAULT_ENCODE_OPTIONS).
 
--spec encode(jsx:json_term(), jsx_to_json:config()) -> jsx:json_text().
+-spec encode(thoas:input_term(), thoas:encode_options()) -> iodata().
 encode(Term, Opts) ->
-    jsx:encode(fixup_terms(Term), Opts).
+    %% Fixup for JSON encoding
+    %% * Transforms any Funs into strings
+    %% See rabbit_mgmt_format:format_nulls/1
+    F = fun
+            (V) when is_function(V) ->
+                rabbit_data_coercion:to_binary(V);
+            (V) ->
+                V
+        end,
+    thoas:encode(fixup_terms(Term, F), Opts).
 
--spec try_encode(jsx:json_term()) -> {ok, jsx:json_text()} | 
+-spec try_encode(thoas:input_term()) -> {ok, iodata()} |
 				     {error, Reason :: term()}.
 try_encode(Term) ->
-    try_encode(Term, []).
+    try_encode(Term, ?DEFAULT_ENCODE_OPTIONS).
 
--spec try_encode(jsx:json_term(), jsx_to_term:config()) ->
-			{ok, jsx:json_text()} | {error, Reason :: term()}.
+-spec try_encode(thoas:input_term(), thoas:encode_options()) ->
+			{ok, iodata()} | {error, Reason :: term()}.
 try_encode(Term, Opts) ->
     try
         {ok, encode(Term, Opts)}
-    catch error: Reason ->
+    catch error:Reason ->
 	    {error, Reason}
     end.
 
-%% Fixup for JSON encoding. Transforms any Funs into strings
-%% See rabbit_mgmt_format:format_nulls/1
-fixup_terms(Items) when is_list(Items) ->
-    [fixup_item(Pair) || Pair <- Items];
-fixup_terms(Item) ->
-    fixup_item(Item).
+fixup_terms(Items, FixupFun) when is_list(Items) ->
+    [fixup_item(Pair, FixupFun) || Pair <- Items];
+fixup_terms(Item, FixupFun) ->
+    fixup_item(Item, FixupFun).
 
-fixup_item({Key, Value}) when is_function(Value) ->
-    {Key, rabbit_data_coercion:to_binary(Value)};
-fixup_item({Key, Value}) when is_list(Value) ->
-    {Key, fixup_terms(Value)};
-fixup_item({Key, Value}) ->
-    {Key, Value};
-fixup_item([{_K, _V} | _T] = L) ->
-    fixup_terms(L);
-fixup_item(Value) when is_function(Value) ->
-    rabbit_data_coercion:to_binary(Value);
-fixup_item(Value) ->
-    Value.
+fixup_item({Key, Value}, FixupFun) when is_list(Value) ->
+    {Key, fixup_terms(Value, FixupFun)};
+fixup_item({Key, Value}, FixupFun) ->
+    {Key, FixupFun(Value)};
+fixup_item([{_K, _V} | _T] = L, FixupFun) ->
+    fixup_terms(L, FixupFun);
+fixup_item(Value, FixupFun) ->
+    FixupFun(Value).

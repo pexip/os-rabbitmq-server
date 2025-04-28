@@ -1,10 +1,9 @@
 This package, the RabbitMQ server is licensed under the MPL2.0.
 
-If you have any questions regarding licensing, please contact us at
-info@rabbitmq.com.
+If you have any questions regarding licensing, please contact us at rabbitmq-core@groups.vmware.com.
 
 The files amqp-rabbitmq-0.8.json and amqp-rabbitmq-0.9.1.json are
-"Copyright (C) 2008-2020 VMware, Inc. or its affiliates. and are covered by the MIT
+"Copyright (c) 2007-2024 Broadcom Inc. and its subsidiaries. All rights reserved. and are covered by the MIT
 license.
 
 
@@ -430,4 +429,4 @@ file, then You may include the notice in a location (such as a LICENSE
 file in a relevant directory) where a recipient would be likely to look
 for such a notice.
 
-Copyright (c) 2007-2020 VMware, Inc. or its affiliates.
+Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.

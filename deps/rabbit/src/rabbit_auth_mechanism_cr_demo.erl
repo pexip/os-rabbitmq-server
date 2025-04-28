@@ -2,12 +2,10 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_auth_mechanism_cr_demo).
--include_lib("rabbit_common/include/rabbit.hrl").
-
 -behaviour(rabbit_auth_mechanism).
 
 -export([description/0, should_offer/1, init/1, handle_response/2]).
@@ -25,7 +23,7 @@
 %% Provides equivalent security to PLAIN but demos use of Connection.Secure(Ok)
 %% START-OK: Username
 %% SECURE: "Please tell me your password"
-%% SECURE-OK: "My password is ~s", [Password]
+%% SECURE-OK: "My password is ~ts", [Password]
 
 description() ->
     [{description, <<"RabbitMQ Demo challenge-response authentication "
@@ -45,4 +43,4 @@ handle_response(<<"My password is ", Password/binary>>,
                 #state{username = Username}) ->
     rabbit_access_control:check_user_pass_login(Username, Password);
 handle_response(Response, _State) ->
-    {protocol_error, "Invalid response '~s'", [Response]}.
+    {protocol_error, "Invalid response '~ts'", [Response]}.

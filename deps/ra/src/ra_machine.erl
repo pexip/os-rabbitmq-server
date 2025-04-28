@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 %% @doc The `ra_machine' behaviour.
 %%
@@ -60,26 +60,27 @@
 %% Optional: implements a lookup from version to the module implementing the
 %% machine logic for that version.
 
-
 -module(ra_machine).
 
 -compile({no_auto_import, [apply/3]}).
 
 -include("ra.hrl").
 
-
 -export([init/2,
          apply/4,
          tick/3,
+         snapshot_installed/5,
          state_enter/3,
          overview/2,
          query/3,
          module/1,
          init_aux/2,
+         handle_aux/6,
          handle_aux/7,
          snapshot_module/1,
          version/1,
          which_module/2,
+         which_aux_fun/1,
          is_versioned/1
         ]).
 
@@ -135,6 +136,8 @@
     {log, [ra_index()], fun(([user_command()]) -> effects())} |
     {log, [ra_index()], fun(([user_command()]) -> effects()), {local, node()}} |
     {release_cursor, ra_index(), state()} |
+    {release_cursor, ra_index()} |
+    {checkpoint, ra_index(), state()} |
     {aux, term()} |
     garbage_collection.
 
@@ -144,8 +147,13 @@
 %% forcing a GC run.
 %%
 %% Although both leaders and followers will process the same commands, effects
-%% are typically only applied on the leader. The only exception to this is
-%% the `release_cursor' and `garbage_collect' effects. The former is realised on all
+%% are typically only applied on the leader. The only exceptions to this are:
+%% <ul>
+%% <li>`release_cursor'</li>
+%% <li>`checkpoint'</li>
+%% <li>`garbage_collect'</li>
+%% </ul>
+%% The former two are realised on all
 %% nodes as it is a part of the Ra implementation log truncation mechanism.
 %% The `garbage_collect' effects that is used to explicitly triggering a GC run
 %% in the Ra servers' process.
@@ -187,7 +195,8 @@
                                index := ra_index(),
                                term := ra_term(),
                                machine_version => version(),
-                               from => from()}.
+                               from => from(),
+                               reply_mode => ra_server:command_reply_mode()}.
 %% extensible command meta data map
 
 
@@ -200,8 +209,10 @@
               command_meta_data/0]).
 
 -optional_callbacks([tick/2,
+                     snapshot_installed/4,
                      state_enter/2,
                      init_aux/1,
+                     handle_aux/5,
                      handle_aux/6,
                      overview/1,
                      snapshot_module/0,
@@ -222,7 +233,7 @@
 -callback init(Conf :: machine_init_args()) -> state().
 
 -callback 'apply'(command_meta_data(), command(), State) ->
-    {State, reply(), effects()} | {State, reply()} when State :: term().
+    {State, reply(), effects() | effect()} | {State, reply()} when State :: term().
 
 %% Optional callbacks
 
@@ -230,7 +241,27 @@
 
 -callback tick(TimeMs :: milliseconds(), state()) -> effects().
 
--callback init_aux(Name :: atom()) -> term().
+-callback snapshot_installed(Meta, State, OldMeta, OldState) -> Effects
+    when
+      Meta :: ra_snapshot:meta(),
+      State :: state(),
+      OldMeta :: ra_snapshot:meta(),
+      OldState :: state(),
+      Effects :: effects().
+
+-callback init_aux(Name :: atom()) -> AuxState :: term().
+
+-callback handle_aux(ra_server:ra_state(),
+                     {call, From :: from()} | cast,
+                     Command :: term(),
+                     AuxState,
+                     IntState) ->
+    {reply, Reply :: term(), AuxState, IntState} |
+    {reply, Reply :: term(), AuxState, IntState, effects()} |
+    {no_reply, AuxState, IntState} |
+    {no_reply, AuxState, IntState, effects()}
+      when AuxState :: term(),
+           IntState :: ra_aux:internal_state().
 
 -callback handle_aux(ra_server:ra_state(),
                      {call, From :: from()} | cast,
@@ -251,7 +282,7 @@
 
 -callback snapshot_module() -> module().
 
--callback version() -> pos_integer().
+-callback version() -> version().
 
 -callback which_module(version()) -> module().
 
@@ -277,6 +308,29 @@ apply(Mod, Metadata, Cmd, State) ->
 tick(Mod, TimeMs, State) ->
     ?OPT_CALL(Mod:tick(TimeMs, State), []).
 
+-spec snapshot_installed(Module, Meta, State, OldMeta, OldState) ->
+    effects() when
+      Module :: module(),
+      Meta :: ra_snapshot:meta(),
+      State :: state(),
+      OldMeta :: ra_snapshot:meta(),
+      OldState :: state().
+snapshot_installed(Mod, Meta, State, OldMeta, OldState)
+  when is_atom(Mod) andalso
+       is_map(Meta) andalso
+       is_map(OldMeta) ->
+    try
+        Mod:snapshot_installed(Meta, State, OldMeta, OldState)
+    catch
+        error:undef ->
+            try
+                Mod:snapshot_installed(Meta, State)
+            catch
+                error:undef ->
+                    []
+            end
+    end.
+
 %% @doc called when the ra_server_proc enters a new state
 -spec state_enter(module(), ra_server:ra_state() | eol, state()) ->
     effects().
@@ -291,11 +345,17 @@ overview(Mod, State) ->
 %% code
 -spec version(machine()) -> version().
 version({machine, Mod, _}) ->
-    ?OPT_CALL(assert_integer(Mod:version()), ?DEFAULT_VERSION).
+    ?OPT_CALL(assert_version(Mod:version()), ?DEFAULT_VERSION).
 
 -spec is_versioned(machine()) -> boolean().
-is_versioned(Machine) ->
-    version(Machine) /= ?DEFAULT_VERSION.
+is_versioned({machine, Mod, _}) ->
+    try
+        _ = Mod:version(),
+        true
+    catch
+        error:undef ->
+            false
+    end.
 
 -spec which_module(machine(), version()) -> module().
 which_module({machine, Mod, _}, Version) ->
@@ -322,8 +382,37 @@ init_aux(Mod, Name) ->
       when AuxState :: term(),
            LogState :: ra_log:state().
 handle_aux(Mod, RaftState, Type, Cmd, Aux, Log, MacState) ->
-    ?OPT_CALL(Mod:handle_aux(RaftState, Type, Cmd, Aux, Log, MacState),
-              undefined).
+    Mod:handle_aux(RaftState, Type, Cmd, Aux, Log, MacState).
+
+
+-spec handle_aux(module(),
+                 ra_server:ra_state(),
+                 {call, From :: from()} | cast,
+                 Command :: term(),
+                 AuxState,
+                 State) ->
+    {reply, Reply :: term(), AuxState, State} |
+    {reply, Reply :: term(), AuxState, State,
+     [{monitor, process, aux, pid()}]} |
+    {no_reply, AuxState, State} |
+    {no_reply, AuxState, State,
+     [{monitor, process, aux, pid()}]}
+      when AuxState :: term(),
+           State :: ra_server:state().
+handle_aux(Mod, RaftState, Type, Cmd, Aux, State) ->
+    Mod:handle_aux(RaftState, Type, Cmd, Aux, State).
+
+-spec which_aux_fun(module()) ->
+    undefined | {atom(), arity()}.
+which_aux_fun(Mod) when is_atom(Mod) ->
+    case lists:sort([E || {handle_aux, _Arity} = E
+                          <- erlang:apply(Mod,module_info, [exports])]) of
+        [] ->
+            undefined;
+        [AuxFun | _] ->
+            %% favour {handle_aux, 5} as this is the newer api
+            AuxFun
+    end.
 
 -spec query(module(), fun((state()) -> Result), state()) ->
     Result when Result :: term().
@@ -349,5 +438,5 @@ snapshot_module({machine, Mod, _}) ->
 
 %% internals
 
-assert_integer(I) when is_integer(I) andalso I > 0 ->
+assert_version(I) when is_integer(I) andalso I >= 0 ->
     I.

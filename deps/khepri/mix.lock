@@ -1,0 +1,7 @@
+%{
+  "aten": {:hex, :aten, "0.6.0", "7a57b275a6daf515ac3683fb9853e280b4d0dcdd74292fd66ac4a01c8694f8c7", [:rebar3], [], "hexpm", "5f39a164206ae3f211ef5880b1f7819415686436e3229d30b6a058564fbaa168"},
+  "gen_batch_server": {:hex, :gen_batch_server, "0.8.8", "7840a1fa63ee1effc83e8a91d22664847a2ba1192d30eafffd914acb51578068", [:rebar3], [], "hexpm", "c3e6a1a2a0fb62aee631a98cfa0fd8903e9562422cbf72043953e2fb1d203017"},
+  "horus": {:hex, :horus, "0.3.0", "0aab22d88fa8159ffb13f83a782b0d9b0819c08dafd4a4c4beea0c31f32b626a", [:mix, :rebar3], [], "hexpm", "dabe0bd901159d31ada944310302a155324fe421adcb12bfc4bb7eabdd9625f8"},
+  "ra": {:hex, :ra, "2.14.0", "aeb630926ae0d4a6ede62c12cc4c3389ddd4e18b5e9cfb84369251b69fa9d257", [:rebar3], [{:aten, "0.6.0", [hex: :aten, repo: "hexpm", optional: false]}, {:gen_batch_server, "0.8.8", [hex: :gen_batch_server, repo: "hexpm", optional: false]}, {:seshat, "0.6.0", [hex: :seshat, repo: "hexpm", optional: false]}], "hexpm", "1d553dd971a0b398b7af0fa8c8458dda575715ff71c65c972e9500b24039b240"},
+  "seshat": {:hex, :seshat, "0.6.0", "3172eb1d7a2a4f66108cd6933a4e465aff80f84aa90ed83f047b92f636123ccd", [:rebar3], [], "hexpm", "7cef700f92831dd7cae6a6dd223ccc55ac88ecce0631ee9ab0f2b5fb70e79b90"},
+}

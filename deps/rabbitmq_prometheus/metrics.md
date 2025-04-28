@@ -80,8 +80,9 @@ To generate these:
 Metrics `rabbitmq_global_messages_dead_lettered_*` have labels `queue_type` and `dead_letter_strategy`.
 
 Label `queue_type` denotes the type of queue messages were discarded from. It can have value
-* `rabbit_classic_queue`, or
-* `rabbit_quorum_queue`
+* `rabbit_classic_queue`,
+* `rabbit_quorum_queue`, or
+* `rabbit_mqtt_qos0_queue`
 
 (Queue type `rabbit_stream_queue` does not dead letter messages.)
 
@@ -131,9 +132,7 @@ These metrics are specific to the stream protocol.
 | rabbitmq_disk_space_available_limit_bytes | Free disk space low watermark in bytes             |
 | rabbitmq_identity_info                    | RabbitMQ node & cluster identity info              |
 | rabbitmq_process_max_fds                  | Open file descriptors limit                        |
-| rabbitmq_process_max_tcp_sockets          | Open TCP sockets limit                             |
 | rabbitmq_process_open_fds                 | Open file descriptors                              |
-| rabbitmq_process_open_tcp_sockets         | Open TCP sockets                                   |
 | rabbitmq_process_resident_memory_bytes    | Memory used in bytes                               |
 | rabbitmq_resident_memory_limit_bytes      | Memory high watermark in bytes                     |
 
@@ -257,6 +256,12 @@ These metrics are specific to the stream protocol.
 | rabbitmq_raft_log_snapshot_index           | Raft log snapshot index                 |
 | rabbitmq_raft_term_total                   | Current Raft term number                |
 
+### Federation
+
+| Metric                                     | Description                                    |
+| ---                                        | ---                                            |
+| rabbitmq_federation_links                 | Federations Links count grouped by Link status |
+
 ## Telemetry
 
 | Metric                              | Description              |
@@ -342,7 +347,7 @@ These metrics are specific to the stream protocol.
 | erlang_vm_statistics_garbage_collection_number_of_gcs   | Garbage collection: number of GCs.                                                                                                                                                                               |
 | erlang_vm_statistics_garbage_collection_words_reclaimed | Garbage collection: words reclaimed.                                                                                                                                                                             |
 | erlang_vm_statistics_reductions_total                   | Total reductions.                                                                                                                                                                                                |
-| erlang_vm_statistics_run_queues_length_total            | Length of normal run-queues.                                                                                                                                                                                     |
+| erlang_vm_statistics_run_queues_length                  | Length of normal run-queues.                                                                                                                                                                                     |
 | erlang_vm_statistics_runtime_milliseconds               | The sum of the runtime for all threads in the Erlang runtime system. Can be greater than wall clock time.                                                                                                        |
 | erlang_vm_statistics_wallclock_time_milliseconds        | Information about wall clock. Same as erlang_vm_statistics_runtime_milliseconds except that real time is measured.                                                                                               |
 | erlang_vm_statistics_wallclock_time_milliseconds        | Information about wall clock. Same as erlang_vm_statistics_runtime_milliseconds except that real time is measured.                                                                                               |

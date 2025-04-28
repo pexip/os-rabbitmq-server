@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2017-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 %% @hidden
 -module(ra_log_snapshot).
@@ -11,15 +11,17 @@
 
 -export([
          prepare/2,
-         write/3,
+         write/4,
+         sync/1,
          begin_accept/2,
          accept_chunk/2,
          complete_accept/2,
-         begin_read/1,
+         begin_read/2,
          read_chunk/3,
          recover/1,
          validate/1,
-         read_meta/1
+         read_meta/1,
+         context/0
          ]).
 
 -define(MAGIC, "RASN").
@@ -41,9 +43,9 @@ prepare(_Index, State) -> State.
 %% Snapshot Data (binary)
 %% @end
 
--spec write(file:filename(), meta(), term()) ->
-    ok | {error, file_err()}.
-write(Dir, Meta, MacState) ->
+-spec write(file:filename(), meta(), term(), Sync :: boolean()) ->
+    {ok, non_neg_integer()} | {error, file_err()}.
+write(Dir, Meta, MacState, Sync) ->
     %% no compression on meta data to make sure reading it is as fast
     %% as possible
     MetaBin = term_to_binary(Meta),
@@ -51,10 +53,22 @@ write(Dir, Meta, MacState) ->
     Data = [<<(size(MetaBin)):32/unsigned>>, MetaBin | IOVec],
     Checksum = erlang:crc32(Data),
     File = filename(Dir),
-    ra_lib:write_file(File, [<<?MAGIC,
-                               ?VERSION:8/unsigned,
-                               Checksum:32/integer>>,
-                             Data]).
+    Bytes = 9 + iolist_size(Data),
+    case ra_lib:write_file(File, [<<?MAGIC,
+                                    ?VERSION:8/unsigned,
+                                    Checksum:32/integer>>,
+                                  Data], Sync) of
+        ok ->
+            {ok, Bytes};
+        Err ->
+            Err
+    end.
+
+-spec sync(file:filename()) ->
+    ok | {error, file_err()}.
+sync(Dir) ->
+    File = filename(Dir),
+    ra_lib:sync_file(File).
 
 begin_accept(SnapDir, Meta) ->
     File = filename(SnapDir),
@@ -68,34 +82,51 @@ begin_accept(SnapDir, Meta) ->
                          Data]),
     {ok, {PartialCrc, Fd}}.
 
+accept_chunk(<<?MAGIC, ?VERSION:8/unsigned, Crc:32/integer,
+               Rest/binary>> = Chunk, {_PartialCrc, Fd}) ->
+    % ensure we overwrite the existing header when we are receiving the
+    % full file
+    PartialCrc = erlang:crc32(Rest),
+    {ok, 0} = file:position(Fd, 0),
+    ok = file:write(Fd, Chunk),
+    {ok, {PartialCrc, Crc, Fd}};
 accept_chunk(Chunk, {PartialCrc, Fd}) ->
-    <<Crc:32/integer, Rest/binary>> = Chunk,
-    accept_chunk(Rest, {PartialCrc, Crc, Fd});
+    %% compatibility clause where we did not receive the full file
+    %% do not validate Crc due to OTP 26 map key ordering changes
+    <<_Crc:32/integer, Rest/binary>> = Chunk,
+    accept_chunk(Rest, {PartialCrc, undefined, Fd});
 accept_chunk(Chunk, {PartialCrc0, Crc, Fd}) ->
     ok = file:write(Fd, Chunk),
     PartialCrc = erlang:crc32(PartialCrc0, Chunk),
     {ok, {PartialCrc, Crc, Fd}}.
 
-complete_accept(Chunk, {PartialCrc, Fd}) ->
-    <<Crc:32/integer, Rest/binary>> = Chunk,
-    complete_accept(Rest, {PartialCrc, Crc, Fd});
-complete_accept(Chunk, {PartialCrc0, Crc, Fd}) ->
-    ok = file:write(Fd, Chunk),
-    ok = file:pwrite(Fd, 5, <<Crc:32/integer>>),
-    Crc = erlang:crc32(PartialCrc0, Chunk),
-    ok = file:sync(Fd),
+complete_accept(Chunk, St0) ->
+    {ok, {CalculatedCrc, Crc, Fd}} = accept_chunk(Chunk, St0),
+    CrcToWrite = case Crc of
+                     undefined ->
+                         CalculatedCrc;
+                     _ ->
+                         Crc
+                 end,
+    ok = file:pwrite(Fd, 5, <<CrcToWrite:32/integer>>),
+    ok = ra_file:sync(Fd),
     ok = file:close(Fd),
+    CalculatedCrc = CrcToWrite,
     ok.
 
-begin_read(Dir) ->
+begin_read(Dir, Context) ->
     File = filename(Dir),
     case file:open(File, [read, binary, raw]) of
         {ok, Fd} ->
             case read_meta_internal(Fd) of
-                {ok, Meta, Crc} ->
-                    {ok, DataStart} = file:position(Fd, cur),
+                {ok, Meta, _Crc}
+                  when map_get(can_accept_full_file, Context) ->
                     {ok, Eof} = file:position(Fd, eof),
-                    {ok, Meta, {Crc, {DataStart, Eof, Fd}}};
+                    {ok, Meta, {0, Eof, Fd}};
+                {ok, Meta, Crc} ->
+                    {ok, Cur} = file:position(Fd, cur),
+                    {ok, Eof} = file:position(Fd, eof),
+                    {ok, Meta, {Crc, {Cur, Eof, Fd}}};
                 {error, _} = Err ->
                     _ = file:close(Fd),
                     Err
@@ -105,6 +136,7 @@ begin_read(Dir) ->
     end.
 
 read_chunk({Crc, ReadState}, Size, Dir) when is_integer(Crc) ->
+    %% this the compatibility read mode for old snapshot receivers
     case read_chunk(ReadState, Size - 4, Dir) of
         {ok, Data, ReadState1} ->
             {ok, <<Crc:32/integer, Data/binary>>, ReadState1};
@@ -156,24 +188,27 @@ validate(Dir) ->
 %% entire binary body. NB: this does not do checksum validation.
 -spec read_meta(file:filename()) ->
     {ok, meta()} | {error, invalid_format |
-                          {invalid_version, integer()} |
-                          checksum_error |
-                          file_err()}.
+                    {invalid_version, integer()} |
+                    checksum_error |
+                    file_err()}.
 read_meta(Dir) ->
     File = filename(Dir),
     case file:open(File, [read, binary, raw]) of
         {ok, Fd} ->
             case read_meta_internal(Fd) of
-                {ok, Meta, _} ->
+                {ok, Meta, _Crc} ->
                     _ = file:close(Fd),
                     {ok, Meta};
-                {error, _} = Err ->
+                Err ->
                     _ = file:close(Fd),
                     Err
-            end;
-        Err ->
-            Err
+            end
     end.
+
+-spec context() -> map().
+context() ->
+    #{can_accept_full_file => true}.
+
 
 %% Internal
 
