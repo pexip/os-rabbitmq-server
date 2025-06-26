@@ -1,3 +1,22 @@
+rabbitmq-server (4.0.5-6) unstable; urgency=medium
+
+  * Add elixir-1.18-compat.patch to fix json output of rabbitmctl
+    (Closes: #1108307).
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 26 Jun 2025 10:36:03 +0200
+
+rabbitmq-server (4.0.5-5) unstable; urgency=medium
+
+  * Fix rabbitmq-plugins script to automatically set PLUGINS_DIR.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 27 May 2025 15:57:44 +0200
+
+rabbitmq-server (4.0.5-4) unstable; urgency=medium
+
+  * Fix /var/log/rabbitmq group ownership to adm.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 13 May 2025 11:24:03 +0200
+
 rabbitmq-server (4.0.5-3) unstable; urgency=medium
 
   [ Antonio Terceiro ]
