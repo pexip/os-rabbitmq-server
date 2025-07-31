@@ -1,3 +1,4 @@
 lets-use-python3-not-python-binary.patch
 rabbitmq-dist.mk.patch
+elixir-1.18-compat.patch
 logging.patch

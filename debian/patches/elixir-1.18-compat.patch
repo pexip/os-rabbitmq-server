@@ -1,0 +1,1050 @@
+Description: Elixir 1.18 compatibility patch
+ The json dependency included in RMQ conflicts with the JSON
+ module provided by Elixir >= 1.18.
+ .
+ Rename the json module internally so that it does not conflict
+ with the same module name used in Elixir.
+Author: James Page <james.page@ubuntu.com>
+Forwarded: not-needed
+Bug-Debian: https://bugs.debian.org/1108307
+Last-Update: 2025-06-26
+
+--- a/deps/json/lib/json.ex
++++ b/deps/json/lib/json.ex
+@@ -1,53 +1,53 @@
+-defmodule JSON do
++defmodule JSONOLD do
+   @moduledoc """
+-  Provides a RFC 7159, ECMA 404, and JSONTestSuite compliant JSON Encoder / Decoder
++  Provides a RFC 7159, ECMA 404, and JSONOLDTestSuite compliant JSONOLD Encoder / Decoder
+   """
+ 
+   require Logger
+ 
+-  import JSON.Logger
++  import JSONOLD.Logger
+ 
+-  alias JSON.Decoder
+-  alias JSON.Encoder
++  alias JSONOLD.Decoder
++  alias JSONOLD.Encoder
+ 
+   @vsn "1.0.2"
+ 
+   @doc """
+-  Returns a JSON string representation of the Elixir term
++  Returns a JSONOLD string representation of the Elixir term
+ 
+   ## Examples
+ 
+-      iex> JSON.encode([result: "this will be a JSON result"])
+-      {:ok, "{\\\"result\\\":\\\"this will be a JSON result\\\"}"}
++      iex> JSONOLD.encode([result: "this will be a JSONOLD result"])
++      {:ok, "{\\\"result\\\":\\\"this will be a JSONOLD result\\\"}"}
+ 
+   """
+   @spec encode(term) :: {atom, bitstring}
+   defdelegate encode(term), to: Encoder
+ 
+   @doc """
+-  Returns a JSON string representation of the Elixir term, raises errors when something bad happens
++  Returns a JSONOLD string representation of the Elixir term, raises errors when something bad happens
+ 
+   ## Examples
+ 
+-      iex> JSON.encode!([result: "this will be a JSON result"])
+-      "{\\\"result\\\":\\\"this will be a JSON result\\\"}"
++      iex> JSONOLD.encode!([result: "this will be a JSONOLD result"])
++      "{\\\"result\\\":\\\"this will be a JSONOLD result\\\"}"
+ 
+   """
+   @spec encode!(term) :: bitstring
+   def encode!(term) do
+     case encode(term) do
+       {:ok, value} -> value
+-      {:error, error_info} -> raise JSON.Encoder.Error, error_info: error_info
+-      _ -> raise JSON.Encoder.Error
++      {:error, error_info} -> raise JSONOLD.Encoder.Error, error_info: error_info
++      _ -> raise JSONOLD.Encoder.Error
+     end
+   end
+ 
+   @doc """
+-  Converts a valid JSON string into an Elixir term
++  Converts a valid JSONOLD string into an Elixir term
+ 
+   ## Examples
+ 
+-      iex> JSON.decode("{\\\"result\\\":\\\"this will be an Elixir result\\\"}")
++      iex> JSONOLD.decode("{\\\"result\\\":\\\"this will be an Elixir result\\\"}")
+       {:ok, Enum.into([{"result", "this will be an Elixir result"}], Map.new)}
+   """
+   @spec decode(bitstring) :: {atom, term}
+@@ -55,11 +55,11 @@
+   defdelegate decode(bitstring_or_char_list), to: Decoder
+ 
+   @doc """
+-  Converts a valid JSON string into an Elixir term, raises errors when something bad happens
++  Converts a valid JSONOLD string into an Elixir term, raises errors when something bad happens
+ 
+   ## Examples
+ 
+-      iex> JSON.decode!("{\\\"result\\\":\\\"this will be an Elixir result\\\"}")
++      iex> JSONOLD.decode!("{\\\"result\\\":\\\"this will be an Elixir result\\\"}")
+       Enum.into([{"result", "this will be an Elixir result"}], Map.new)
+   """
+   @spec decode!(bitstring) :: term
+@@ -80,14 +80,14 @@
+           "#{__MODULE__}.decode!(#{inspect(bitstring_or_char_list)}} unexpected token #{tok}"
+         end)
+ 
+-        raise JSON.Decoder.UnexpectedTokenError, token: tok
++        raise JSONOLD.Decoder.UnexpectedTokenError, token: tok
+ 
+       {:error, :unexpected_end_of_buffer} ->
+         log(:debug, fn ->
+           "#{__MODULE__}.decode!(#{inspect(bitstring_or_char_list)}} end of buffer"
+         end)
+ 
+-        raise JSON.Decoder.UnexpectedEndOfBufferError
++        raise JSONOLD.Decoder.UnexpectedEndOfBufferError
+ 
+       e ->
+         log(:debug, fn ->
+--- a/deps/rabbitmq_cli/lib/rabbitmq/cli/formatters/json.ex
++++ b/deps/rabbitmq_cli/lib/rabbitmq/cli/formatters/json.ex
+@@ -18,7 +18,7 @@
+   end
+ 
+   def format_output(output, _opts) do
+-    {:ok, json} = JSON.encode(keys_to_atoms(output))
++    {:ok, json} = JSONOLD.encode(keys_to_atoms(output))
+     json
+   end
+ 
+--- a/deps/rabbitmq_cli/lib/rabbitmq/cli/ctl/commands/export_definitions_command.ex
++++ b/deps/rabbitmq_cli/lib/rabbitmq/cli/ctl/commands/export_definitions_command.ex
+@@ -151,7 +151,7 @@
+   defp serialise(raw_map, "json") do
+     # rabbit_definitions already takes care of transforming all
+     # proplists into maps
+-    {:ok, json} = JSON.encode(raw_map)
++    {:ok, json} = JSONOLD.encode(raw_map)
+     json
+   end
+ 
+--- a/deps/rabbitmq_cli/lib/rabbitmq/cli/ctl/commands/list_user_limits_command.ex
++++ b/deps/rabbitmq_cli/lib/rabbitmq/cli/ctl/commands/list_user_limits_command.ex
+@@ -36,7 +36,7 @@
+ 
+       val ->
+         Enum.map(val, fn {user, val} ->
+-          {:ok, val_encoded} = JSON.encode(Map.new(val))
++          {:ok, val_encoded} = JSONOLD.encode(Map.new(val))
+           [user: user, limits: val_encoded]
+         end)
+     end
+@@ -56,7 +56,7 @@
+         {:badrpc, node}
+ 
+       val when is_list(val) or is_map(val) ->
+-        {:ok, val_encoded} = JSON.encode(Map.new(val))
++        {:ok, val_encoded} = JSONOLD.encode(Map.new(val))
+         val_encoded
+     end
+   end
+--- a/deps/rabbitmq_cli/lib/rabbitmq/cli/ctl/commands/list_vhost_limits_command.ex
++++ b/deps/rabbitmq_cli/lib/rabbitmq/cli/ctl/commands/list_vhost_limits_command.ex
+@@ -36,7 +36,7 @@
+ 
+       val ->
+         Enum.map(val, fn {vhost, val} ->
+-          {:ok, val_encoded} = JSON.encode(Map.new(val))
++          {:ok, val_encoded} = JSONOLD.encode(Map.new(val))
+           [vhost: vhost, limits: val_encoded]
+         end)
+     end
+@@ -54,7 +54,7 @@
+         {:badrpc, node}
+ 
+       val when is_list(val) or is_map(val) ->
+-        JSON.encode(Map.new(val))
++        JSONOLD.encode(Map.new(val))
+     end
+   end
+ 
+--- a/deps/rabbitmq_cli/lib/rabbitmq/cli/formatters/json_stream.ex
++++ b/deps/rabbitmq_cli/lib/rabbitmq/cli/formatters/json_stream.ex
+@@ -31,7 +31,7 @@
+   end
+ 
+   def format_output(output, _opts) do
+-    {:ok, json} = JSON.encode(keys_to_atoms(output))
++    {:ok, json} = JSONOLD.encode(keys_to_atoms(output))
+     json
+   end
+ 
+--- a/deps/rabbitmq_cli/lib/rabbitmqctl.ex
++++ b/deps/rabbitmq_cli/lib/rabbitmqctl.ex
+@@ -558,7 +558,7 @@
+   end
+ 
+   defp format_error({:error, :check_failed, err}, %{formatter: "json"}, _) when is_map(err) do
+-    {:ok, res} = JSON.encode(err)
++    {:ok, res} = JSONOLD.encode(err)
+     {:error, ExitCodes.exit_unavailable(), res}
+   end
+ 
+@@ -578,12 +578,12 @@
+ 
+   # Catch all clauses
+   defp format_error({:error, err}, %{formatter: "json"}, _) when is_map(err) do
+-    {:ok, res} = JSON.encode(err)
++    {:ok, res} = JSONOLD.encode(err)
+     {:error, ExitCodes.exit_unavailable(), res}
+   end
+ 
+   defp format_error({:error, exit_code, err}, %{formatter: "json"}, _) when is_map(err) do
+-    {:ok, res} = JSON.encode(err)
++    {:ok, res} = JSONOLD.encode(err)
+     {:error, exit_code, res}
+   end
+ 
+--- a/deps/json/LICENSE
++++ b/deps/json/LICENSE
+@@ -13,7 +13,7 @@
+     the documentation and/or other materials provided with the
+     distribution.
+ 
+-    Neither the name of the Elixir-JSON nor the names of its
++    Neither the name of the Elixir-JSONOLD nor the names of its
+     contributors may be used to endorse or promote products derived
+     from this software without specific prior written permission.
+ 
+--- a/deps/json/README.md
++++ b/deps/json/README.md
+@@ -1,8 +1,8 @@
+-# [Elixir JSON](https://hex.pm/packages/json)
++# [Elixir JSONOLD](https://hex.pm/packages/json)
+ 
+ [![Build Status](https://travis-ci.org/cblage/elixir-json.svg?branch=master)](https://travis-ci.org/cblage/elixir-json) [![Hex.pm](https://img.shields.io/hexpm/dt/json.svg?style=flat-square)](https://hex.pm/packages/json) [![Coverage Status](https://coveralls.io/repos/github/cblage/elixir-json/badge.svg?branch=master)](https://coveralls.io/github/cblage/elixir-json?branch=master) [![Inline docs](http://inch-ci.org/github/cblage/elixir-json.svg)](http://inch-ci.org/github/cblage/elixir-json)
+                                                                                                                                      
+-This library provides a natively implemented JSON encoder and decoder for Elixir.
++This library provides a natively implemented JSONOLD encoder and decoder for Elixir.
+ 
+ You can find the package in [hex.pm](https://hex.pm/packages/json) and the documentation in [hexdocs.pm](https://hexdocs.pm/json/readme.html).
+ 
+@@ -17,26 +17,26 @@
+ Encoding an Elixir type
+ ```elixir
+   @doc "
+-	JSON encode an Elixir list
++	JSONOLD encode an Elixir list
+   "	
+   list = [key: "this will be a value"]
+   is_list(list)
+   # true
+   list[:key]
+   # "this will be a value"
+-  {status, result} = JSON.encode(list)
++  {status, result} = JSONOLD.encode(list)
+   # {:ok, "{\"key\":\"this will be a value\"}"}
+   String.length(result)
+   # 41
+ ```
+ 
+-Decoding a list from a string that contains JSON
++Decoding a list from a string that contains JSONOLD
+ ```elixir
+   @doc "
+-	JSON decode a string into an Elixir list
++	JSONOLD decode a string into an Elixir list
+   "
+   json_input = "{\"key\":\"this will be a value\"}"
+-  {status, list} = JSON.decode(json_input)
++  {status, list} = JSONOLD.decode(json_input)
+ 	{:ok, %{"key" => "this will be a value"}}
+   list[:key]
+   # nil
+@@ -58,4 +58,4 @@
+ Note that, changing only `:logger` level to `:info`, `:warn` or `:error` will silent `:json` too.
+ 
+ # License
+-The Elixir JSON library is available under the [BSD 3-Clause aka "BSD New" license](http://www.tldrlegal.com/l/BSD3)
++The Elixir JSONOLD library is available under the [BSD 3-Clause aka "BSD New" license](http://www.tldrlegal.com/l/BSD3)
+--- a/deps/json/lib/json/decoder.ex
++++ b/deps/json/lib/json/decoder.ex
+@@ -1,6 +1,6 @@
+-defprotocol JSON.Decoder do
++defprotocol JSONOLD.Decoder do
+   @moduledoc """
+-  Defines the protocol required for converting raw JSON into Elixir terms
++  Defines the protocol required for converting raw JSONOLD into Elixir terms
+   """
+ 
+   @doc """
+@@ -10,29 +10,29 @@
+   def decode(bitstring_or_char_list)
+ end
+ 
+-defmodule JSON.Decoder.DefaultImplementations do
++defmodule JSONOLD.Decoder.DefaultImplementations do
+   require Logger
+-  import JSON.Logger
++  import JSONOLD.Logger
+ 
+-  defimpl JSON.Decoder, for: BitString do
++  defimpl JSONOLD.Decoder, for: BitString do
+     @moduledoc """
+-    JSON Decoder implementation for BitString values
++    JSONOLD Decoder implementation for BitString values
+     """
+ 
+-    alias JSON.Parser, as: Parser
++    alias JSONOLD.Parser, as: Parser
+ 
+     @doc """
+     decodes json in BitString format
+ 
+     ## Examples
+ 
+-        iex> JSON.Decoder.decode ""
++        iex> JSONOLD.Decoder.decode ""
+         {:error, :unexpected_end_of_buffer}
+ 
+-        iex> JSON.Decoder.decode "face0ff"
++        iex> JSONOLD.Decoder.decode "face0ff"
+         {:error, {:unexpected_token, "face0ff"}}
+ 
+-        iex> JSON.Decoder.decode "-hello"
++        iex> JSONOLD.Decoder.decode "-hello"
+         {:error, {:unexpected_token, "-hello"}}
+ 
+     """
+@@ -52,7 +52,7 @@
+ 
+         {:ok, value, rest} ->
+           log(:debug, fn ->
+-            "#{__MODULE__}.decode(#{inspect(bitstring)}) trimming remainder of JSON payload #{
++            "#{__MODULE__}.decode(#{inspect(bitstring)}) trimming remainder of JSONOLD payload #{
+               inspect(rest)
+             }..."
+           end)
+@@ -60,7 +60,7 @@
+           case rest |> String.trim() do
+             <<>> ->
+               log(:debug, fn ->
+-                "#{__MODULE__}.decode(#{inspect(bitstring)}) successfully trimmed remainder JSON payload!"
++                "#{__MODULE__}.decode(#{inspect(bitstring)}) successfully trimmed remainder JSONOLD payload!"
+               end)
+ 
+               log(:debug, fn ->
+@@ -80,25 +80,25 @@
+     end
+   end
+ 
+-  defimpl JSON.Decoder, for: List do
++  defimpl JSONOLD.Decoder, for: List do
+     @moduledoc """
+-    JSON Decoder implementation for Charlist values
++    JSONOLD Decoder implementation for Charlist values
+     """
+ 
+-    alias JSON.Decoder, as: Decoder
++    alias JSONOLD.Decoder, as: Decoder
+ 
+     @doc """
+     decodes json in BitString format
+ 
+     ## Examples
+ 
+-        iex> JSON.Decoder.decode ""
++        iex> JSONOLD.Decoder.decode ""
+         {:error, :unexpected_end_of_buffer}
+ 
+-        iex> JSON.Decoder.decode "face0ff"
++        iex> JSONOLD.Decoder.decode "face0ff"
+         {:error, {:unexpected_token, "face0ff"}}
+ 
+-        iex> JSON.Decoder.decode "-hello"
++        iex> JSONOLD.Decoder.decode "-hello"
+         {:error, {:unexpected_token, "-hello"}}
+ 
+     """
+--- a/deps/json/lib/json/encoder.ex
++++ b/deps/json/lib/json/encoder.ex
+@@ -1,21 +1,21 @@
+-defprotocol JSON.Encoder do
++defprotocol JSONOLD.Encoder do
+   @fallback_to_any true
+ 
+   @moduledoc """
+-  Defines the protocol required for converting Elixir types into JSON and inferring their json types.
++  Defines the protocol required for converting Elixir types into JSONOLD and inferring their json types.
+   """
+ 
+   @doc """
+-  Returns a JSON string representation of the Elixir term
++  Returns a JSONOLD string representation of the Elixir term
+ 
+   ## Examples
+-      iex> JSON.Encoder.encode({1, :two, "three"})
++      iex> JSONOLD.Encoder.encode({1, :two, "three"})
+       {:ok, "[1,\\\"two\\\",\\\"three\\\"]"}
+ 
+-      iex> JSON.Encoder.encode([result: "this will be a elixir result"])
++      iex> JSONOLD.Encoder.encode([result: "this will be a elixir result"])
+       {:ok, "{\\\"result\\\":\\\"this will be a elixir result\\\"}"}
+ 
+-      iex> JSON.Encoder.encode(%{a: 1, b: 2})
++      iex> JSONOLD.Encoder.encode(%{a: 1, b: 2})
+       {:ok, "{\\\"a\\\":1,\\\"b\\\":2}"}
+   """
+   @spec encode(tuple | HashDict.t() | list | integer | float | map | list | atom | term) ::
+@@ -23,25 +23,25 @@
+   def encode(term)
+ 
+   @doc """
+-  Returns an atom that reprsents the JSON type for the term
++  Returns an atom that reprsents the JSONOLD type for the term
+ 
+   ## Examples
+-      iex> JSON.Encoder.typeof(3)
++      iex> JSONOLD.Encoder.typeof(3)
+       :number
+ 
+-      iex> JSON.Encoder.typeof({1, :two, "three"})
++      iex> JSONOLD.Encoder.typeof({1, :two, "three"})
+       :array
+ 
+-      iex> JSON.Encoder.typeof([foo: "this will be a elixir result"])
++      iex> JSONOLD.Encoder.typeof([foo: "this will be a elixir result"])
+       :object
+ 
+-      iex> JSON.Encoder.typeof([result: "this will be a elixir result"])
++      iex> JSONOLD.Encoder.typeof([result: "this will be a elixir result"])
+       :object
+ 
+-      iex> JSON.Encoder.typeof(["this will be a elixir result"])
++      iex> JSONOLD.Encoder.typeof(["this will be a elixir result"])
+       :array
+ 
+-      iex> JSON.Encoder.typeof([foo: "bar"])
++      iex> JSONOLD.Encoder.typeof([foo: "bar"])
+       :object
+   """
+   @spec typeof(term) :: atom
+--- a/deps/json/lib/json/encoder/default_implementations.ex
++++ b/deps/json/lib/json/encoder/default_implementations.ex
+@@ -1,20 +1,20 @@
+-defimpl JSON.Encoder, for: Tuple do
++defimpl JSONOLD.Encoder, for: Tuple do
+   @doc """
+-  Encodes an Elixir tuple into a JSON array
++  Encodes an Elixir tuple into a JSONOLD array
+   """
+-  def encode(term), do: term |> Tuple.to_list() |> JSON.Encoder.Helpers.enum_encode()
++  def encode(term), do: term |> Tuple.to_list() |> JSONOLD.Encoder.Helpers.enum_encode()
+ 
+   @doc """
+-  Returns an atom that represents the JSON type for the term
++  Returns an atom that represents the JSONOLD type for the term
+   """
+   def typeof(_), do: :array
+ end
+ 
+-defimpl JSON.Encoder, for: HashDict do
++defimpl JSONOLD.Encoder, for: HashDict do
+   @doc """
+-  Encodes an Elixir HashDict into a JSON object
++  Encodes an Elixir HashDict into a JSONOLD object
+   """
+-  def encode(dict), do: JSON.Encoder.Helpers.dict_encode(dict)
++  def encode(dict), do: JSONOLD.Encoder.Helpers.dict_encode(dict)
+ 
+   @doc """
+   Returns :object
+@@ -22,22 +22,22 @@
+   def typeof(_), do: :object
+ end
+ 
+-defimpl JSON.Encoder, for: List do
++defimpl JSONOLD.Encoder, for: List do
+   @doc """
+-  Encodes an Elixir List into a JSON array
++  Encodes an Elixir List into a JSONOLD array
+   """
+   def encode([]), do: {:ok, "[]"}
+ 
+   def encode(list) do
+     if Keyword.keyword?(list) do
+-      JSON.Encoder.Helpers.dict_encode(list)
++      JSONOLD.Encoder.Helpers.dict_encode(list)
+     else
+-      JSON.Encoder.Helpers.enum_encode(list)
++      JSONOLD.Encoder.Helpers.enum_encode(list)
+     end
+   end
+ 
+   @doc """
+-  Returns an atom that represents the JSON type for the term
++  Returns an atom that represents the JSONOLD type for the term
+   """
+   def typeof([]), do: :array
+ 
+@@ -50,42 +50,42 @@
+   end
+ end
+ 
+-defimpl JSON.Encoder, for: [Integer, Float] do
++defimpl JSONOLD.Encoder, for: [Integer, Float] do
+   @doc """
+-  Converts Elixir Integer and Floats into JSON Numbers
++  Converts Elixir Integer and Floats into JSONOLD Numbers
+   """
+   # Elixir converts octal, etc into decimal when putting in strings
+   def encode(number), do: {:ok, "#{number}"}
+ 
+   @doc """
+-  Returns an atom that represents the JSON type for the term
++  Returns an atom that represents the JSONOLD type for the term
+   """
+   def typeof(_), do: :number
+ end
+ 
+-defimpl JSON.Encoder, for: Atom do
++defimpl JSONOLD.Encoder, for: Atom do
+   @doc """
+-  Converts Elixir Atoms into their JSON equivalents
++  Converts Elixir Atoms into their JSONOLD equivalents
+   """
+   def encode(nil), do: {:ok, "null"}
+   def encode(false), do: {:ok, "false"}
+   def encode(true), do: {:ok, "true"}
+-  def encode(atom) when is_atom(atom), do: atom |> Atom.to_string() |> JSON.Encoder.encode()
++  def encode(atom) when is_atom(atom), do: atom |> Atom.to_string() |> JSONOLD.Encoder.encode()
+ 
+   @doc """
+-  Returns an atom that represents the JSON type for the term
++  Returns an atom that represents the JSONOLD type for the term
+   """
+   def typeof(boolean) when is_boolean(boolean), do: :boolean
+   def typeof(nil), do: :null
+   def typeof(atom) when is_atom(atom), do: :string
+ end
+ 
+-defimpl JSON.Encoder, for: BitString do
++defimpl JSONOLD.Encoder, for: BitString do
+   # 32 = ascii space, cleaner than using "? ", I think
+   @acii_space 32
+ 
+   @doc """
+-  Converts Elixir String into JSON String
++  Converts Elixir String into JSONOLD String
+   """
+   def encode(bitstring), do: {:ok, <<?">> <> encode_binary_recursive(bitstring, []) <> <<?">>}
+ 
+@@ -127,53 +127,53 @@
+   defp zeropad_hexadecimal_unicode_control_character(iolist) when is_list(iolist), do: iolist
+ 
+   @doc """
+-  Returns an atom that represents the JSON type for the term
++  Returns an atom that represents the JSONOLD type for the term
+   """
+   def typeof(_), do: :string
+ end
+ 
+-defimpl JSON.Encoder, for: Record do
++defimpl JSONOLD.Encoder, for: Record do
+   @doc """
+   Encodes elixir records into json objects
+   """
+-  def encode(record), do: record.to_keywords |> JSON.Encoder.Helpers.dict_encode()
++  def encode(record), do: record.to_keywords |> JSONOLD.Encoder.Helpers.dict_encode()
+ 
+   @doc """
+-  Encodes a record into a JSON object
++  Encodes a record into a JSONOLD object
+   """
+   def typeof(_), do: :object
+ end
+ 
+-defimpl JSON.Encoder, for: Map do
++defimpl JSONOLD.Encoder, for: Map do
+   @doc """
+   Encodes maps into object
+   """
+-  def encode(map), do: map |> JSON.Encoder.Helpers.dict_encode()
++  def encode(map), do: map |> JSONOLD.Encoder.Helpers.dict_encode()
+ 
+   @doc """
+-  Returns an atom that represents the JSON type for the term
++  Returns an atom that represents the JSONOLD type for the term
+   """
+   def typeof(_), do: :object
+ end
+ 
+-defimpl JSON.Encoder, for: Any do
++defimpl JSONOLD.Encoder, for: Any do
+   @moduledoc """
+   Falllback module for encoding any other values
+   """
+ 
+   @doc """
+-  Encodes a map into a JSON object
++  Encodes a map into a JSONOLD object
+   """
+   def encode(%{} = struct) do
+     struct
+     |> Map.to_list()
+-    |> JSON.Encoder.Helpers.dict_encode()
++    |> JSONOLD.Encoder.Helpers.dict_encode()
+   end
+ 
+   def encode(x) do
+     x
+     |> Kernel.inspect()
+-    |> JSON.Encoder.encode()
++    |> JSONOLD.Encoder.encode()
+   end
+ 
+   @doc """
+--- a/deps/json/lib/json/encoder/errors.ex
++++ b/deps/json/lib/json/encoder/errors.ex
+@@ -1,30 +1,30 @@
+-defmodule JSON.Decoder.Error do
++defmodule JSONOLD.Decoder.Error do
+   @moduledoc """
+   Thrown when an unknown decoder error happens
+   """
+-  defexception message: "Invalid JSON - unknown error"
++  defexception message: "Invalid JSONOLD - unknown error"
+ end
+ 
+-defmodule JSON.Decoder.UnexpectedEndOfBufferError do
++defmodule JSONOLD.Decoder.UnexpectedEndOfBufferError do
+   @moduledoc """
+   Thrown when the json payload is incomplete
+   """
+-  defexception message: "Invalid JSON - unexpected end of buffer"
++  defexception message: "Invalid JSONOLD - unexpected end of buffer"
+ end
+ 
+-defmodule JSON.Decoder.UnexpectedTokenError do
++defmodule JSONOLD.Decoder.UnexpectedTokenError do
+   @moduledoc """
+   Thrown when the json payload is invalid
+   """
+   defexception token: nil
+ 
+   @doc """
+-    Invalid JSON - Unexpected token
++    Invalid JSONOLD - Unexpected token
+   """
+-  def message(exception), do: "Invalid JSON - unexpected token >>#{exception.token}<<"
++  def message(exception), do: "Invalid JSONOLD - unexpected token >>#{exception.token}<<"
+ end
+ 
+-defmodule JSON.Encoder.Error do
++defmodule JSONOLD.Encoder.Error do
+   @moduledoc """
+   Thrown when an encoder error happens
+   """
+@@ -34,7 +34,7 @@
+     Invalid Term
+   """
+   def message(exception) do
+-    error_message = "An error occurred while encoding the JSON object"
++    error_message = "An error occurred while encoding the JSONOLD object"
+ 
+     if nil != exception.error_info do
+       error_message <> " >>#{exception.error_info}<<"
+--- a/deps/json/lib/json/encoder/helpers.ex
++++ b/deps/json/lib/json/encoder/helpers.ex
+@@ -1,9 +1,9 @@
+-defmodule JSON.Encoder.Helpers do
++defmodule JSONOLD.Encoder.Helpers do
+   @moduledoc """
+-  Helper functions for JSON.Encoder
++  Helper functions for JSONOLD.Encoder
+   """
+ 
+-  alias JSON.Encoder, as: Encoder
++  alias JSONOLD.Encoder, as: Encoder
+ 
+   @doc """
+   Given an enumerable encode the enumerable as an array.
+--- a/deps/json/lib/json/logger.ex
++++ b/deps/json/lib/json/logger.ex
+@@ -1,4 +1,4 @@
+-defmodule JSON.Logger do
++defmodule JSONOLD.Logger do
+   @moduledoc """
+   Exposes separate log level configuration so developers can set logging
+   verbosity for json library
+@@ -41,7 +41,7 @@
+   """
+   defmacro log(level, message) do
+     quote bind_quoted: [level: level, message: message] do
+-      if level in JSON.Logger.allowed_levels() do
++      if level in JSONOLD.Logger.allowed_levels() do
+         Logger.log(level, message)
+       else
+         :ok
+--- a/deps/json/lib/json/parser.ex
++++ b/deps/json/lib/json/parser.ex
+@@ -1,71 +1,71 @@
+-defmodule JSON.Parser do
++defmodule JSONOLD.Parser do
+   @moduledoc """
+-  Implements a JSON Parser for Bitstring values
++  Implements a JSONOLD Parser for Bitstring values
+   """
+ 
+-  alias JSON.Parser, as: Parser
++  alias JSONOLD.Parser, as: Parser
+   alias Parser.Array, as: ArrayParser
+   alias Parser.Number, as: NumberParser
+   alias Parser.Object, as: ObjectParser
+   alias Parser.String, as: StringParser
+ 
+   require Logger
+-  import JSON.Logger
++  import JSONOLD.Logger
+ 
+   @doc """
+-  parses a valid JSON value, returns its elixir representation
++  parses a valid JSONOLD value, returns its elixir representation
+ 
+   ## Examples
+ 
+-      iex> JSON.Parser.parse ""
++      iex> JSONOLD.Parser.parse ""
+       {:error, :unexpected_end_of_buffer}
+ 
+-      iex> JSON.Parser.parse "face0ff"
++      iex> JSONOLD.Parser.parse "face0ff"
+       {:error, {:unexpected_token, "face0ff"}}
+ 
+-      iex> JSON.Parser.parse "-hello"
++      iex> JSONOLD.Parser.parse "-hello"
+       {:error, {:unexpected_token, "-hello"}}
+ 
+-      iex> JSON.Parser.parse "129245"
++      iex> JSONOLD.Parser.parse "129245"
+       {:ok, 129245, ""}
+ 
+-      iex> JSON.Parser.parse "7.something"
++      iex> JSONOLD.Parser.parse "7.something"
+       {:ok, 7, ".something"}
+ 
+-      iex> JSON.Parser.parse "-88.22suffix"
++      iex> JSONOLD.Parser.parse "-88.22suffix"
+       {:ok, -88.22, "suffix"}
+ 
+-      iex> JSON.Parser.parse "-12e4and then some"
++      iex> JSONOLD.Parser.parse "-12e4and then some"
+       {:ok, -1.2e+5, "and then some"}
+ 
+-      iex> JSON.Parser.parse "7842490016E-12-and more"
++      iex> JSONOLD.Parser.parse "7842490016E-12-and more"
+       {:ok, 7.842490016e-3, "-and more"}
+ 
+-      iex> JSON.Parser.parse "null"
++      iex> JSONOLD.Parser.parse "null"
+       {:ok, nil, ""}
+ 
+-      iex> JSON.Parser.parse "false"
++      iex> JSONOLD.Parser.parse "false"
+       {:ok, false, ""}
+ 
+-      iex> JSON.Parser.parse "true"
++      iex> JSONOLD.Parser.parse "true"
+       {:ok, true, ""}
+ 
+-      iex> JSON.Parser.parse "\\\"7.something\\\""
++      iex> JSONOLD.Parser.parse "\\\"7.something\\\""
+       {:ok, "7.something", ""}
+ 
+-      iex> JSON.Parser.parse "\\\"-88.22suffix\\\" foo bar"
++      iex> JSONOLD.Parser.parse "\\\"-88.22suffix\\\" foo bar"
+       {:ok, "-88.22suffix", " foo bar"}
+ 
+-      iex> JSON.Parser.parse "\\\"star -> \\\\u272d <- star\\\""
++      iex> JSONOLD.Parser.parse "\\\"star -> \\\\u272d <- star\\\""
+       {:ok, "star -> ✭ <- star", ""}
+ 
+-      iex> JSON.Parser.parse "[]"
++      iex> JSONOLD.Parser.parse "[]"
+       {:ok, [], ""}
+ 
+-      iex> JSON.Parser.parse "[\\\"foo\\\", 1, 2, 1.5] lala"
++      iex> JSONOLD.Parser.parse "[\\\"foo\\\", 1, 2, 1.5] lala"
+       {:ok, ["foo", 1, 2, 1.5], " lala"}
+ 
+-      iex> JSON.Parser.parse "{\\\"result\\\": \\\"this will be a elixir result\\\"} lalal"
++      iex> JSONOLD.Parser.parse "{\\\"result\\\": \\\"this will be a elixir result\\\"} lalal"
+       {:ok, Enum.into([{"result", "this will be a elixir result"}], Map.new), " lalal"}
+   """
+ 
+--- a/deps/json/lib/json/parser/array.ex
++++ b/deps/json/lib/json/parser/array.ex
+@@ -1,34 +1,34 @@
+-defmodule JSON.Parser.Array do
++defmodule JSONOLD.Parser.Array do
+   @moduledoc """
+-  Implements a JSON Array Parser for Bitstring values
++  Implements a JSONOLD Array Parser for Bitstring values
+   """
+ 
+-  alias JSON.Parser, as: Parser
++  alias JSONOLD.Parser, as: Parser
+ 
+   require Logger
+-  import JSON.Logger
++  import JSONOLD.Logger
+ 
+   @doc """
+-  parses a valid JSON array value, returns its elixir list representation
++  parses a valid JSONOLD array value, returns its elixir list representation
+ 
+   ## Examples
+ 
+-      iex> JSON.Parser.Array.parse ""
++      iex> JSONOLD.Parser.Array.parse ""
+       {:error, :unexpected_end_of_buffer}
+ 
+-      iex> JSON.Parser.Array.parse "[1, 2 "
++      iex> JSONOLD.Parser.Array.parse "[1, 2 "
+       {:error, :unexpected_end_of_buffer}
+ 
+-      iex> JSON.Parser.Array.parse "face0ff"
++      iex> JSONOLD.Parser.Array.parse "face0ff"
+       {:error, {:unexpected_token, "face0ff"}}
+ 
+-      iex> JSON.Parser.Array.parse "[] lala"
++      iex> JSONOLD.Parser.Array.parse "[] lala"
+       {:ok, [], " lala"}
+ 
+-      iex> JSON.Parser.Array.parse "[]"
++      iex> JSONOLD.Parser.Array.parse "[]"
+       {:ok, [], ""}
+ 
+-      iex> JSON.Parser.Array.parse "[\\\"foo\\\", 1, 2, 1.5] lala"
++      iex> JSONOLD.Parser.Array.parse "[\\\"foo\\\", 1, 2, 1.5] lala"
+       {:ok, ["foo", 1, 2, 1.5], " lala"}
+   """
+   def parse(<<?[, rest::binary>>) do
+--- a/deps/json/lib/json/parser/number.ex
++++ b/deps/json/lib/json/parser/number.ex
+@@ -1,38 +1,38 @@
+-defmodule JSON.Parser.Number do
++defmodule JSONOLD.Parser.Number do
+   @moduledoc """
+-  Implements a JSON Numeber Parser for Bitstring values
++  Implements a JSONOLD Numeber Parser for Bitstring values
+   """
+ 
+   @doc """
+-  parses a valid JSON numerical value, returns its elixir numerical representation
++  parses a valid JSONOLD numerical value, returns its elixir numerical representation
+ 
+   ## Examples
+ 
+-      iex> JSON.Parser.Number.parse ""
++      iex> JSONOLD.Parser.Number.parse ""
+       {:error, :unexpected_end_of_buffer}
+ 
+-      iex> JSON.Parser.Number.parse "face0ff"
++      iex> JSONOLD.Parser.Number.parse "face0ff"
+       {:error, {:unexpected_token, "face0ff"}}
+ 
+-      iex> JSON.Parser.Number.parse "-hello"
++      iex> JSONOLD.Parser.Number.parse "-hello"
+       {:error, {:unexpected_token, "hello"}}
+ 
+-      iex> JSON.Parser.Number.parse "129245"
++      iex> JSONOLD.Parser.Number.parse "129245"
+       {:ok, 129245, ""}
+ 
+-      iex> JSON.Parser.Number.parse "7.something"
++      iex> JSONOLD.Parser.Number.parse "7.something"
+       {:ok, 7, ".something"}
+ 
+-      iex> JSON.Parser.Number.parse "7.4566something"
++      iex> JSONOLD.Parser.Number.parse "7.4566something"
+       {:ok, 7.4566, "something"}
+ 
+-      iex> JSON.Parser.Number.parse "-88.22suffix"
++      iex> JSONOLD.Parser.Number.parse "-88.22suffix"
+       {:ok, -88.22, "suffix"}
+ 
+-      iex> JSON.Parser.Number.parse "-12e4and then some"
++      iex> JSONOLD.Parser.Number.parse "-12e4and then some"
+       {:ok, -1.2e+5, "and then some"}
+ 
+-      iex> JSON.Parser.Number.parse "7842490016E-12-and more"
++      iex> JSONOLD.Parser.Number.parse "7842490016E-12-and more"
+       {:ok, 7.842490016e-3, "-and more"}
+   """
+   def parse(<<?-, rest::binary>>) do
+--- a/deps/json/lib/json/parser/object.ex
++++ b/deps/json/lib/json/parser/object.ex
+@@ -1,31 +1,31 @@
+-defmodule JSON.Parser.Object do
++defmodule JSONOLD.Parser.Object do
+   @moduledoc """
+-  Implements a JSON Object Parser for Bitstring values
++  Implements a JSONOLD Object Parser for Bitstring values
+   """
+ 
+-  alias JSON.Parser, as: Parser
++  alias JSONOLD.Parser, as: Parser
+ 
+   @doc """
+-  parses a valid JSON object value, returns its elixir representation
++  parses a valid JSONOLD object value, returns its elixir representation
+ 
+   ## Examples
+ 
+-      iex> JSON.Parser.Object.parse ""
++      iex> JSONOLD.Parser.Object.parse ""
+       {:error, :unexpected_end_of_buffer}
+ 
+-      iex> JSON.Parser.Object.parse "face0ff"
++      iex> JSONOLD.Parser.Object.parse "face0ff"
+       {:error, {:unexpected_token, "face0ff"}}
+ 
+-      iex> JSON.Parser.Object.parse "[] "
++      iex> JSONOLD.Parser.Object.parse "[] "
+       {:error, {:unexpected_token, "[] "}}
+ 
+-      iex> JSON.Parser.Object.parse "[]"
++      iex> JSONOLD.Parser.Object.parse "[]"
+       {:error, {:unexpected_token, "[]"}}
+ 
+-      iex> JSON.Parser.Object.parse "[\\\"foo\\\", 1, 2, 1.5] lala"
++      iex> JSONOLD.Parser.Object.parse "[\\\"foo\\\", 1, 2, 1.5] lala"
+       {:error, {:unexpected_token, "[\\\"foo\\\", 1, 2, 1.5] lala"}}
+ 
+-      iex> JSON.Parser.Object.parse "{\\\"result\\\": \\\"this will be a elixir result\\\"} lalal"
++      iex> JSONOLD.Parser.Object.parse "{\\\"result\\\": \\\"this will be a elixir result\\\"} lalal"
+       {:ok, Enum.into([{"result", "this will be a elixir result"}], Map.new), " lalal"}
+   """
+   def parse(<<?{, rest::binary>>) do
+--- a/deps/json/lib/json/parser/string.ex
++++ b/deps/json/lib/json/parser/string.ex
+@@ -1,45 +1,45 @@
+-defmodule JSON.Parser.String do
++defmodule JSONOLD.Parser.String do
+   @moduledoc """
+-  Implements a JSON String Parser for Bitstring values
++  Implements a JSONOLD String Parser for Bitstring values
+   """
+ 
+-  alias JSON.Parser.Unicode, as: UnicodeParser
++  alias JSONOLD.Parser.Unicode, as: UnicodeParser
+ 
+   use Bitwise
+ 
+   @doc """
+-  parses a valid JSON string, returns its elixir representation
++  parses a valid JSONOLD string, returns its elixir representation
+ 
+   ## Examples
+ 
+-      iex> JSON.Parser.String.parse ""
++      iex> JSONOLD.Parser.String.parse ""
+       {:error, :unexpected_end_of_buffer}
+ 
+-      iex> JSON.Parser.String.parse "face0ff"
++      iex> JSONOLD.Parser.String.parse "face0ff"
+       {:error, {:unexpected_token, "face0ff"}}
+ 
+-      iex> JSON.Parser.String.parse "-hello"
++      iex> JSONOLD.Parser.String.parse "-hello"
+       {:error, {:unexpected_token, "-hello"}}
+ 
+-      iex> JSON.Parser.String.parse "129245"
++      iex> JSONOLD.Parser.String.parse "129245"
+       {:error, {:unexpected_token, "129245"}}
+ 
+-      iex> JSON.Parser.String.parse "\\\"7.something\\\""
++      iex> JSONOLD.Parser.String.parse "\\\"7.something\\\""
+       {:ok, "7.something", ""}
+ 
+-      iex> JSON.Parser.String.parse "\\\"-88.22suffix\\\" foo bar"
++      iex> JSONOLD.Parser.String.parse "\\\"-88.22suffix\\\" foo bar"
+       {:ok, "-88.22suffix", " foo bar"}
+ 
+-      iex> JSON.Parser.String.parse "\\\"star -> \\\\u272d <- star\\\""
++      iex> JSONOLD.Parser.String.parse "\\\"star -> \\\\u272d <- star\\\""
+       {:ok, "star -> ✭ <- star", ""}
+ 
+-      iex> JSON.Parser.String.parse "\\\"\\\\u00df ist wunderbar\\\""
++      iex> JSONOLD.Parser.String.parse "\\\"\\\\u00df ist wunderbar\\\""
+       {:ok, "ß ist wunderbar", ""}
+ 
+-      iex> JSON.Parser.String.parse "\\\"Rafaëlla\\\" foo bar"
++      iex> JSONOLD.Parser.String.parse "\\\"Rafaëlla\\\" foo bar"
+       {:ok, "Rafaëlla", " foo bar"}
+ 
+-      iex> JSON.Parser.String.parse "\\\"Éloise woot\\\" Éloise"
++      iex> JSONOLD.Parser.String.parse "\\\"Éloise woot\\\" Éloise"
+       {:ok, "Éloise woot", " Éloise"}
+   """
+   def parse(<<?"::utf8, json::binary>>), do: parse_string_contents(json, [])
+--- a/deps/json/lib/json/parser/unicode.ex
++++ b/deps/json/lib/json/parser/unicode.ex
+@@ -1,6 +1,6 @@
+-defmodule JSON.Parser.Unicode do
++defmodule JSONOLD.Parser.Unicode do
+   @moduledoc """
+-  Implements a JSON Unicode Parser for Bitstring values
++  Implements a JSONOLD Unicode Parser for Bitstring values
+   """
+ 
+   use Bitwise
+@@ -11,13 +11,13 @@
+ 
+   ## Examples
+ 
+-      iex> JSON.Parser.parse ""
++      iex> JSONOLD.Parser.parse ""
+       {:error, :unexpected_end_of_buffer}
+ 
+-      iex> JSON.Parser.parse "face0ff"
++      iex> JSONOLD.Parser.parse "face0ff"
+       {:error, {:unexpected_token, "face0ff"}}
+ 
+-      iex> JSON.Parser.parse "-hello"
++      iex> JSONOLD.Parser.parse "-hello"
+       {:error, {:unexpected_token, "-hello"}}
+ 
+   """
+--- a/deps/json/mix.exs
++++ b/deps/json/mix.exs
+@@ -1,4 +1,4 @@
+-defmodule ElixirJSON_140_SNAPSHOT.Mixfile do
++defmodule ElixirJSONOLD_140_SNAPSHOT.Mixfile do
+   use Mix.Project
+ 
+   @version "1.4.1"
+@@ -9,7 +9,7 @@
+       version: @version,
+       elixir: "~> 1.7",
+       deps: deps(Mix.env()),
+-      description: "The First Native Elixir library for JSON encoding and decoding",
++      description: "The First Native Elixir library for JSONOLD encoding and decoding",
+       package: package(),
+       source_url: "https://github.com/cblage/elixir-json",
+       homepage_url: "https://hex.pm/packages/json",
+@@ -45,7 +45,7 @@
+   defp docs() do
+     [
+       main: "readme",
+-      name: "JSON",
++      name: "JSONOLD",
+       source_ref: "v#{@version}",
+       canonical: "http://hexdocs.pm/json",
+       source_url: "https://github.com/cblage/elixir-json",

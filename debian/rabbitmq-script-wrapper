@@ -29,6 +29,12 @@ cd /var/lib/rabbitmq
 
 SCRIPT=`basename $0`
 
+if [ "${SCRIPT}" = "rabbitmq-plugins" ] ; then
+        if [ -z "${PLUGINS_DIR}" ] ; then
+                export PLUGINS_DIR=/usr/lib/rabbitmq/lib/rabbitmq_server-4.0.5/plugins
+        fi
+fi
+
 if [ `id -u` = `id -u rabbitmq` -a "$SCRIPT" = "rabbitmq-server" ] ; then
     /usr/lib/rabbitmq/bin/rabbitmq-server "$@"  > "/var/log/rabbitmq/startup_log" 2> "/var/log/rabbitmq/startup_err"
 elif [ `id -u` = `id -u rabbitmq` -o "$SCRIPT" = "rabbitmq-plugins" ] ; then

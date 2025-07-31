@@ -53,7 +53,7 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	chmod 0400 /var/lib/rabbitmq/.erlang.cookie
 
 	chown -R rabbitmq:rabbitmq /var/lib/rabbitmq
-	chown -R rabbitmq:rabbitmq /var/log/rabbitmq
+	chown -R rabbitmq:adm /var/log/rabbitmq
 fi
 
 #DEBHELPER#
