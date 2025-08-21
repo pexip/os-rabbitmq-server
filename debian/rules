@@ -2,7 +2,7 @@
 # -*- makefile -*-
 
 DEB_DESTDIR=debian/rabbitmq-server
-VERSION = $(shell dpkg-parsechangelog -SVersion | sed -e 's/^[[:digit:]]*://' -e 's/[-].*//' -e 's/~/.0/' -e 's/+dfsg1//' | head -n 1)
+export PROJECT_VERSION=$(shell dpkg-parsechangelog -SVersion | sed -e 's/^[[:digit:]]*://' -e 's/[-].*//' -e 's/~/.0/' -e 's/+dfsg1//' | head -n 1)
 
 export LC_ALL=en_US.UTF-8
 export LANG=en_US.UTF-8
@@ -24,7 +24,7 @@ export PREFIX RMQ_ROOTDIR
 
 override_dh_auto_install: PREFIX = /usr
 override_dh_auto_install: RMQ_ROOTDIR = $(PREFIX)/lib/rabbitmq
-override_dh_auto_install: RMQ_ERLAPP_DIR = $(RMQ_ROOTDIR)/lib/rabbitmq_server-$(VERSION)
+override_dh_auto_install: RMQ_ERLAPP_DIR = $(RMQ_ROOTDIR)/lib/rabbitmq_server-$(PROJECT_VERSION)
 override_dh_auto_install:
 	dh_auto_install
 	#dh_auto_install -- DESTDIR=$(DEB_DESTDIR) PREFIX=/usr MAN_DIR=$(DEB_DESTDIR)/usr/share/man
@@ -59,7 +59,7 @@ override_dh_auto_install:
 
 override_dh_install:
 	dh_install
-	sed -i s/%%VSN%%/$(VERSION)/ $(CURDIR)/debian/rabbitmq-server/usr/bin/rabbitmqadmin
+	sed -i s/%%VSN%%/$(PROJECT_VERSION)/ $(CURDIR)/debian/rabbitmq-server/usr/bin/rabbitmqadmin
 
 override_dh_auto_clean:
 	rm -f plugins-src/rabbitmq-server plugins/README
