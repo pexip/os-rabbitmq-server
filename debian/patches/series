@@ -1,4 +1,5 @@
 lets-use-python3-not-python-binary.patch
 rabbitmq-dist.mk.patch
 elixir-1.18-compat.patch
+CVE-2025-50200_Fix_Cowboy_crashes_caused_by_double_reply.patch
 logging.patch
