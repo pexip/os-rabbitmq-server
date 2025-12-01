@@ -1,3 +1,9 @@
+rabbitmq-server (4.0.5-6+deb13u2+pexip25u1) pexip-trixie; urgency=medium
+
+  * New upstream release
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Mon, 01 Dec 2025 12:56:31 +0000
+
 rabbitmq-server (4.0.5-6+deb13u2) trixie; urgency=medium
 
   * CVE-2025-50200: In versions 3.13.7 and prior, RabbitMQ is logging
