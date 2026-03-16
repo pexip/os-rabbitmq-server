@@ -27,6 +27,11 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 		chown rabbitmq:rabbitmq /etc/rabbitmq/enabled_plugins
 	fi
 
+	if LC_ALL=C dpkg --compare-versions "$2" lt-nl "4.0"; then
+		# no direct upgrade path from 3.x to 4.x, so nuke the data
+		rm -rf /var/lib/rabbitmq/mnesia
+	fi
+
 	mkdir -p /var/lib/rabbitmq/mnesia
 	chmod 750 /var/lib/rabbitmq/mnesia
 	chmod -R o-rwx,g-w /var/lib/rabbitmq/mnesia
