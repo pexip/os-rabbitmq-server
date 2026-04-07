@@ -1,3 +1,5 @@
+Provide extra logging at shutdown time
+
 --- a/deps/rabbit/src/rabbit.erl
 +++ b/deps/rabbit/src/rabbit.erl
 @@ -507,7 +507,8 @@
