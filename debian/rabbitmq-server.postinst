@@ -20,9 +20,10 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 
 	mkdir -p /etc/rabbitmq
 	chown rabbitmq:rabbitmq /etc/rabbitmq
-	if [ -r /usr/share/rabbitmq/rabbitmq-env.conf ] && ! [ -e /etc/rabbitmq/rabbitmq-env.conf ] ; then
+	# We always want to take the new conf file
+	# if [ -r /usr/share/rabbitmq/rabbitmq-env.conf ] && ! [ -e /etc/rabbitmq/rabbitmq-env.conf ] ; then
 		install -m 0644 -o rabbitmq -g rabbitmq /usr/share/rabbitmq/rabbitmq-env.conf /etc/rabbitmq/rabbitmq-env.conf
-	fi
+	# fi
 	if [ -f /etc/rabbitmq/enabled_plugins ] ; then
 		chown rabbitmq:rabbitmq /etc/rabbitmq/enabled_plugins
 	fi
